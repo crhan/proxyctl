@@ -56,20 +56,44 @@ proxyctl bench proxy claude       # 测指定组
 
 ## 安装
 
-### 1. 克隆仓库
+### 快速安装
+
 ```bash
+# 1. 克隆仓库
 git clone https://github.com/crhan/proxyctl.git
 cd proxyctl
+
+# 2. 运行安装脚本
+./install.sh
+
+# 3. 配置 API
+nano ~/.config/proxyctl/config.yaml
+# 填入 api_secret: your-clash-api-secret
+
+# 4. 验证
+proxyctl --help
+proxyctl status
 ```
 
-### 2. 配置
+### 手动安装
+
 ```bash
+# 1. 克隆仓库
+git clone https://github.com/crhan/proxyctl.git
+cd proxyctl
+
+# 2. 复制文件
+cp bin/proxyctl ~/.local/bin/
+chmod +x ~/.local/bin/proxyctl
+
+# 3. 配置
 mkdir -p ~/.config/proxyctl
 cp config.yaml.example ~/.config/proxyctl/config.yaml
 # 编辑 config.yaml，填入 api_secret
 ```
 
-### 3. 安装依赖
+### 安装后端
+
 ```bash
 # Mihomo 后端（首发支持）
 brew install mihomo
@@ -78,17 +102,7 @@ brew install mihomo
 brew install sing-box
 ```
 
-### 4. 部署
-```bash
-# 复制 launchdaemons
-sudo cp launchdaemons/*.plist /Library/LaunchDaemons/
-
-# 复制脚本
-sudo cp scripts/* /opt/homebrew/bin/
-
-# 主程序 symlink
-ln -s $(pwd)/bin/proxyctl ~/.local/bin/proxyctl
-```
+详细安装指南请参考 [docs/INSTALL.md](docs/INSTALL.md)
 
 ## 配置示例
 
