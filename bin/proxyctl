@@ -1,0 +1,810 @@
+#!/usr/bin/env python3
+"""proxyctl — Proxy configuration lifecycle management
+
+支持 Mihomo 后端（首发）/ Sing-box 后端（预留）
+
+用法：proxyctl [start|stop|restart|status|log|check|fix|recover|
+               mode|audit|trace|bench|dns-lock|dns-unlock]
+"""
+
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+
+# ── 路径常量 ────────────────────────────────────────────────────────────────
+HOME = os.path.expanduser("~")
+DEFAULT_CONFIG_DIR = os.path.join(HOME, ".config", "proxyctl")
+CONFIG_FILE = os.path.join(DEFAULT_CONFIG_DIR, "config.yaml")
+
+# 默认后端：mihomo（首发支持）
+DEFAULT_BACKEND = "mihomo"
+
+# ── 颜色 ────────────────────────────────────────────────────────────────────
+RED = "\033[0;31m"
+GREEN = "\033[0;32m"
+YELLOW = "\033[0;33m"
+CYAN = "\033[0;36m"
+BOLD = "\033[1m"
+NC = "\033[0m"
+
+# ── 默认配置（可通过 config.yaml 覆盖）───────────────────────────────────────
+DEFAULTS = {
+    "backend": "mihomo",  # mihomo | singbox
+    "api_base": "http://127.0.0.1:9090",
+    "api_secret": "",     # 必填：Clash API Bearer token
+    "config_dir": os.path.join(HOME, ".config"),
+    "dns_lock_label": "com.proxyctl.dns-lock",
+}
+
+SCRIPTS_DIR = os.path.dirname(os.path.realpath(__file__))
+
+
+def load_config() -> dict:
+    """加载配置文件，返回合并后的配置字典。"""
+    cfg = DEFAULTS.copy()
+    if os.path.isfile(CONFIG_FILE):
+        try:
+            import yaml
+            with open(CONFIG_FILE) as f:
+                user_cfg = yaml.safe_load(f) or {}
+            cfg.update(user_cfg)
+        except Exception as e:
+            print(f"{YELLOW}警告：读取配置文件失败：{e}{NC}")
+            print(f"  使用默认配置，可能需要在 {CONFIG_FILE} 中配置 api_secret")
+    return cfg
+
+
+# ── 后端类 ───────────────────────────────────────────────────────────────────
+
+class Backend:
+    """后端抽象基类"""
+
+    def __init__(self, name: str, config: dict):
+        self.name = name
+        self.config = config
+        self.config_dir = config.get("config_dir", os.path.join(HOME, ".config"))
+
+    @property
+    def label(self) -> str:
+        raise NotImplementedError
+
+    @property
+    def plist(self) -> str:
+        raise NotImplementedError
+
+    @property
+    def config_file(self) -> str:
+        raise NotImplementedError
+
+    @property
+    def cache_file(self) -> str:
+        raise NotImplementedError
+
+    @property
+    def log_file(self) -> str:
+        raise NotImplementedError
+
+
+class MihomoBackend(Backend):
+    """Mihomo (Clash) 后端实现"""
+
+    def __init__(self, config: dict):
+        super().__init__("mihomo", config)
+
+    @property
+    def label(self) -> str:
+        return "system/com.mihomo.tun"
+
+    @property
+    def plist(self) -> str:
+        return "/Library/LaunchDaemons/com.mihomo.tun.plist"
+
+    @property
+    def config_file(self) -> str:
+        return os.path.join(self.config_dir, "mihomo", "config.yaml")
+
+    @property
+    def cache_file(self) -> str:
+        return os.path.join(self.config_dir, "mihomo", "cache.db")
+
+    @property
+    def log_file(self) -> str:
+        return os.path.join(self.config_dir, "mihomo", "mihomo.log")
+
+
+class SingboxBackend(Backend):
+    """Sing-box 后端实现（预留）"""
+
+    def __init__(self, config: dict):
+        super().__init__("singbox", config)
+
+    @property
+    def label(self) -> str:
+        return "system/com.singbox.tun"
+
+    @property
+    def plist(self) -> str:
+        return "/Library/LaunchDaemons/com.singbox.tun.plist"
+
+    @property
+    def config_file(self) -> str:
+        return os.path.join(self.config_dir, "sing-box", "config.json")
+
+    @property
+    def cache_file(self) -> str:
+        return os.path.join(self.config_dir, "sing-box", "cache.db")
+
+    @property
+    def log_file(self) -> str:
+        return os.path.join(self.config_dir, "sing-box", "sing-box.log")
+
+
+def get_backend(config: dict) -> Backend:
+    """根据配置返回后端实例。"""
+    backend_name = config.get("backend", DEFAULT_BACKEND)
+    if backend_name == "mihomo":
+        return MihomoBackend(config)
+    else:
+        return SingboxBackend(config)
+
+
+# ── 基础工具 ─────────────────────────────────────────────────────────────────
+
+def run(cmd: list, *, sudo: bool = False, check: bool = False,
+        capture: bool = False, stdin_text: str = None) -> subprocess.CompletedProcess:
+    """执行系统命令。sudo=True 自动加 sudo，capture=True 返回文本输出。"""
+    if sudo:
+        cmd = ["sudo"] + cmd
+    kw: dict = {"check": check}
+    if capture:
+        kw["capture_output"] = True
+        kw["text"] = True
+    if stdin_text is not None:
+        kw["input"] = stdin_text
+        kw["text"] = True
+    return subprocess.run(cmd, **kw)
+
+
+def run_out(cmd: list, *, sudo: bool = False) -> str:
+    """执行命令，返回 stdout；失败返回空字符串。"""
+    r = run(cmd, sudo=sudo, capture=True)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def wait_port(port: int, timeout: float = 10.0) -> bool:
+    """轮询直到 127.0.0.1:port 就绪，超时返回 False。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                return True
+        except OSError:
+            time.sleep(0.3)
+    return False
+
+
+def list_network_services() -> list:
+    """返回系统所有网络服务名称（过滤掉 * 前缀的禁用项）。"""
+    out = run_out(["networksetup", "-listallnetworkservices"])
+    return [s for s in out.splitlines()[1:] if not s.startswith("*")]
+
+
+def launchctl_running(label: str, *, sudo: bool = False) -> bool:
+    """检查 launchctl 服务是否在运行。"""
+    r = run(["launchctl", "print", label], sudo=sudo, capture=True)
+    return r.returncode == 0
+
+
+def scutil_exec(script: str):
+    """向 sudo scutil stdin 写入脚本并执行。"""
+    run(["scutil"], sudo=True, stdin_text=script)
+
+
+def get_mode(backend: Backend) -> str:
+    """从配置文件读取当前模式 (tun/proxy/mixed/unknown)。"""
+    try:
+        if backend.name == "mihomo":
+            text = open(backend.config_file).read()
+            tun_m = re.search(r'^tun:\s*\n((?:\s+.*\n)*)', text, re.M)
+            tun_block = tun_m.group(0) if tun_m else ""
+            tun_on = bool(re.search(r'enable:\s*true', tun_block))
+            auto_rt = bool(re.search(r'auto-route:\s*true', tun_block))
+            fakeip = bool(re.search(r'enhanced-mode:\s*fake-ip', text))
+            if tun_on and auto_rt and fakeip:
+                return "tun"
+            elif not auto_rt and not fakeip:
+                return "proxy"
+            return "mixed"
+        else:
+            cfg = json.load(open(backend.config_file))
+            ar = True
+            for ib in cfg.get("inbounds", []):
+                if ib.get("type") == "tun":
+                    ar = ib.get("auto_route", True)
+                    break
+            fakeip = any(r.get("server") == "fakeip-dns"
+                         for r in cfg.get("dns", {}).get("rules", []))
+            if ar and fakeip:
+                return "tun"
+            elif not ar and not fakeip:
+                return "proxy"
+            return "mixed"
+    except Exception:
+        return "unknown"
+
+
+def get_primary_resolver() -> str:
+    """返回 scutil --dns resolver #1 的第一个 nameserver。"""
+    r = subprocess.run(["scutil", "--dns"], capture_output=True, text=True)
+    in_r1 = False
+    for line in r.stdout.splitlines():
+        if "resolver #1" in line:
+            in_r1 = True
+        if in_r1 and "nameserver[0]" in line:
+            return line.split()[-1]
+    return ""
+
+
+# ── DNS 联动 ─────────────────────────────────────────────────────────────────
+
+def dns_activate():
+    """设置系统 DNS → 127.0.0.1（三层防线）。"""
+    # 层 1: networksetup 对抗 DHCP
+    for svc in list_network_services():
+        run(["networksetup", "-setdnsservers", svc, "127.0.0.1"])
+
+    # 层 2: 劫持 AnyConnect 自己的 DNS 条目
+    ac_key = "State:/Network/Service/com.cisco.anyconnect/DNS"
+    r = subprocess.run(["sudo", "scutil"], input=f"show {ac_key}\n",
+                       capture_output=True, text=True)
+    if "ServerAddresses" in r.stdout:
+        domain = search_order = ""
+        for line in r.stdout.splitlines():
+            if "DomainName" in line and ":" in line and not domain:
+                domain = line.split(":", 1)[1].strip()
+            elif "SearchOrder" in line and ":" in line and not search_order:
+                search_order = line.split(":", 1)[1].strip()
+        domain = domain or "hz.ali.com"
+        search_order = search_order or "1"
+        scutil_exec(
+            f"d.init\n"
+            f"d.add DomainName {domain}\n"
+            f"d.add SearchDomains * {domain}\n"
+            f"d.add SearchOrder # {search_order}\n"
+            f"d.add ServerAddresses * 127.0.0.1\n"
+            f"d.add SupplementalMatchDomains * \"\" {domain}\n"
+            f"set {ac_key}\n"
+        )
+
+    # 层 3: scutil 兜底 order:0
+    scutil_exec(
+        "d.init\n"
+        "d.add ServerAddresses * 127.0.0.1\n"
+        "d.add SupplementalMatchOrder # 0\n"
+        "set State:/Network/Service/proxyctl-dns-override/DNS\n"
+    )
+
+    run(["dscacheutil", "-flushcache"], sudo=True)
+    run(["killall", "-HUP", "mDNSResponder"], sudo=True)
+
+
+def dns_deactivate():
+    """还原系统 DNS → DHCP（清除三层注入）。"""
+    # 层 1: 清空手动 DNS
+    for svc in list_network_services():
+        run(["networksetup", "-setdnsservers", svc, "empty"])
+
+    # 层 2: 删除 scutil 兜底 resolver
+    scutil_exec("remove State:/Network/Service/proxyctl-dns-override/DNS\n")
+
+    # 层 3: 还原 AnyConnect DNS key（如果还指向 127.0.0.1，防止 DNS 全挂）
+    ac_key = "State:/Network/Service/com.cisco.anyconnect/DNS"
+    r = subprocess.run(["sudo", "scutil"], input=f"show {ac_key}\n",
+                       capture_output=True, text=True)
+    addr = ""
+    for line in r.stdout.splitlines():
+        if "0 :" in line:
+            addr = line.split(":", 1)[1].strip()
+            break
+    if addr == "127.0.0.1":
+        scutil_exec(
+            "d.init\n"
+            "d.add ServerAddresses * 30.64.127.127 FD00:1:1010::1\n"
+            "d.add DomainName hz.ali.com\n"
+            "d.add SearchDomains * hz.ali.com\n"
+            "d.add SearchOrder # 1\n"
+            "d.add SupplementalMatchDomains * \"\" hz.ali.com\n"
+            f"set {ac_key}\n"
+        )
+
+    run(["dscacheutil", "-flushcache"], sudo=True)
+    run(["killall", "-HUP", "mDNSResponder"], sudo=True)
+
+
+def dns_lock_start(config: dict):
+    """启动 dns-lock watchdog daemon。"""
+    dns_lock_label = config.get("dns_lock_label", DEFAULTS["dns_lock_label"])
+    dns_lock_plist_src = os.path.join(DEFAULT_CONFIG_DIR, "launchdaemons", f"{dns_lock_label}.plist")
+    dns_lock_plist = f"/Library/LaunchDaemons/{dns_lock_label}.plist"
+    dns_watchdog = os.path.join(DEFAULT_CONFIG_DIR, "scripts", "dns-watchdog")
+
+    if os.path.isfile(dns_lock_plist) and not launchctl_running(f"system/{dns_lock_label}"):
+        run(["launchctl", "bootstrap", "system", dns_lock_plist], sudo=True)
+
+
+def dns_lock_stop(config: dict):
+    """停止 dns-lock watchdog daemon。"""
+    dns_lock_label = config.get("dns_lock_label", DEFAULTS["dns_lock_label"])
+    if launchctl_running(f"system/{dns_lock_label}"):
+        run(["launchctl", "bootout", f"system/{dns_lock_label}"], sudo=True)
+
+
+# ── 系统代理联动 ──────────────────────────────────────────────────────────────
+
+def proxy_activate():
+    """设置系统 HTTP/HTTPS/SOCKS 代理 → 127.0.0.1:7890。"""
+    for svc in list_network_services():
+        run(["networksetup", "-setwebproxy", svc, "127.0.0.1", "7890"])
+        run(["networksetup", "-setsecurewebproxy", svc, "127.0.0.1", "7890"])
+        run(["networksetup", "-setsocksfirewallproxy", svc, "127.0.0.1", "7890"])
+        run(["networksetup", "-setwebproxystate", svc, "on"])
+        run(["networksetup", "-setsecurewebproxystate", svc, "on"])
+        run(["networksetup", "-setsocksfirewallproxystate", svc, "on"])
+
+
+def proxy_deactivate():
+    """关闭系统代理。"""
+    for svc in list_network_services():
+        run(["networksetup", "-setwebproxystate", svc, "off"])
+        run(["networksetup", "-setsecurewebproxystate", svc, "off"])
+        run(["networksetup", "-setsocksfirewallproxystate", svc, "off"])
+
+
+# ── 引擎启停共用逻辑 ──────────────────────────────────────────────────────────
+
+def _wait_ready(backend: Backend):
+    """等待 DNS(53) + 代理 (7890) 端口就绪，再等 3s 让节点解析稳定。"""
+    wait_port(53, timeout=10)
+    wait_port(7890, timeout=10)
+    time.sleep(3)
+
+
+# ── 命令：start ───────────────────────────────────────────────────────────────
+
+def cmd_start(backend: Backend, config: dict):
+    if not os.path.isfile(backend.plist):
+        src = os.path.join(DEFAULT_CONFIG_DIR, "launchdaemons",
+                           os.path.basename(backend.plist))
+        if not os.path.isfile(src):
+            print(f"{RED}✗{NC} plist 源文件不存在：{src}")
+            sys.exit(1)
+        run(["cp", src, backend.plist], sudo=True)
+
+    r = run(["launchctl", "bootstrap", "system", backend.plist], sudo=True, capture=True)
+    if r.returncode != 0:
+        print(f"{RED}✗{NC} {backend.name} 启动失败")
+        print(r.stderr)
+        sys.exit(1)
+
+    print(f"{backend.name} started")
+    _wait_ready(backend)
+    dns_activate()
+    dns_lock_start(config)
+    print("DNS → 127.0.0.1 (已激活)")
+    if get_mode(backend) == "proxy":
+        proxy_activate()
+        print("系统代理 → 127.0.0.1:7890 (已激活)")
+
+
+# ── 命令：stop ────────────────────────────────────────────────────────────────
+
+def cmd_stop(backend: Backend, config: dict):
+    dns_lock_stop(config)
+    dns_deactivate()
+    proxy_deactivate()
+    print("DNS → DHCP (已还原), 系统代理已关闭")
+    run(["launchctl", "bootout", backend.label], sudo=True)
+    print(f"{backend.name} stopped")
+
+
+# ── 命令：restart ─────────────────────────────────────────────────────────────
+
+def cmd_restart(backend: Backend, config: dict, *, clean: bool = False):
+    if clean and os.path.isfile(backend.cache_file):
+        os.remove(backend.cache_file)
+    run(["launchctl", "kickstart", "-k", backend.label], sudo=True)
+    print(f"{backend.name} restarted{'  (cache cleared)' if clean else ''}")
+    _wait_ready(backend)
+    dns_activate()
+    dns_lock_start(config)
+    print("DNS → 127.0.0.1 (已刷新)")
+    if get_mode(backend) == "proxy":
+        proxy_activate()
+        print("系统代理 → 127.0.0.1:7890")
+    else:
+        proxy_deactivate()
+
+
+# ── 命令：fix ─────────────────────────────────────────────────────────────────
+
+def cmd_fix(backend: Backend, config: dict):
+    api_base = config.get("api_base", DEFAULTS["api_base"])
+    api_secret = config.get("api_secret", "")
+
+    if launchctl_running(backend.label):
+        print(f"{BOLD}[引擎运行中] 修复 DNS → 127.0.0.1{NC}")
+        before = get_primary_resolver()
+        print(f"  修复前 primary resolver: {before or 'unknown'}")
+
+        dns_activate()
+        after = get_primary_resolver()
+        if after == "127.0.0.1":
+            print(f"  {GREEN}✓{NC} primary resolver → 127.0.0.1")
+        else:
+            print(f"  {RED}✗{NC} primary resolver 仍为 {after}，需手动排查")
+
+        if get_mode(backend) == "proxy":
+            proxy_activate()
+            print(f"  {GREEN}✓{NC} 系统代理 → 127.0.0.1:7890")
+
+        if backend.name == "mihomo":
+            subprocess.run(
+                ["curl", "-s", "--noproxy", "*", "-X", "PUT",
+                 f"http://127.0.0.1:9090/configs?force=true",
+                 "-H", f"Authorization: Bearer {api_secret}",
+                 "-H", "Content-Type: application/json",
+                 "-d", json.dumps({"path": backend.config_file})],
+                capture_output=True, timeout=8
+            )
+            print(f"  {GREEN}✓{NC} mihomo 配置已热重载")
+            subprocess.run(
+                ["curl", "-s", "--noproxy", "*", "-X", "PUT",
+                 f"http://127.0.0.1:9090/cache/fakeip",
+                 "-H", f"Authorization: Bearer {api_secret}"],
+                capture_output=True, timeout=5
+            )
+            print(f"  {GREEN}✓{NC} mihomo DNS 缓存已清空")
+
+        print()
+        if before == "127.0.0.1":
+            print(f"{GREEN}{BOLD}一切正常，无需修复。{NC}")
+        else:
+            print(f"{GREEN}{BOLD}修复完成。{NC}")
+            if not launchctl_running(f"system/{config.get('dns_lock_label', DEFAULTS['dns_lock_label'])}"):
+                print(f"{CYAN}建议执行 {BOLD}proxyctl dns-lock{NC}{CYAN} 防止 DNS 再次被覆盖。{NC}")
+    else:
+        print(f"{BOLD}[引擎已停止] 还原系统配置为正常状态{NC}")
+        before = get_primary_resolver()
+
+        if launchctl_running(f"system/{config.get('dns_lock_label', DEFAULTS['dns_lock_label'])}"):
+            dns_lock_stop(config)
+            print(f"  {GREEN}✓{NC} dns-lock 看门狗已停止")
+
+        dns_deactivate()
+        after = get_primary_resolver()
+        print(f"  {GREEN}✓{NC} DNS → DHCP ({after or 'DHCP'})")
+
+        proxy_deactivate()
+        print(f"  {GREEN}✓{NC} 系统代理已关闭")
+
+        print()
+        if before != "127.0.0.1":
+            print(f"{GREEN}{BOLD}一切正常，无需修复。{NC}")
+        else:
+            print(f"{GREEN}{BOLD}还原完成。{NC}")
+
+
+# ── 命令：recover ─────────────────────────────────────────────────────────────
+
+def cmd_recover(backend: Backend, config: dict):
+    """切网后软恢复（清 DNS 缓存 + 重测代理组，不重启进程）"""
+    api_base = config.get("api_base", DEFAULTS["api_base"])
+    api_secret = config.get("api_secret", "")
+
+    if backend.name != "mihomo":
+        print(f"{YELLOW}recover 目前只支持 mihomo 后端；当前后端 {backend.name}{NC}")
+        print(f"请使用 {BOLD}proxyctl restart{NC}")
+        sys.exit(1)
+
+    if not launchctl_running(backend.label):
+        print(f"{RED}✗{NC} {backend.name} 未运行，请先 proxyctl start")
+        sys.exit(1)
+
+    t0 = time.monotonic()
+    auth = ["-H", f"Authorization: Bearer {api_secret}"]
+
+    # 步骤 1: 热重载 config（清 DNS cache）
+    print(f"{BOLD}[1/3]{NC} 热重载配置（清 DNS 缓存）")
+    r = subprocess.run(
+        ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+         "--noproxy", "*", "-X", "PUT",
+         f"{api_base}/configs?force=true",
+         *auth, "-H", "Content-Type: application/json",
+         "-d", json.dumps({"path": backend.config_file})],
+        capture_output=True, text=True, timeout=10
+    )
+    if r.stdout.strip() in ("200", "204"):
+        print(f"  {GREEN}✓{NC} 配置已重载 (HTTP {r.stdout.strip()})")
+    else:
+        print(f"  {RED}✗{NC} 重载失败 (HTTP {r.stdout.strip() or 'n/a'})，回退到 proxyctl restart")
+        sys.exit(2)
+
+    # 步骤 2: flush fakeip cache
+    print(f"{BOLD}[2/3]{NC} 清空 fakeip 缓存")
+    subprocess.run(
+        ["curl", "-s", "-o", "/dev/null", "--noproxy", "*", "-X", "POST",
+         f"{api_base}/cache/fakeip/flush", *auth],
+        capture_output=True, timeout=5
+    )
+    print(f"  {GREEN}✓{NC} fakeip 缓存已清空")
+
+    # 步骤 3: 触发代理组 healthcheck
+    print(f"{BOLD}[3/3]{NC} 触发代理组 healthcheck")
+    r = subprocess.run(
+        ["curl", "-s", "--noproxy", "*", *auth, f"{api_base}/proxies"],
+        capture_output=True, text=True, timeout=5
+    )
+    try:
+        proxies = json.loads(r.stdout).get("proxies", {})
+    except Exception:
+        print(f"  {YELLOW}—{NC} 无法拉取 proxies 列表")
+        sys.exit(2)
+
+    import urllib.parse
+    TEST_URL = "https://www.gstatic.com/generate_204"
+    TIMEOUT_MS = 5000
+    groups_to_test = [
+        name for name, info in proxies.items()
+        if info.get("type") in ("URLTest", "Fallback", "LoadBalance")
+    ]
+    if not groups_to_test:
+        print(f"  {YELLOW}—{NC} 无 url-test 类型组")
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        encoded_url = urllib.parse.quote(TEST_URL, safe="")
+
+        def _test_group(gname: str) -> tuple:
+            encoded = urllib.parse.quote(gname, safe="")
+            endpoint = (f"{api_base}/group/{encoded}/delay"
+                        f"?url={encoded_url}&timeout={TIMEOUT_MS}")
+            rr = subprocess.run(
+                ["curl", "-s", "--noproxy", "*", "--max-time", "10",
+                 *auth, endpoint],
+                capture_output=True, text=True, timeout=12
+            )
+            try:
+                data = json.loads(rr.stdout) if rr.stdout else {}
+            except Exception:
+                data = {}
+            alive = sum(1 for v in data.values() if isinstance(v, int) and v > 0)
+            total = len(data) if data else 0
+            return gname, alive, total
+
+        with ThreadPoolExecutor(max_workers=len(groups_to_test)) as pool:
+            results = list(pool.map(_test_group, groups_to_test))
+
+        for gname, alive, total in results:
+            if total == 0:
+                mark = f"{RED}✗{NC}"
+                detail = "无响应"
+            elif alive == 0:
+                mark = f"{RED}✗{NC}"
+                detail = f"0/{total} 存活"
+            elif alive < total:
+                mark = f"{YELLOW}—{NC}"
+                detail = f"{alive}/{total} 存活"
+            else:
+                mark = f"{GREEN}✓{NC}"
+                detail = f"{alive}/{total} 存活"
+            print(f"  {mark} {CYAN}{gname}{NC}  {detail}")
+
+    elapsed = time.monotonic() - t0
+    print()
+    print(f"{GREEN}{BOLD}recover 完成{NC}  耗时 {elapsed:.1f}s")
+    print(f"建议运行 {BOLD}proxyctl check{NC} 验证恢复情况；若仍失败请 {BOLD}proxyctl restart{NC}")
+
+
+# ── 命令：mode ────────────────────────────────────────────────────────────────
+
+def cmd_mode(backend: Backend, target: str):
+    if not target:
+        cur = get_mode(backend)
+        print(f"当前：backend={backend.name} mode={cur}")
+        print("切换：proxyctl mode tun | proxyctl mode proxy")
+        return
+
+    if target not in ("tun", "proxy"):
+        print("用法：proxyctl mode [tun|proxy]")
+        print("  tun   — 全局接管 (auto_route + fakeip)")
+        print("  proxy — 仅代理端口 (7890 + real DNS)")
+        sys.exit(1)
+
+    if backend.name == "mihomo":
+        _mode_mihomo(backend.config_file, target)
+    else:
+        _mode_singbox(backend.config_file, target)
+
+    if target == "proxy":
+        proxy_activate()
+        print("系统代理 → 127.0.0.1:7890")
+    else:
+        proxy_deactivate()
+        print("系统代理已关闭")
+
+
+def _mode_mihomo(config_path: str, target: str):
+    text = open(config_path).read()
+    if target == "tun":
+        text = re.sub(r'(tun:\s*\n(?:\s*#[^\n]*\n)*\s*enable:\s*)false', r'\1true', text)
+        text = re.sub(r'(auto-route:\s*)false', r'\1true', text)
+        text = re.sub(r'enhanced-mode:\s*redir-host', 'enhanced-mode: fake-ip', text)
+        msg = "已切换到 tun 模式 (auto_route + fakeip)"
+    else:
+        text = re.sub(r'(tun:\s*\n(?:\s*#[^\n]*\n)*\s*enable:\s*)true', r'\1false', text)
+        text = re.sub(r'(auto-route:\s*)true', r'\1false', text)
+        text = re.sub(r'enhanced-mode:\s*fake-ip', 'enhanced-mode: redir-host', text)
+        msg = "已切换到 proxy_only 模式 (7890 + redir-host)"
+    open(config_path, "w").write(text)
+    print(msg)
+    print("执行 proxyctl restart 生效")
+
+
+def _mode_singbox(config_path: str, target: str):
+    cfg = json.load(open(config_path))
+    for ib in cfg.get("inbounds", []):
+        if ib.get("type") == "tun":
+            ib["auto_route"] = (target == "tun")
+            break
+    for rule in cfg.get("dns", {}).get("rules", []):
+        qt = rule.get("query_type", [])
+        if "A" in qt and "AAAA" in qt:
+            rule["server"] = "fakeip-dns" if target == "tun" else "proxy-dns"
+            break
+    with open(config_path, "w") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    if target == "tun":
+        print("已切换到 tun 模式 (auto_route + fakeip)")
+    else:
+        print("已切换到 proxy_only 模式 (7890 + real DNS)")
+    print("执行 proxyctl restart 生效")
+
+
+# ── 命令：dns-lock / dns-unlock ───────────────────────────────────────────────
+
+def cmd_dns_lock(config: dict):
+    dns_lock_label = config.get("dns_lock_label", DEFAULTS["dns_lock_label"])
+    dns_lock_plist = f"/Library/LaunchDaemons/{dns_lock_label}.plist"
+    dns_lock_plist_src = os.path.join(DEFAULT_CONFIG_DIR, "launchdaemons", f"{dns_lock_label}.plist")
+    dns_watchdog = os.path.join(DEFAULT_CONFIG_DIR, "scripts", "dns-watchdog")
+
+    if launchctl_running(f"system/{dns_lock_label}"):
+        print("dns-lock daemon 已在运行")
+        return
+    if not os.path.isfile(dns_lock_plist_src):
+        print(f"错误：源文件不存在 {dns_lock_plist_src}")
+        sys.exit(1)
+    if not os.access(dns_watchdog, os.X_OK):
+        print(f"错误：看门狗脚本不可执行 {dns_watchdog}")
+        sys.exit(1)
+    run(["cp", dns_lock_plist_src, dns_lock_plist], sudo=True)
+    run(["launchctl", "bootstrap", "system", dns_lock_plist], sudo=True)
+    print(f"{GREEN}dns-lock daemon 已安装并启动{NC}")
+    print(f"源文件：{dns_lock_plist_src}")
+
+
+def cmd_dns_unlock(config: dict):
+    dns_lock_label = config.get("dns_lock_label", DEFAULTS["dns_lock_label"])
+    dns_lock_plist = f"/Library/LaunchDaemons/{dns_lock_label}.plist"
+
+    r = run(["launchctl", "bootout", f"system/{dns_lock_label}"], sudo=True, capture=True)
+    if r.returncode == 0:
+        print(f"{GREEN}dns-lock daemon 已停止{NC}")
+    else:
+        print("dns-lock daemon 未在运行")
+    run(["rm", "-f", dns_lock_plist], sudo=True)
+    print(f"已删除 {dns_lock_plist} (源文件保留在 {DEFAULT_CONFIG_DIR}/launchdaemons/)")
+
+
+# ── 帮助 ──────────────────────────────────────────────────────────────────────
+
+def cmd_help():
+    print("用法：proxyctl <command>\n")
+    print("基础操作:")
+    print("  start|stop|restart      启停后端")
+    print("  restart-clean           重启并清除缓存")
+    print("  status                  系统状态面板")
+    print("  log                     查看后端日志")
+    print("  fix                     修复 DNS/代理/刷新缓存")
+    print("  recover                 切网后软恢复（清 DNS 缓存 + 重测代理组，不重启）\n")
+    print("诊断:")
+    print("  check                   全面健康检查")
+    print("  bench [group...]        代理组测速（默认测全部组）")
+    print("  trace <domain>          域名链路诊断\n")
+    print("配置:")
+    print("  mode [tun|proxy]        切换模式")
+    print("  dns-lock|dns-unlock     DNS 看门狗\n")
+    print("审计:")
+    print("  audit [天数]            扫描日志，找疑似应直连的域名")
+    print("  audit apply             扫描 + 自动写入 config")
+    sys.exit(1)
+
+
+# ── 主入口 ────────────────────────────────────────────────────────────────────
+
+def main():
+    config = load_config()
+    backend = get_backend(config)
+    api_base = config.get("api_base", DEFAULTS["api_base"])
+    api_secret = config.get("api_secret", "")
+
+    # 检查 api_secret 配置
+    if not api_secret:
+        print(f"{YELLOW}警告：未在配置文件中找到 api_secret{NC}")
+        print(f"  请在 {CONFIG_FILE} 中配置 api_secret: <your-clash-api-secret>")
+        print()
+
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib"))
+
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+
+    if cmd == "start":
+        cmd_start(backend, config)
+    elif cmd == "stop":
+        cmd_stop(backend, config)
+    elif cmd == "restart":
+        cmd_restart(backend, config)
+    elif cmd == "restart-clean":
+        cmd_restart(backend, config, clean=True)
+    elif cmd == "status":
+        from lib.status import cmd_status
+        mode_str = get_mode(backend)
+        cmd_status(backend, api_base, api_secret, config, mode_str)
+    elif cmd == "log":
+        os.execvp("tail", ["tail", "-f", backend.log_file])
+    elif cmd == "check":
+        from lib.check import cmd_check
+        mode_str = get_mode(backend)
+        cmd_check(backend, api_base, api_secret, config, mode_str)
+    elif cmd == "bench":
+        from lib.check import cmd_bench
+        bench_groups = sys.argv[2:] if len(sys.argv) > 2 else None
+        cmd_bench(api_base, api_secret, bench_groups)
+    elif cmd == "fix":
+        cmd_fix(backend, config)
+    elif cmd == "recover":
+        cmd_recover(backend, config)
+    elif cmd == "dns-lock":
+        cmd_dns_lock(config)
+    elif cmd == "dns-unlock":
+        cmd_dns_unlock(config)
+    elif cmd == "audit":
+        arg = sys.argv[2] if len(sys.argv) > 2 else "1"
+        apply_mode = (arg == "apply")
+        days_str = sys.argv[3] if (apply_mode and len(sys.argv) > 3) else (arg if not apply_mode else "1")
+        try:
+            days = int(days_str)
+        except ValueError:
+            days = 1
+        from lib.audit import cmd_audit
+        cmd_audit(days, api_base, api_secret, apply_mode)
+    elif cmd == "mode":
+        target = sys.argv[2] if len(sys.argv) > 2 else ""
+        cmd_mode(backend, target)
+    elif cmd == "trace":
+        if len(sys.argv) < 3:
+            print("用法：proxyctl trace <domain|url>")
+            print("  诊断域名的完整访问链路：DNS → 规则预测 → 连通性测试 → 实际连接验证")
+            sys.exit(1)
+        from lib.trace import cmd_trace
+        cmd_trace(sys.argv[2], api_base, api_secret)
+    else:
+        cmd_help()
+
+
+if __name__ == "__main__":
+    main()

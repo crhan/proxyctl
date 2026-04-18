@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+#
+# proxyctl-stuck-snapshot — proxy 组全挂时的现场抓取脚本
+#
+# 用途：切网后 proxyctl check 显示 proxy 组全部失败时立即运行，
+# 把诊断 DNS cache 假说所需的全部数据一次抓齐，**不要先 proxyctl restart**。
+#
+# 输出落盘到 /tmp/proxyctl-stuck-<时间戳>/ 目录，最后打印路径。
+# 抓完之后再决定试 proxyctl recover 还是 proxyctl restart。
+#
+# 关键对比：
+#   - Mihomo 内部 DNS 解析的 IP
+#   - 外部 DNS（路由器/公网）的实际解析
+#   - 三者是否一致 → 验证「Mihomo 缓存了旧网络 IP」假说
+
+set -u
+
+# 可通过环境变量覆盖
+API_BASE="${PROXYCTL_API_BASE:-http://127.0.0.1:9090}"
+API_SECRET="${PROXYCTL_API_SECRET:-}"
+RELAY_HOST="${PROXYCTL_RELAY_HOST:-your-relay-host.example.com}"
+
+ts=$(date +%Y%m%d-%H%M%S)
+out_dir="/tmp/proxyctl-stuck-${ts}"
+mkdir -p "$out_dir"
+
+log_file="${out_dir}/snapshot.log"
+
+# 同时输出到屏幕和日志
+exec > >(tee -a "$log_file") 2>&1
+
+echo "=== proxyctl stuck snapshot @ $(date '+%F %T') ==="
+echo "输出目录：$out_dir"
+echo
+
+echo "--- [1] 当前网络环境 ---"
+echo "default route:"
+route -n get default 2>/dev/null | grep -E 'interface|gateway'
+echo "en0 IP: $(ipconfig getifaddr en0 2>/dev/null || echo n/a)"
+echo
+
+echo "--- [2] proxyctl check 完整输出 ---"
+proxyctl check 2>&1
+echo
+
+echo "--- [3] Mihomo 内部 DNS 解析 ($RELAY_HOST) ---"
+echo "(走 Clash API /dns/query，反映其 DNS resolver 的当前结果——可能命中缓存)"
+curl -s --noproxy '*' \
+  -H "Authorization: Bearer ${API_SECRET}" \
+  "${API_BASE}/dns/query?name=${RELAY_HOST}&type=A" | tee "${out_dir}/mihomo-dns.json"
+echo
+echo
+
+echo "--- [4] 系统/外部 DNS 直接解析对比 ---"
+echo "[4a] dig @路由器 DNS:"
+dig +short +time=2 +tries=1 "$(route get default 2>/dev/null | awk '/gateway:/{print $2}')" "$RELAY_HOST" 2>&1 || echo "n/a"
+echo
+echo "[4b] dig @公网 DNS (223.5.5.5):"
+dig +short +time=2 +tries=1 @223.5.5.5 "$RELAY_HOST" 2>&1
+echo
+echo "[4c] dig @127.0.0.1 (Mihomo listener):"
+dig +short +time=2 +tries=1 @127.0.0.1 "$RELAY_HOST" 2>&1
+echo
+
+echo "--- [5] Mihomo proxy 组当前状态 ---"
+curl -s --noproxy '*' \
+  -H "Authorization: Bearer ${API_SECRET}" \
+  "${API_BASE}/proxies/proxy" | tee "${out_dir}/proxy-group.json"
+echo
+echo
+
+echo "--- [6] 直连测试中继的 TCP 连通性 ---"
+for port in 40001 40005 40010; do
+  printf "  %s:%s  " "$RELAY_HOST" "$port"
+  nc -z -w 2 "$RELAY_HOST" "$port" 2>&1 && echo "OK" || echo "FAIL"
+done
+echo
+
+echo "--- [7a] Mihomo 活跃连接数 ---"
+conn_json="${out_dir}/connections.json"
+curl -s --noproxy '*' \
+  -H "Authorization: Bearer ${API_SECRET}" \
+  "${API_BASE}/connections" > "$conn_json"
+if command -v jq >/dev/null 2>&1; then
+  total=$(jq '.connections | length' "$conn_json" 2>/dev/null)
+  echo "活跃连接总数：${total:-n/a}"
+else
+  echo "(未安装 jq，原始数据见 $conn_json)"
+fi
+echo
+
+echo "--- [7b] Mihomo 进程 TCP 连接表 ---"
+mihomo_pid=$(pgrep -f mihomo | head -1)
+if [ -n "$mihomo_pid" ]; then
+  echo "Mihomo PID: $mihomo_pid"
+  lsof -nP -p "$mihomo_pid" -iTCP 2>/dev/null > "${out_dir}/mihomo-tcp.txt"
+  echo "完整 TCP socket 列表已存到：${out_dir}/mihomo-tcp.txt"
+fi
+echo
+
+echo "--- [8] Mihomo 最近 100 条日志 ---"
+tail -100 ~/.config/mihomo/mihomo.log > "${out_dir}/mihomo.log.tail" 2>/dev/null || echo "日志文件不存在"
+echo "(已存到 ${out_dir}/mihomo.log.tail)"
+echo
+
+echo "=== 抓取完成 ==="
+echo "现场已保存到：$out_dir"
+echo
+echo "下一步建议:"
+echo "  1. 看 [3] 和 [4] 的 DNS 结果 → 验证 cache 是否和外部一致"
+echo "  2. 看 [7a] 活跃连接数 → 异常大说明 hang 住的旧连接在堆积"
+echo "  3. 试 proxyctl recover，再 proxyctl check 看是否恢复"
+echo "  4. 若无效则 proxyctl restart"

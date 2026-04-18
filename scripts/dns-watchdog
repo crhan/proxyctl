@@ -1,0 +1,75 @@
+#!/bin/bash
+# proxyctl-dns-watchdog - 系统 DNS 锁定为 127.0.0.1
+# 由 launchd StartInterval: 30 触发，每 30 秒轮询
+#
+# 三层修复：
+#   1. networksetup — 对抗 DHCP 覆盖
+#   2. 劫持 AnyConnect DNS 条目 — vpnagentd 不监控自己 value 的变化
+#   3. scutil 兜底注入 — 对抗其他未知覆盖源
+#
+# 幂等操作，重复执行无副作用。以 root 运行（LaunchDaemon）。
+
+# 可通过环境变量覆盖，默认使用 ~/.config/proxyctl
+CONFIG_DIR="${PROXYCTL_CONFIG_DIR:-/Users/yourname/.config/proxyctl}"
+LOG="${CONFIG_DIR}/dns-watchdog.log"
+TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+
+# --- 层 1: networksetup（对抗 DHCP）---
+while IFS= read -r svc; do
+    [ -z "$svc" ] && continue
+    current_dns=$(networksetup -getdnsservers "$svc" 2>/dev/null)
+    if echo "$current_dns" | grep -q "^127\.0\.0\.1$"; then
+        continue
+    fi
+    hw_port=$(networksetup -listnetworkserviceorder 2>/dev/null \
+        | grep -A1 "$svc" | grep "Device:" | sed 's/.*Device: //' | tr -d ')')
+    if [ -n "$hw_port" ]; then
+        ifstate=$(ifconfig "$hw_port" 2>/dev/null | grep "status:" | awk '{print $2}')
+        if [ "$ifstate" = "inactive" ]; then
+            continue
+        fi
+    fi
+    networksetup -setdnsservers "$svc" 127.0.0.1
+    echo "$TIMESTAMP [fix-networksetup] $svc: $current_dns → 127.0.0.1" >> "$LOG"
+done < <(networksetup -listallnetworkservices 2>/dev/null | tail -n +2 | grep -v '^\*')
+
+# --- 层 2: 劫持 AnyConnect 自己的 DNS 条目 ---
+# vpnagentd 监控 SCDynamicStore 新 key 的创建，但不监控自己 value 的变化。
+# 直接改 com.cisco.anyconnect 条目的 ServerAddresses → 127.0.0.1
+AC_KEY="State:/Network/Service/com.cisco.anyconnect/DNS"
+ac_dns=$(echo "show $AC_KEY" | scutil 2>/dev/null)
+
+if echo "$ac_dns" | grep -q "ServerAddresses"; then
+    # AnyConnect DNS 条目存在
+    if ! echo "$ac_dns" | grep -q "127\.0\.0\.1"; then
+        # 提取原始 domain 和 order，保持条目结构一致
+        domain=$(echo "$ac_dns" | awk '/DomainName/{gsub(/^[^:]+: /,""); print; exit}')
+        search_order=$(echo "$ac_dns" | awk '/SearchOrder/{gsub(/^[^:]+: /,""); print; exit}')
+        scutil <<SCUTIL
+d.init
+d.add DomainName ${domain:-example.com}
+d.add SearchDomains * ${domain:-example.com}
+d.add SearchOrder # ${search_order:-1}
+d.add ServerAddresses * 127.0.0.1
+d.add SupplementalMatchDomains * "" ${domain:-example.com}
+set $AC_KEY
+SCUTIL
+        echo "$TIMESTAMP [fix-anyconnect] $AC_KEY → 127.0.0.1" >> "$LOG"
+    fi
+fi
+
+# --- 层 3: scutil 兜底 ---
+primary=$(scutil --dns 2>/dev/null | awk '/^resolver #1/{f=1} f && /nameserver\[0\]/{print $3; exit}')
+if [ "$primary" != "127.0.0.1" ]; then
+    scutil <<'SCUTIL'
+d.init
+d.add ServerAddresses * 127.0.0.1
+d.add SupplementalMatchOrder # 0
+set State:/Network/Service/proxyctl-dns-override/DNS
+SCUTIL
+    echo "$TIMESTAMP [fix-scutil-fallback] primary: $primary → injected 127.0.0.1" >> "$LOG"
+fi
+
+# --- 层 4: 内网路由注入 (可选) ---
+# 如果用户有 Tailscale 100.64/10 冲突问题，可以在此添加路由注入逻辑
+# 默认不启用，避免影响非企业用户

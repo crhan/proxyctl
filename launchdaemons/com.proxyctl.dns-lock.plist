@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.proxyctl.dns-lock</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/opt/homebrew/bin/proxyctl-dns-watchdog</string>
+  </array>
+  <!-- 每 30 秒轮询一次。VPN 通过 configd 内存动态存储改 DNS，WatchPaths 感知不到，轮询是唯一可靠方案 -->
+  <key>StartInterval</key>
+  <integer>30</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/yourname/.config/proxyctl/dns-watchdog.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/yourname/.config/proxyctl/dns-watchdog.log</string>
+</dict>
+</plist>

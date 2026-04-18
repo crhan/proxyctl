@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 配置文件（包含敏感信息）
+config.yaml
+*.json.bak
+*.log
+
+# 缓存文件
+.ipgeo-audit-cache
+.ipgeo-cache
+cache.db
+*.db
+
+# 日志文件
+*.log
+dns-watchdog.log
+subscription-update.log
+
+# 临时文件
+/tmp/
+*.tmp
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.pem
+
+# 订阅文件（包含私有 URL）
+subscription.yaml
+mitang-subscription.yaml
+n2ray-subscription.yaml
+
+# UI 构建产物（可选，源文件可能在其他地方）
+ui/_nuxt/
+ui/_fonts/
+
+# 特定于用户的配置
+engine
+claude-proxy.json
+claude-proxy.err
+claude-proxy.log
+
+# macOS
+.DS_Store
+
+# 测试
+.pytest_cache/
+.coverage
+htmlcov/
