@@ -10,7 +10,7 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+# 注意：不忽略项目自身的 lib/（Python 模板默认忽略 lib/ 是给 C extension 用的）
 parts/
 sdist/
 var/
@@ -56,8 +56,8 @@ n2ray-subscription.yaml
 ui/_nuxt/
 ui/_fonts/
 
-# 特定于用户的配置
-engine
+# 特定于用户的配置（运行时生成的文件）
+/engine
 claude-proxy.json
 claude-proxy.err
 claude-proxy.log

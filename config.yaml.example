@@ -28,6 +28,25 @@ config_dir: /Users/yourname/.config
 dns_lock_label: com.proxyctl.dns-lock
 
 # ─────────────────────────────────────────────────────────────
+# 企业内网 DNS 配置（可选）
+# ─────────────────────────────────────────────────────────────
+# 用于 AnyConnect VPN DNS 还原和内网域名检测
+# 留空则禁用相关功能（适合非企业环境）
+corp_dns:
+  server: ""            # 企业 DNS 服务器 IP（如 10.0.0.53）
+  server_v6: ""         # 企业 DNS IPv6 地址
+  domain: ""            # 企业域名（如 corp.example.com）
+  test_domain: ""       # 用于健康检测的内网域名（如 wiki.corp.example.com）
+  ip_prefix: ""         # 企业网段前缀，用于自动检测是否在企业网络中（如 "10.0."）
+  check_targets: []     # 企业网络连通性检测目标列表，格式：
+  #   - url: "tcp:10.0.0.1:22"
+  #     name: "server-1"
+  #     mode: tcp
+  #   - url: "https://wiki.corp.example.com"
+  #     name: "wiki"
+  #     mode: direct
+
+# ─────────────────────────────────────────────────────────────
 # 其他配置
 # ─────────────────────────────────────────────────────────────
 # 日志级别：info (默认) | debug | warn | error

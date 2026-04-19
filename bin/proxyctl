@@ -251,8 +251,12 @@ def get_primary_resolver() -> str:
 
 # ── DNS 联动 ─────────────────────────────────────────────────────────────────
 
-def dns_activate():
-    """设置系统 DNS → 127.0.0.1（三层防线）。"""
+def dns_activate(config: dict):
+    """设置系统 DNS → 127.0.0.1（三层防线）。
+
+    Args:
+        config: 全局配置字典，层 2 的 domain fallback 从 corp_dns.domain 读取
+    """
     # 层 1: networksetup 对抗 DHCP
     for svc in list_network_services():
         run(["networksetup", "-setdnsservers", svc, "127.0.0.1"])
@@ -268,7 +272,8 @@ def dns_activate():
                 domain = line.split(":", 1)[1].strip()
             elif "SearchOrder" in line and ":" in line and not search_order:
                 search_order = line.split(":", 1)[1].strip()
-        domain = domain or "hz.ali.com"
+        corp = config.get("corp_dns", {}) or {}
+        domain = domain or corp.get("domain", "") or "example.com"
         search_order = search_order or "1"
         scutil_exec(
             f"d.init\n"
@@ -292,16 +297,25 @@ def dns_activate():
     run(["killall", "-HUP", "mDNSResponder"], sudo=True)
 
 
-def dns_deactivate():
-    """还原系统 DNS → DHCP（清除三层注入）。"""
-    # 层 1: 清空手动 DNS
+def dns_deactivate(config: dict):
+    """还原系统 DNS（清除三层注入）。
+
+    静态 IP 和 DHCP 环境均安全：层 1 仅清除手动 DNS 设置，
+    不影响静态配置中已有的 DNS；层 3 根据 corp_dns 配置决定
+    还原为企业 DNS 或直接移除 AnyConnect key。
+
+    Args:
+        config: 全局配置字典，corp_dns.server 用于 AnyConnect DNS 还原
+    """
+    # 层 1: 清空手动 DNS（networksetup -setdnsservers <svc> empty
+    # 效果：移除手动覆盖，恢复为网络服务自身的 DNS 来源——DHCP 或静态配置均可）
     for svc in list_network_services():
         run(["networksetup", "-setdnsservers", svc, "empty"])
 
     # 层 2: 删除 scutil 兜底 resolver
     scutil_exec("remove State:/Network/Service/proxyctl-dns-override/DNS\n")
 
-    # 层 3: 还原 AnyConnect DNS key（如果还指向 127.0.0.1，防止 DNS 全挂）
+    # 层 3: 还原 AnyConnect DNS key（如果还指向 127.0.0.1）
     ac_key = "State:/Network/Service/com.cisco.anyconnect/DNS"
     r = subprocess.run(["sudo", "scutil"], input=f"show {ac_key}\n",
                        capture_output=True, text=True)
@@ -311,15 +325,25 @@ def dns_deactivate():
             addr = line.split(":", 1)[1].strip()
             break
     if addr == "127.0.0.1":
-        scutil_exec(
-            "d.init\n"
-            "d.add ServerAddresses * 30.64.127.127 FD00:1:1010::1\n"
-            "d.add DomainName hz.ali.com\n"
-            "d.add SearchDomains * hz.ali.com\n"
-            "d.add SearchOrder # 1\n"
-            "d.add SupplementalMatchDomains * \"\" hz.ali.com\n"
-            f"set {ac_key}\n"
-        )
+        corp = config.get("corp_dns", {}) or {}
+        corp_server = corp.get("server", "")
+        if corp_server:
+            # 有企业 DNS 配置：还原为企业 DNS 地址
+            corp_v6 = corp.get("server_v6", "")
+            corp_domain = corp.get("domain", "") or "example.com"
+            addrs = f"{corp_server} {corp_v6}" if corp_v6 else corp_server
+            scutil_exec(
+                "d.init\n"
+                f"d.add ServerAddresses * {addrs}\n"
+                f"d.add DomainName {corp_domain}\n"
+                f"d.add SearchDomains * {corp_domain}\n"
+                "d.add SearchOrder # 1\n"
+                f"d.add SupplementalMatchDomains * \"\" {corp_domain}\n"
+                f"set {ac_key}\n"
+            )
+        else:
+            # 无企业 DNS 配置：直接移除 key，vpnagentd 重连时会自动重建
+            scutil_exec(f"remove {ac_key}\n")
 
     run(["dscacheutil", "-flushcache"], sudo=True)
     run(["killall", "-HUP", "mDNSResponder"], sudo=True)
@@ -392,7 +416,7 @@ def cmd_start(backend: Backend, config: dict):
 
     print(f"{backend.name} started")
     _wait_ready(backend)
-    dns_activate()
+    dns_activate(config)
     dns_lock_start(config)
     print("DNS → 127.0.0.1 (已激活)")
     if get_mode(backend) == "proxy":
@@ -404,7 +428,7 @@ def cmd_start(backend: Backend, config: dict):
 
 def cmd_stop(backend: Backend, config: dict):
     dns_lock_stop(config)
-    dns_deactivate()
+    dns_deactivate(config)
     proxy_deactivate()
     print("DNS → DHCP (已还原), 系统代理已关闭")
     run(["launchctl", "bootout", backend.label], sudo=True)
@@ -419,7 +443,7 @@ def cmd_restart(backend: Backend, config: dict, *, clean: bool = False):
     run(["launchctl", "kickstart", "-k", backend.label], sudo=True)
     print(f"{backend.name} restarted{'  (cache cleared)' if clean else ''}")
     _wait_ready(backend)
-    dns_activate()
+    dns_activate(config)
     dns_lock_start(config)
     print("DNS → 127.0.0.1 (已刷新)")
     if get_mode(backend) == "proxy":
@@ -440,7 +464,7 @@ def cmd_fix(backend: Backend, config: dict):
         before = get_primary_resolver()
         print(f"  修复前 primary resolver: {before or 'unknown'}")
 
-        dns_activate()
+        dns_activate(config)
         after = get_primary_resolver()
         if after == "127.0.0.1":
             print(f"  {GREEN}✓{NC} primary resolver → 127.0.0.1")
@@ -484,7 +508,7 @@ def cmd_fix(backend: Backend, config: dict):
             dns_lock_stop(config)
             print(f"  {GREEN}✓{NC} dns-lock 看门狗已停止")
 
-        dns_deactivate()
+        dns_deactivate(config)
         after = get_primary_resolver()
         print(f"  {GREEN}✓{NC} DNS → DHCP ({after or 'DHCP'})")
 
@@ -858,7 +882,7 @@ def main():
             print("  诊断域名的完整访问链路：DNS → 规则预测 → 连通性测试 → 实际连接验证")
             sys.exit(1)
         from lib.trace import cmd_trace
-        cmd_trace(sys.argv[2], api_base, api_secret)
+        cmd_trace(sys.argv[2], api_base, api_secret, config)
     else:
         cmd_help()
 

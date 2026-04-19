@@ -70,10 +70,16 @@ echo
 echo
 
 echo "--- [6] 直连测试中继的 TCP 连通性 ---"
-for port in 40001 40005 40010; do
-  printf "  %s:%s  " "$RELAY_HOST" "$port"
-  nc -z -w 2 "$RELAY_HOST" "$port" 2>&1 && echo "OK" || echo "FAIL"
-done
+# 端口列表通过环境变量配置，留空则跳过
+RELAY_PORTS="${PROXYCTL_RELAY_PORTS:-}"
+if [ -n "$RELAY_PORTS" ]; then
+  for port in $RELAY_PORTS; do
+    printf "  %s:%s  " "$RELAY_HOST" "$port"
+    nc -z -w 2 "$RELAY_HOST" "$port" 2>&1 && echo "OK" || echo "FAIL"
+  done
+else
+  echo "  (跳过：未配置 PROXYCTL_RELAY_PORTS)"
+fi
 echo
 
 echo "--- [7a] Mihomo 活跃连接数 ---"
