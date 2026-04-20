@@ -924,16 +924,18 @@ def main():
         print(f"  请在 {CONFIG_FILE} 中配置 api_secret: <your-clash-api-secret>")
         print()
 
-    # lib 搜索路径：优先源码目录（开发），回退安装目录
+    # lib 搜索路径：`from lib.xxx import` 需要 lib/ 的父目录在 sys.path 中
+    # 开发时：bin/../（项目根目录，包含 lib/）
+    # 安装后：~/.local/lib/proxyctl/（install.sh 把 lib/ 复制到此处）
     script_dir = os.path.dirname(os.path.realpath(__file__))
     lib_candidates = [
-        os.path.join(script_dir, "..", "lib"),           # 开发：bin/../lib
+        os.path.join(script_dir, ".."),                    # 开发：bin/.. = 项目根
         os.path.join(script_dir, "..", "lib", "proxyctl"),  # 安装：~/.local/lib/proxyctl
     ]
-    for lib_dir in lib_candidates:
-        lib_dir = os.path.realpath(lib_dir)
-        if os.path.isdir(lib_dir) and lib_dir not in sys.path:
-            sys.path.insert(0, lib_dir)
+    for lib_parent in lib_candidates:
+        lib_parent = os.path.realpath(lib_parent)
+        if os.path.isdir(os.path.join(lib_parent, "lib")) and lib_parent not in sys.path:
+            sys.path.insert(0, lib_parent)
             break
 
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"

@@ -135,11 +135,11 @@ install_binaries() {
         chmod +x "$target_bin"
     fi
 
-    # lib 模块
-    info "安装 lib/ → $LIB_DIR"
+    # lib 模块（保持 lib/ 目录结构，因为代码用 from lib.xxx import）
+    info "安装 lib/ → $LIB_DIR/lib"
     if [ -z "$DRY_RUN" ]; then
-        mkdir -p "$LIB_DIR"
-        cp -r "$SCRIPT_DIR/lib/"* "$LIB_DIR/"
+        mkdir -p "$LIB_DIR/lib"
+        cp -r "$SCRIPT_DIR/lib/"* "$LIB_DIR/lib/"
     fi
 
     # macOS 辅助脚本
