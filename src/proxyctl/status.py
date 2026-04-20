@@ -248,10 +248,51 @@ def _gather_dns(dns_lock_label: str) -> dict:
 
 
 def _gather_network(engine) -> dict:
-    """采集网络环境数据（含 Tailscale ping，最慢）。"""
-    en0_ip   = _ifconfig_ip("en0")
-    vpn_iface = vpn_ip = ""
+    """采集网络环境数据。
 
+    核心能力（跨平台）：默认出口网卡和 IP。
+    macOS 扩展：企业网检测、VPN 接口、Tailscale、TUIC relay。
+    """
+    # 核心：默认出口网卡和 IP
+    default_iface = ""
+    default_ip = ""
+
+    if IS_MACOS:
+        r = subprocess.run(["route", "-n", "get", "default"],
+                           capture_output=True, text=True)
+        for line in r.stdout.splitlines():
+            if "interface:" in line:
+                default_iface = line.split()[-1]
+        if default_iface:
+            default_ip = _ifconfig_ip(default_iface)
+    else:
+        # Linux：从 ip route 获取默认出口
+        r = subprocess.run(["ip", "route", "show", "default"],
+                           capture_output=True, text=True)
+        parts = r.stdout.split()
+        for i, tok in enumerate(parts):
+            if tok == "dev" and i + 1 < len(parts):
+                default_iface = parts[i + 1]
+                break
+        if default_iface:
+            r2 = subprocess.run(
+                ["ip", "-4", "addr", "show", default_iface],
+                capture_output=True, text=True)
+            for line in r2.stdout.splitlines():
+                if "inet " in line:
+                    default_ip = line.split()[1].split("/")[0]
+                    break
+
+    result = {
+        "default_iface": default_iface,
+        "default_ip": default_ip,
+    }
+
+    if not IS_MACOS:
+        return result
+
+    # ── macOS 扩展：企业 VPN、Tailscale、Relay ──────────────────────────
+    vpn_iface = vpn_ip = ""
     r = subprocess.run(["ifconfig", "-l"], capture_output=True, text=True)
     for iface in r.stdout.split():
         if not iface.startswith("utun"):
@@ -265,10 +306,12 @@ def _gather_network(engine) -> dict:
                     break
         if vpn_iface:
             break
+    result["vpn_iface"] = vpn_iface
+    result["vpn_ip"] = vpn_ip
 
     # Tailscale
     ts_self = ts_peer_ip = ts_latency = ts_via = ""
-    ts_state = "absent"  # absent / no-login / no-peer / ok / unreachable
+    ts_state = "absent"
     if subprocess.run(["which", "tailscale"], capture_output=True).returncode == 0:
         ts_self = subprocess.run(["tailscale", "ip", "-4"],
                                   capture_output=True, text=True).stdout.strip()
@@ -294,6 +337,10 @@ def _gather_network(engine) -> dict:
                 ts_state = "no-peer"
         else:
             ts_state = "no-login"
+    result.update({
+        "ts_self": ts_self, "ts_peer_ip": ts_peer_ip,
+        "ts_latency": ts_latency, "ts_via": ts_via, "ts_state": ts_state,
+    })
 
     # TUIC relay 解析路径
     relay_host = relay_ip = relay_path = ""
@@ -311,13 +358,11 @@ def _gather_network(engine) -> dict:
                 pass
     except Exception:
         pass
-
-    return {
-        "en0_ip": en0_ip, "vpn_iface": vpn_iface, "vpn_ip": vpn_ip,
-        "ts_self": ts_self, "ts_peer_ip": ts_peer_ip,
-        "ts_latency": ts_latency, "ts_via": ts_via, "ts_state": ts_state,
+    result.update({
         "relay_host": relay_host, "relay_ip": relay_ip, "relay_path": relay_path,
-    }
+    })
+
+    return result
 
 
 # ── 打印函数（顺序执行，使用采集结果） ───────────────────────────────────────
@@ -466,23 +511,35 @@ def _print_dns(daemon_up: bool, d_dns: dict, mode: str):
 
 
 def _print_network(d_net: dict):
+    """打印网络状态段。
+
+    核心（跨平台）：默认出口网卡 + IP。
+    macOS 扩展：企业网/VPN、Tailscale、TUIC relay。
+    """
     print(f"\n{BOLD}网络{NC}")
-    en0_ip = d_net["en0_ip"]
-    if en0_ip.startswith("30."):
-        print(f"  en0     {en0_ip}  {GREEN}办公网{NC}")
-    elif en0_ip:
-        print(f"  en0     {en0_ip}")
-    else:
-        print(f"  en0     {YELLOW}down{NC}")
 
-    if d_net["vpn_iface"]:
+    # 核心：默认出口
+    iface = d_net.get("default_iface", "")
+    ip = d_net.get("default_ip", "")
+    if iface and ip:
+        print(f"  {iface:<8s}{ip}")
+    elif iface:
+        print(f"  {iface:<8s}{YELLOW}no IP{NC}")
+    else:
+        print(f"  default {YELLOW}无默认路由{NC}")
+
+    # ── macOS 扩展 ──
+    if not IS_MACOS:
+        return
+
+    # 企业内网 VPN
+    if d_net.get("vpn_iface"):
         print(f"  内网    {GREEN}✓{NC} {d_net['vpn_iface']}({d_net['vpn_ip']})")
-    elif en0_ip.startswith("30."):
+    elif ip.startswith("30."):
         print(f"  内网    {GREEN}✓{NC} 直连")
-    else:
-        print(f"  内网    — 未连接")
 
-    ts = d_net["ts_state"]
+    # Tailscale
+    ts = d_net.get("ts_state", "absent")
     if ts == "absent":
         pass
     elif ts == "no-login":
@@ -490,15 +547,16 @@ def _print_network(d_net: dict):
     elif ts == "no-peer":
         print(f"  tailsc  {YELLOW}!{NC} {d_net['ts_self']} (peer home-ubuntu 离线)")
     elif ts == "ok":
-        via = f"via {d_net['ts_via']}" if d_net["ts_via"] else ""
+        via = f"via {d_net['ts_via']}" if d_net.get("ts_via") else ""
         print(f"  tailsc  {GREEN}✓{NC} {d_net['ts_self']} → "
               f"{d_net['ts_peer_ip']} {d_net['ts_latency']} {via}".rstrip())
     elif ts == "unreachable":
         print(f"  tailsc  {RED}✗{NC} {d_net['ts_self']} → "
               f"{d_net['ts_peer_ip']} 不可达")
 
-    if d_net["relay_host"]:
-        if d_net["relay_ip"]:
+    # TUIC relay
+    if d_net.get("relay_host"):
+        if d_net.get("relay_ip"):
             print(f"  relay   {GREEN}✓{NC} {d_net['relay_host']} → "
                   f"{d_net['relay_ip']} ({d_net['relay_path']})")
         else:
