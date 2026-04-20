@@ -15,7 +15,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOME_DIR="$HOME"
 CONFIG_DIR="$HOME_DIR/.config/proxyctl"
 BIN_DIR="$HOME_DIR/.local/bin"
-LIB_DIR="$HOME_DIR/.local/lib/proxyctl"
 OS="$(uname -s)"   # Darwin | Linux
 
 # 干跑模式
@@ -123,23 +122,21 @@ setup_config_dir() {
     fi
 }
 
-# 安装主程序和 lib
+# 安装主程序（通过 uv）
 install_binaries() {
     log "\n=== 安装主程序 ==="
 
-    # 主 CLI
-    local target_bin="$BIN_DIR/proxyctl"
-    info "安装 proxyctl → $target_bin"
-    if [ -z "$DRY_RUN" ]; then
-        cp "$SCRIPT_DIR/bin/proxyctl" "$target_bin"
-        chmod +x "$target_bin"
+    # 检查 uv
+    if ! command -v uv >/dev/null 2>&1; then
+        error "uv 未安装。请先安装：curl -LsSf https://astral.sh/uv/install.sh | sh"
+        exit 1
     fi
+    info "uv: $(uv --version)"
 
-    # lib 模块（保持 lib/ 目录结构，因为代码用 from lib.xxx import）
-    info "安装 lib/ → $LIB_DIR/lib"
+    # 用 uv tool install 安装 proxyctl 到用户 PATH
+    info "通过 uv tool install 安装 proxyctl"
     if [ -z "$DRY_RUN" ]; then
-        mkdir -p "$LIB_DIR/lib"
-        cp -r "$SCRIPT_DIR/lib/"* "$LIB_DIR/lib/"
+        uv tool install --force "$SCRIPT_DIR"
     fi
 
     # macOS 辅助脚本

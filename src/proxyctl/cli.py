@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """proxyctl — Proxy configuration lifecycle management
 
 支持 Mihomo 后端（首发）/ Sing-box 后端（预留）
@@ -924,20 +923,6 @@ def main():
         print(f"  请在 {CONFIG_FILE} 中配置 api_secret: <your-clash-api-secret>")
         print()
 
-    # lib 搜索路径：`from lib.xxx import` 需要 lib/ 的父目录在 sys.path 中
-    # 开发时：bin/../（项目根目录，包含 lib/）
-    # 安装后：~/.local/lib/proxyctl/（install.sh 把 lib/ 复制到此处）
-    script_dir = os.path.dirname(os.path.realpath(__file__))
-    lib_candidates = [
-        os.path.join(script_dir, ".."),                    # 开发：bin/.. = 项目根
-        os.path.join(script_dir, "..", "lib", "proxyctl"),  # 安装：~/.local/lib/proxyctl
-    ]
-    for lib_parent in lib_candidates:
-        lib_parent = os.path.realpath(lib_parent)
-        if os.path.isdir(os.path.join(lib_parent, "lib")) and lib_parent not in sys.path:
-            sys.path.insert(0, lib_parent)
-            break
-
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
 
     if cmd == "start":
@@ -949,17 +934,17 @@ def main():
     elif cmd == "restart-clean":
         cmd_restart(backend, config, clean=True)
     elif cmd == "status":
-        from lib.status import cmd_status
+        from proxyctl.status import cmd_status
         mode_str = get_mode(backend)
         cmd_status(backend, api_base, api_secret, config, mode_str)
     elif cmd == "log":
         os.execvp("tail", ["tail", "-f", backend.log_file])
     elif cmd == "check":
-        from lib.check import cmd_check
+        from proxyctl.check import cmd_check
         mode_str = get_mode(backend)
         cmd_check(backend, api_base, api_secret, config, mode_str)
     elif cmd == "bench":
-        from lib.check import cmd_bench
+        from proxyctl.check import cmd_bench
         bench_groups = sys.argv[2:] if len(sys.argv) > 2 else None
         cmd_bench(api_base, api_secret, bench_groups)
     elif cmd == "fix":
@@ -978,7 +963,7 @@ def main():
             days = int(days_str)
         except ValueError:
             days = 1
-        from lib.audit import cmd_audit
+        from proxyctl.audit import cmd_audit
         cmd_audit(days, api_base, api_secret, apply_mode)
     elif cmd == "mode":
         target = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -988,7 +973,7 @@ def main():
             print("用法：proxyctl trace <domain|url>")
             print("  诊断域名的完整访问链路：DNS → 规则预测 → 连通性测试 → 实际连接验证")
             sys.exit(1)
-        from lib.trace import cmd_trace
+        from proxyctl.trace import cmd_trace
         cmd_trace(sys.argv[2], api_base, api_secret, config)
     else:
         cmd_help()
