@@ -1,5 +1,5 @@
 #!/bin/bash
-# proxyctl 安装脚本
+# proxyctl 安装脚本（支持 macOS / Linux）
 # 用法：./install.sh [--dry-run]
 
 set -euo pipefail
@@ -15,6 +15,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOME_DIR="$HOME"
 CONFIG_DIR="$HOME_DIR/.config/proxyctl"
 BIN_DIR="$HOME_DIR/.local/bin"
+LIB_DIR="$HOME_DIR/.local/lib/proxyctl"
+OS="$(uname -s)"   # Darwin | Linux
 
 # 干跑模式
 DRY_RUN="${1:-}"
@@ -26,7 +28,7 @@ error() { log "${RED}✗${NC} $*"; }
 
 # 检查前置条件
 check_prerequisites() {
-    log "\n=== 检查前置条件 ==="
+    log "\n=== 检查前置条件 (${OS}) ==="
 
     # 检查 Python 3
     if command -v python3 >/dev/null 2>&1; then
@@ -39,18 +41,18 @@ check_prerequisites() {
     # 检查后端（至少一个）
     local has_backend=false
 
-    if command -v mihomo >/dev/null 2>&1 || command -v mihomo-verge >/dev/null 2>&1; then
-        info "Mihomo: $(which mihomo 2>/dev/null || which mihomo-verge)"
+    if command -v mihomo >/dev/null 2>&1 || [ -x "$BIN_DIR/mihomo" ]; then
+        info "Mihomo: $(which mihomo 2>/dev/null || echo "$BIN_DIR/mihomo")"
         has_backend=true
     else
-        warn "Mihomo 未安装 (brew install mihomo)"
+        warn "Mihomo 未安装"
     fi
 
-    if command -v sing-box >/dev/null 2>&1; then
-        info "Sing-box: $(which sing-box)"
+    if command -v sing-box >/dev/null 2>&1 || [ -x "$BIN_DIR/sing-box" ]; then
+        info "Sing-box: $(which sing-box 2>/dev/null || echo "$BIN_DIR/sing-box")"
         has_backend=true
     else
-        warn "Sing-box 未安装 (brew install sing-box)"
+        warn "Sing-box 未安装"
     fi
 
     if [ "$has_backend" = false ]; then
@@ -69,8 +71,18 @@ check_prerequisites() {
     # 检查 ~/.local/bin 是否在 PATH 中
     if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
         warn "$BIN_DIR 不在 PATH 中"
-        echo "  请添加以下行到 ~/.zshrc 或 ~/.bashrc:"
+        echo "  请添加以下行到 ~/.bashrc 或 ~/.zshrc:"
         echo "    export PATH=\"$BIN_DIR:\$PATH\""
+    fi
+
+    # Linux 额外检查
+    if [ "$OS" = "Linux" ]; then
+        if command -v systemctl >/dev/null 2>&1; then
+            info "systemd: $(systemctl --version | head -1)"
+        else
+            error "systemd 未找到（proxyctl Linux 模式依赖 systemd --user）"
+            exit 1
+        fi
     fi
 }
 
@@ -97,19 +109,21 @@ setup_config_dir() {
         warn "配置文件已存在：$CONFIG_DIR/config.yaml"
     fi
 
-    # 创建子目录
-    for subdir in launchdaemons scripts; do
-        local target_dir="$CONFIG_DIR/$subdir"
-        if [ ! -d "$target_dir" ]; then
-            info "创建目录：$target_dir"
-            if [ -z "$DRY_RUN" ]; then
-                mkdir -p "$target_dir"
+    # macOS 子目录
+    if [ "$OS" = "Darwin" ]; then
+        for subdir in launchdaemons scripts; do
+            local target_dir="$CONFIG_DIR/$subdir"
+            if [ ! -d "$target_dir" ]; then
+                info "创建目录：$target_dir"
+                if [ -z "$DRY_RUN" ]; then
+                    mkdir -p "$target_dir"
+                fi
             fi
-        fi
-    done
+        done
+    fi
 }
 
-# 安装主程序
+# 安装主程序和 lib
 install_binaries() {
     log "\n=== 安装主程序 ==="
 
@@ -121,19 +135,32 @@ install_binaries() {
         chmod +x "$target_bin"
     fi
 
-    # 脚本
-    for script in dns-watchdog stuck-snapshot; do
-        local target_script="$BIN_DIR/proxyctl-$script"
-        info "安装 $script → $target_script"
-        if [ -z "$DRY_RUN" ]; then
-            cp "$SCRIPT_DIR/scripts/$script" "$target_script"
-            chmod +x "$target_script"
-        fi
-    done
+    # lib 模块
+    info "安装 lib/ → $LIB_DIR"
+    if [ -z "$DRY_RUN" ]; then
+        mkdir -p "$LIB_DIR"
+        cp -r "$SCRIPT_DIR/lib/"* "$LIB_DIR/"
+    fi
+
+    # macOS 辅助脚本
+    if [ "$OS" = "Darwin" ]; then
+        for script in dns-watchdog stuck-snapshot; do
+            local target_script="$BIN_DIR/proxyctl-$script"
+            info "安装 $script → $target_script"
+            if [ -z "$DRY_RUN" ]; then
+                cp "$SCRIPT_DIR/scripts/$script" "$target_script"
+                chmod +x "$target_script"
+            fi
+        done
+    fi
 }
 
-# 安装 launchdaemons
+# macOS: 安装 launchdaemons
 install_launchdaemons() {
+    if [ "$OS" != "Darwin" ]; then
+        return
+    fi
+
     log "\n=== 安装 launchdaemons ==="
 
     local target_ld_dir="$CONFIG_DIR/launchdaemons"
@@ -156,9 +183,52 @@ install_launchdaemons() {
     echo ""
     echo "  部署到系统需要 sudo 权限："
     echo "    sudo cp $target_ld_dir/*.plist /Library/LaunchDaemons/"
-    echo ""
-    echo "  或者手动复制后加载："
-    echo "    sudo launchctl bootstrap system /Library/LaunchDaemons/com.mihomo.tun.plist"
+}
+
+# Linux: 安装 systemd user service
+install_systemd_services() {
+    if [ "$OS" != "Linux" ]; then
+        return
+    fi
+
+    log "\n=== 安装 systemd user service ==="
+
+    local user_unit_dir="$HOME_DIR/.config/systemd/user"
+    if [ -z "$DRY_RUN" ]; then
+        mkdir -p "$user_unit_dir"
+    fi
+
+    for unit in mihomo.service sing-box.service; do
+        local src="$SCRIPT_DIR/systemd/$unit"
+        local dst="$user_unit_dir/$unit"
+
+        if [ -f "$src" ]; then
+            if [ -f "$dst" ]; then
+                warn "$unit 已存在，跳过（保留现有配置）"
+            else
+                info "安装 $unit → $dst"
+                if [ -z "$DRY_RUN" ]; then
+                    cp "$src" "$dst"
+                fi
+            fi
+        fi
+    done
+
+    if [ -z "$DRY_RUN" ]; then
+        systemctl --user daemon-reload 2>/dev/null || true
+        info "systemd --user daemon-reload 完成"
+    fi
+
+    # 检查 linger
+    local linger
+    linger=$(loginctl show-user "$(whoami)" -p Linger 2>/dev/null | cut -d= -f2)
+    if [ "$linger" != "yes" ]; then
+        warn "用户 linger 未启用（服务在登出后会停止）"
+        echo "  执行以下命令启用："
+        echo "    sudo loginctl enable-linger $(whoami)"
+    else
+        info "用户 linger 已启用"
+    fi
 }
 
 # 配置说明
@@ -194,7 +264,7 @@ verify_installation() {
 # 主流程
 main() {
     log "================================"
-    log "  proxyctl 安装脚本"
+    log "  proxyctl 安装脚本 (${OS})"
     log "================================"
 
     if [ "$DRY_RUN" = "--dry-run" ]; then
@@ -205,6 +275,7 @@ main() {
     setup_config_dir
     install_binaries
     install_launchdaemons
+    install_systemd_services
     show_config_instructions
     verify_installation
 
@@ -217,9 +288,17 @@ main() {
     log "  2. 配置 api_secret"
     log "  3. 运行 proxyctl status 验证"
     log ""
-    log "如需部署 launchdaemons 到系统："
-    log "  sudo cp ~/.config/proxyctl/launchdaemons/*.plist /Library/LaunchDaemons/"
-    log ""
+
+    if [ "$OS" = "Darwin" ]; then
+        log "如需部署 launchdaemons 到系统："
+        log "  sudo cp ~/.config/proxyctl/launchdaemons/*.plist /Library/LaunchDaemons/"
+        log ""
+    fi
+    if [ "$OS" = "Linux" ]; then
+        log "启动引擎："
+        log "  proxyctl start"
+        log ""
+    fi
 }
 
 main "$@"

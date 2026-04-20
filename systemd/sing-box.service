@@ -1,0 +1,27 @@
+# proxyctl — Sing-box systemd user service
+# 安装位置：~/.config/systemd/user/sing-box.service
+#
+# 使用：
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now sing-box.service
+#
+# 前提：
+#   - loginctl enable-linger $USER（允许用户服务在登出后继续运行）
+#   - sing-box 二进制在 ~/.local/bin/sing-box
+#   - 配置文件在 ~/.config/sing-box/config.json
+
+[Unit]
+Description=Sing-box Proxy Engine (managed by proxyctl)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/sing-box run -c %h/.config/sing-box/config.json
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:%h/.config/sing-box/sing-box.log
+StandardError=append:%h/.config/sing-box/sing-box.err
+
+[Install]
+WantedBy=default.target

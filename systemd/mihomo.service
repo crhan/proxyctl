@@ -1,0 +1,27 @@
+# proxyctl — Mihomo (Clash Meta) systemd user service
+# 安装位置：~/.config/systemd/user/mihomo.service
+#
+# 使用：
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now mihomo.service
+#
+# 前提：
+#   - loginctl enable-linger $USER（允许用户服务在登出后继续运行）
+#   - mihomo 二进制在 ~/.local/bin/mihomo
+#   - 配置文件在 ~/.config/mihomo/config.yaml
+
+[Unit]
+Description=Mihomo Proxy Engine (managed by proxyctl)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/mihomo -d %h/.config/mihomo
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:%h/.config/mihomo/mihomo.log
+StandardError=append:%h/.config/mihomo/mihomo.err
+
+[Install]
+WantedBy=default.target

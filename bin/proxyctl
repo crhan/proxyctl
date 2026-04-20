@@ -9,11 +9,17 @@
 
 import json
 import os
+import platform
 import re
 import socket
 import subprocess
 import sys
 import time
+
+# ── 平台检测 ────────────────────────────────────────────────────────────────
+PLATFORM = platform.system()   # "Darwin" | "Linux"
+IS_MACOS = PLATFORM == "Darwin"
+IS_LINUX = PLATFORM == "Linux"
 
 # ── 路径常量 ────────────────────────────────────────────────────────────────
 HOME = os.path.expanduser("~")
@@ -61,7 +67,7 @@ def load_config() -> dict:
 # ── 后端类 ───────────────────────────────────────────────────────────────────
 
 class Backend:
-    """后端抽象基类"""
+    """后端抽象基类，封装引擎名称、路径和平台差异。"""
 
     def __init__(self, name: str, config: dict):
         self.name = name
@@ -70,10 +76,17 @@ class Backend:
 
     @property
     def label(self) -> str:
+        """macOS launchctl service label。"""
         raise NotImplementedError
 
     @property
     def plist(self) -> str:
+        """macOS LaunchDaemon plist 路径。"""
+        raise NotImplementedError
+
+    @property
+    def unit(self) -> str:
+        """Linux systemd user service unit 名称。"""
         raise NotImplementedError
 
     @property
@@ -104,6 +117,10 @@ class MihomoBackend(Backend):
         return "/Library/LaunchDaemons/com.mihomo.tun.plist"
 
     @property
+    def unit(self) -> str:
+        return "mihomo.service"
+
+    @property
     def config_file(self) -> str:
         return os.path.join(self.config_dir, "mihomo", "config.yaml")
 
@@ -117,7 +134,7 @@ class MihomoBackend(Backend):
 
 
 class SingboxBackend(Backend):
-    """Sing-box 后端实现（预留）"""
+    """Sing-box 后端实现"""
 
     def __init__(self, config: dict):
         super().__init__("singbox", config)
@@ -129,6 +146,10 @@ class SingboxBackend(Backend):
     @property
     def plist(self) -> str:
         return "/Library/LaunchDaemons/com.singbox.tun.plist"
+
+    @property
+    def unit(self) -> str:
+        return "sing-box.service"
 
     @property
     def config_file(self) -> str:
@@ -194,9 +215,57 @@ def list_network_services() -> list:
 
 
 def launchctl_running(label: str, *, sudo: bool = False) -> bool:
-    """检查 launchctl 服务是否在运行。"""
+    """检查 launchctl 服务是否在运行（仅 macOS）。"""
     r = run(["launchctl", "print", label], sudo=sudo, capture=True)
     return r.returncode == 0
+
+
+# ── 平台感知的服务管理 ──────────────────────────────────────────────────────
+
+def service_running(backend: Backend) -> bool:
+    """检查引擎服务是否在运行。"""
+    if IS_MACOS:
+        return launchctl_running(backend.label)
+    r = run(["systemctl", "--user", "is-active", "--quiet", backend.unit], capture=True)
+    return r.returncode == 0
+
+
+def service_start(backend: Backend, config: dict) -> subprocess.CompletedProcess:
+    """启动引擎服务。
+
+    Args:
+        backend: 后端实例
+        config: 全局配置（macOS 需要定位 plist 源文件）
+
+    Returns:
+        subprocess.CompletedProcess
+    """
+    if IS_MACOS:
+        if not os.path.isfile(backend.plist):
+            src = os.path.join(DEFAULT_CONFIG_DIR, "launchdaemons",
+                               os.path.basename(backend.plist))
+            if not os.path.isfile(src):
+                print(f"{RED}✗{NC} plist 源文件不存在：{src}")
+                sys.exit(1)
+            run(["cp", src, backend.plist], sudo=True)
+        return run(["launchctl", "bootstrap", "system", backend.plist],
+                   sudo=True, capture=True)
+    return run(["systemctl", "--user", "start", backend.unit], capture=True)
+
+
+def service_stop(backend: Backend) -> subprocess.CompletedProcess:
+    """停止引擎服务。"""
+    if IS_MACOS:
+        return run(["launchctl", "bootout", backend.label], sudo=True, capture=True)
+    return run(["systemctl", "--user", "stop", backend.unit], capture=True)
+
+
+def service_restart(backend: Backend) -> subprocess.CompletedProcess:
+    """重启引擎服务。"""
+    if IS_MACOS:
+        return run(["launchctl", "kickstart", "-k", backend.label],
+                   sudo=True, capture=True)
+    return run(["systemctl", "--user", "restart", backend.unit], capture=True)
 
 
 def scutil_exec(script: str):
@@ -350,18 +419,21 @@ def dns_deactivate(config: dict):
 
 
 def dns_lock_start(config: dict):
-    """启动 dns-lock watchdog daemon。"""
+    """启动 dns-lock watchdog daemon（仅 macOS）。"""
+    if not IS_MACOS:
+        return
     dns_lock_label = config.get("dns_lock_label", DEFAULTS["dns_lock_label"])
     dns_lock_plist_src = os.path.join(DEFAULT_CONFIG_DIR, "launchdaemons", f"{dns_lock_label}.plist")
     dns_lock_plist = f"/Library/LaunchDaemons/{dns_lock_label}.plist"
-    dns_watchdog = os.path.join(DEFAULT_CONFIG_DIR, "scripts", "dns-watchdog")
 
     if os.path.isfile(dns_lock_plist) and not launchctl_running(f"system/{dns_lock_label}"):
         run(["launchctl", "bootstrap", "system", dns_lock_plist], sudo=True)
 
 
 def dns_lock_stop(config: dict):
-    """停止 dns-lock watchdog daemon。"""
+    """停止 dns-lock watchdog daemon（仅 macOS）。"""
+    if not IS_MACOS:
+        return
     dns_lock_label = config.get("dns_lock_label", DEFAULTS["dns_lock_label"])
     if launchctl_running(f"system/{dns_lock_label}"):
         run(["launchctl", "bootout", f"system/{dns_lock_label}"], sudo=True)
@@ -391,8 +463,13 @@ def proxy_deactivate():
 # ── 引擎启停共用逻辑 ──────────────────────────────────────────────────────────
 
 def _wait_ready(backend: Backend):
-    """等待 DNS(53) + 代理 (7890) 端口就绪，再等 3s 让节点解析稳定。"""
-    wait_port(53, timeout=10)
+    """等待引擎端口就绪。
+
+    macOS：等 DNS(53) + 代理(7890)，因为可能启用 TUN/fakeip。
+    Linux（最小集）：只等代理(7890)，不劫持 DNS。
+    """
+    if IS_MACOS:
+        wait_port(53, timeout=10)
     wait_port(7890, timeout=10)
     time.sleep(3)
 
@@ -400,38 +477,34 @@ def _wait_ready(backend: Backend):
 # ── 命令：start ───────────────────────────────────────────────────────────────
 
 def cmd_start(backend: Backend, config: dict):
-    if not os.path.isfile(backend.plist):
-        src = os.path.join(DEFAULT_CONFIG_DIR, "launchdaemons",
-                           os.path.basename(backend.plist))
-        if not os.path.isfile(src):
-            print(f"{RED}✗{NC} plist 源文件不存在：{src}")
-            sys.exit(1)
-        run(["cp", src, backend.plist], sudo=True)
-
-    r = run(["launchctl", "bootstrap", "system", backend.plist], sudo=True, capture=True)
+    r = service_start(backend, config)
     if r.returncode != 0:
         print(f"{RED}✗{NC} {backend.name} 启动失败")
-        print(r.stderr)
+        print(r.stderr if r.stderr else "")
         sys.exit(1)
 
     print(f"{backend.name} started")
     _wait_ready(backend)
-    dns_activate(config)
-    dns_lock_start(config)
-    print("DNS → 127.0.0.1 (已激活)")
-    if get_mode(backend) == "proxy":
-        proxy_activate()
-        print("系统代理 → 127.0.0.1:7890 (已激活)")
+
+    if IS_MACOS:
+        dns_activate(config)
+        dns_lock_start(config)
+        print("DNS → 127.0.0.1 (已激活)")
+        if get_mode(backend) == "proxy":
+            proxy_activate()
+            print("系统代理 → 127.0.0.1:7890 (已激活)")
 
 
 # ── 命令：stop ────────────────────────────────────────────────────────────────
 
 def cmd_stop(backend: Backend, config: dict):
-    dns_lock_stop(config)
-    dns_deactivate(config)
-    proxy_deactivate()
-    print("DNS → DHCP (已还原), 系统代理已关闭")
-    run(["launchctl", "bootout", backend.label], sudo=True)
+    if IS_MACOS:
+        dns_lock_stop(config)
+        dns_deactivate(config)
+        proxy_deactivate()
+        print("DNS → DHCP (已还原), 系统代理已关闭")
+
+    service_stop(backend)
     print(f"{backend.name} stopped")
 
 
@@ -440,41 +513,48 @@ def cmd_stop(backend: Backend, config: dict):
 def cmd_restart(backend: Backend, config: dict, *, clean: bool = False):
     if clean and os.path.isfile(backend.cache_file):
         os.remove(backend.cache_file)
-    run(["launchctl", "kickstart", "-k", backend.label], sudo=True)
+    service_restart(backend)
     print(f"{backend.name} restarted{'  (cache cleared)' if clean else ''}")
     _wait_ready(backend)
-    dns_activate(config)
-    dns_lock_start(config)
-    print("DNS → 127.0.0.1 (已刷新)")
-    if get_mode(backend) == "proxy":
-        proxy_activate()
-        print("系统代理 → 127.0.0.1:7890")
-    else:
-        proxy_deactivate()
+
+    if IS_MACOS:
+        dns_activate(config)
+        dns_lock_start(config)
+        print("DNS → 127.0.0.1 (已刷新)")
+        if get_mode(backend) == "proxy":
+            proxy_activate()
+            print("系统代理 → 127.0.0.1:7890")
+        else:
+            proxy_deactivate()
 
 
 # ── 命令：fix ─────────────────────────────────────────────────────────────────
 
 def cmd_fix(backend: Backend, config: dict):
+    """修复引擎状态：运行中则重注入 DNS/代理，已停止则还原系统配置。"""
     api_base = config.get("api_base", DEFAULTS["api_base"])
     api_secret = config.get("api_secret", "")
 
-    if launchctl_running(backend.label):
-        print(f"{BOLD}[引擎运行中] 修复 DNS → 127.0.0.1{NC}")
-        before = get_primary_resolver()
-        print(f"  修复前 primary resolver: {before or 'unknown'}")
+    if service_running(backend):
+        if IS_MACOS:
+            print(f"{BOLD}[引擎运行中] 修复 DNS → 127.0.0.1{NC}")
+            before = get_primary_resolver()
+            print(f"  修复前 primary resolver: {before or 'unknown'}")
 
-        dns_activate(config)
-        after = get_primary_resolver()
-        if after == "127.0.0.1":
-            print(f"  {GREEN}✓{NC} primary resolver → 127.0.0.1")
+            dns_activate(config)
+            after = get_primary_resolver()
+            if after == "127.0.0.1":
+                print(f"  {GREEN}✓{NC} primary resolver → 127.0.0.1")
+            else:
+                print(f"  {RED}✗{NC} primary resolver 仍为 {after}，需手动排查")
+
+            if get_mode(backend) == "proxy":
+                proxy_activate()
+                print(f"  {GREEN}✓{NC} 系统代理 → 127.0.0.1:7890")
         else:
-            print(f"  {RED}✗{NC} primary resolver 仍为 {after}，需手动排查")
+            print(f"{BOLD}[引擎运行中] 尝试热重载配置{NC}")
 
-        if get_mode(backend) == "proxy":
-            proxy_activate()
-            print(f"  {GREEN}✓{NC} 系统代理 → 127.0.0.1:7890")
-
+        # 热重载配置（跨平台，通过 Clash API）
         if backend.name == "mihomo":
             subprocess.run(
                 ["curl", "-s", "--noproxy", "*", "-X", "PUT",
@@ -494,32 +574,42 @@ def cmd_fix(backend: Backend, config: dict):
             print(f"  {GREEN}✓{NC} mihomo DNS 缓存已清空")
 
         print()
-        if before == "127.0.0.1":
-            print(f"{GREEN}{BOLD}一切正常，无需修复。{NC}")
+        if IS_MACOS:
+            if before == "127.0.0.1":
+                print(f"{GREEN}{BOLD}一切正常，无需修复。{NC}")
+            else:
+                print(f"{GREEN}{BOLD}修复完成。{NC}")
+                dns_lock_label = config.get("dns_lock_label", DEFAULTS["dns_lock_label"])
+                if not launchctl_running(f"system/{dns_lock_label}"):
+                    print(f"{CYAN}建议执行 {BOLD}proxyctl dns-lock{NC}"
+                          f"{CYAN} 防止 DNS 再次被覆盖。{NC}")
         else:
             print(f"{GREEN}{BOLD}修复完成。{NC}")
-            if not launchctl_running(f"system/{config.get('dns_lock_label', DEFAULTS['dns_lock_label'])}"):
-                print(f"{CYAN}建议执行 {BOLD}proxyctl dns-lock{NC}{CYAN} 防止 DNS 再次被覆盖。{NC}")
     else:
-        print(f"{BOLD}[引擎已停止] 还原系统配置为正常状态{NC}")
-        before = get_primary_resolver()
+        if IS_MACOS:
+            print(f"{BOLD}[引擎已停止] 还原系统配置为正常状态{NC}")
+            before = get_primary_resolver()
 
-        if launchctl_running(f"system/{config.get('dns_lock_label', DEFAULTS['dns_lock_label'])}"):
-            dns_lock_stop(config)
-            print(f"  {GREEN}✓{NC} dns-lock 看门狗已停止")
+            dns_lock_label = config.get("dns_lock_label", DEFAULTS["dns_lock_label"])
+            if launchctl_running(f"system/{dns_lock_label}"):
+                dns_lock_stop(config)
+                print(f"  {GREEN}✓{NC} dns-lock 看门狗已停止")
 
-        dns_deactivate(config)
-        after = get_primary_resolver()
-        print(f"  {GREEN}✓{NC} DNS → DHCP ({after or 'DHCP'})")
+            dns_deactivate(config)
+            after = get_primary_resolver()
+            print(f"  {GREEN}✓{NC} DNS → DHCP ({after or 'DHCP'})")
 
-        proxy_deactivate()
-        print(f"  {GREEN}✓{NC} 系统代理已关闭")
+            proxy_deactivate()
+            print(f"  {GREEN}✓{NC} 系统代理已关闭")
 
-        print()
-        if before != "127.0.0.1":
-            print(f"{GREEN}{BOLD}一切正常，无需修复。{NC}")
+            print()
+            if before != "127.0.0.1":
+                print(f"{GREEN}{BOLD}一切正常，无需修复。{NC}")
+            else:
+                print(f"{GREEN}{BOLD}还原完成。{NC}")
         else:
-            print(f"{GREEN}{BOLD}还原完成。{NC}")
+            print(f"{YELLOW}引擎已停止，无需修复。{NC}")
+            print(f"  使用 {BOLD}proxyctl start{NC} 启动引擎")
 
 
 # ── 命令：recover ─────────────────────────────────────────────────────────────
@@ -701,6 +791,9 @@ def _mode_singbox(config_path: str, target: str):
 # ── 命令：dns-lock / dns-unlock ───────────────────────────────────────────────
 
 def cmd_dns_lock(config: dict):
+    if not IS_MACOS:
+        print(f"{YELLOW}dns-lock 仅支持 macOS（Linux 不劫持系统 DNS）{NC}")
+        return
     dns_lock_label = config.get("dns_lock_label", DEFAULTS["dns_lock_label"])
     dns_lock_plist = f"/Library/LaunchDaemons/{dns_lock_label}.plist"
     dns_lock_plist_src = os.path.join(DEFAULT_CONFIG_DIR, "launchdaemons", f"{dns_lock_label}.plist")
@@ -722,8 +815,10 @@ def cmd_dns_lock(config: dict):
 
 
 def cmd_dns_unlock(config: dict):
+    if not IS_MACOS:
+        print(f"{YELLOW}dns-unlock 仅支持 macOS{NC}")
+        return
     dns_lock_label = config.get("dns_lock_label", DEFAULTS["dns_lock_label"])
-    dns_lock_plist = f"/Library/LaunchDaemons/{dns_lock_label}.plist"
 
     r = run(["launchctl", "bootout", f"system/{dns_lock_label}"], sudo=True, capture=True)
     if r.returncode == 0:
@@ -829,7 +924,17 @@ def main():
         print(f"  请在 {CONFIG_FILE} 中配置 api_secret: <your-clash-api-secret>")
         print()
 
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib"))
+    # lib 搜索路径：优先源码目录（开发），回退安装目录
+    script_dir = os.path.dirname(os.path.realpath(__file__))
+    lib_candidates = [
+        os.path.join(script_dir, "..", "lib"),           # 开发：bin/../lib
+        os.path.join(script_dir, "..", "lib", "proxyctl"),  # 安装：~/.local/lib/proxyctl
+    ]
+    for lib_dir in lib_candidates:
+        lib_dir = os.path.realpath(lib_dir)
+        if os.path.isdir(lib_dir) and lib_dir not in sys.path:
+            sys.path.insert(0, lib_dir)
+            break
 
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
 
