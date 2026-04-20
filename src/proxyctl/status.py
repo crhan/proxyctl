@@ -418,30 +418,48 @@ def _print_proxy_settings(d_proxy: dict, daemon_up: bool, mode: str):
             print(f"  — 未开启")
 
 
-def _print_dns(daemon_up: bool, d_dns: dict):
+def _print_dns(daemon_up: bool, d_dns: dict, mode: str):
+    """打印 DNS 状态段。
+
+    mode 决定了 DNS 的期望状态：
+    - tun/mixed：引擎劫持 DNS，期望系统 DNS → 127.0.0.1，53 端口应监听
+    - proxy：纯代理模式，不劫持 DNS，不检查 53 端口和系统 DNS 指向
+    """
+    dns_hijack = mode in ("tun", "mixed")
+
     print(f"\n{BOLD}DNS{NC}")
-    if d_dns["dns_up"]:
-        print(f"  listen  {GREEN}127.0.0.1:53{NC}")
-    elif daemon_up:
-        print(f"  listen  {RED}127.0.0.1:53 ✗{NC}")
-    else:
-        print(f"  listen  — (daemon stopped)")
 
-    sys_dns = d_dns["sys_dns"]
-    if sys_dns == "127.0.0.1":
-        tag = f"{GREEN}→ 127.0.0.1{NC}" if daemon_up else \
-              f"{RED}→ 127.0.0.1{NC} (daemon 未运行，DNS 将不可用!)"
-    else:
-        tag = (f"{RED}→ {sys_dns or 'unknown'}{NC} (应为 127.0.0.1)"
-               if daemon_up else f"→ {sys_dns or 'unknown'}")
-    print(f"  system  {tag}")
+    if dns_hijack:
+        # TUN/mixed 模式：需要 53 端口和系统 DNS 指向 127.0.0.1
+        if d_dns["dns_up"]:
+            print(f"  listen  {GREEN}127.0.0.1:53{NC}")
+        elif daemon_up:
+            print(f"  listen  {RED}127.0.0.1:53 ✗{NC}")
+        else:
+            print(f"  listen  — (daemon stopped)")
 
-    if d_dns["lock_up"]:
-        tag = f"{GREEN}✓{NC} running" if daemon_up else \
-              f"{YELLOW}✓{NC} running (daemon 未运行，建议 sb dns-unlock)"
+        sys_dns = d_dns["sys_dns"]
+        if sys_dns == "127.0.0.1":
+            tag = f"{GREEN}→ 127.0.0.1{NC}" if daemon_up else \
+                  f"{RED}→ 127.0.0.1{NC} (daemon 未运行，DNS 将不可用!)"
+        else:
+            tag = (f"{RED}→ {sys_dns or 'unknown'}{NC} (应为 127.0.0.1)"
+                   if daemon_up else f"→ {sys_dns or 'unknown'}")
+        print(f"  system  {tag}")
+
+        if d_dns["lock_up"]:
+            tag = f"{GREEN}✓{NC} running" if daemon_up else \
+                  f"{YELLOW}✓{NC} running (daemon 未运行，建议 proxyctl dns-unlock)"
+        else:
+            tag = "— not running"
+        print(f"  lock    {tag}")
     else:
-        tag = "— not running"
-    print(f"  lock    {tag}")
+        # proxy 模式：不劫持 DNS，仅显示当前状态作为参考
+        sys_dns = d_dns.get("sys_dns", "")
+        if sys_dns:
+            print(f"  system  → {sys_dns} (proxy 模式，未劫持)")
+        else:
+            print(f"  mode    proxy（未劫持系统 DNS）")
 
     if d_dns["overrides"]:
         print(f"  {YELLOW}⚠ /etc/resolver/ 覆盖: {' '.join(d_dns['overrides'])}{NC}")
@@ -521,7 +539,7 @@ def cmd_status(engine, api: str, api_secret: str,
             _print_tun(engine, f_tun.result())
 
         _print_proxy_settings(f_proxy.result(), daemon_up, mode)
-        _print_dns(daemon_up, f_dns.result())
+        _print_dns(daemon_up, f_dns.result(), mode)
         _print_network(f_network.result())
 
     # 环境变量代理

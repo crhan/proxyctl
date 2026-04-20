@@ -2,11 +2,14 @@
 
 import json
 import os
+import platform
 import socket
 import subprocess
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
+
+IS_MACOS = platform.system() == "Darwin"
 
 
 RED    = "\033[0;31m"
@@ -553,24 +556,31 @@ def cmd_check(engine, api: str, api_secret: str,
 
     infra = corp_via if corp_net else f"{YELLOW}no-corp{NC}"
 
-    # DNS
-    r3 = subprocess.run(["scutil", "--dns"], capture_output=True, text=True)
-    sys_dns = ""
-    for line in r3.stdout.splitlines():
-        if "nameserver[0]" in line:
-            sys_dns = line.split()[-1]
-            break
+    # DNS：仅在 tun/mixed 模式下检查系统 DNS 是否指向 127.0.0.1
+    dns_hijack = mode in ("tun", "mixed")
     dns_bad = False
-    if sys_dns == "127.0.0.1":
-        infra += "  DNS✓"
-    else:
-        infra += f"  {RED}DNS→{sys_dns or '?'}{NC}"
-        dns_bad = True
-        fail = True
 
-    r4 = subprocess.run(["launchctl", "print", f"system/{dns_lock_label}"],
-                        capture_output=True)
-    infra += ("  lock✓" if r4.returncode == 0 else f"  {YELLOW}no-lock{NC}")
+    if dns_hijack and IS_MACOS:
+        r3 = subprocess.run(["scutil", "--dns"], capture_output=True, text=True)
+        sys_dns = ""
+        for line in r3.stdout.splitlines():
+            if "nameserver[0]" in line:
+                sys_dns = line.split()[-1]
+                break
+        if sys_dns == "127.0.0.1":
+            infra += "  DNS✓"
+        else:
+            infra += f"  {RED}DNS→{sys_dns or '?'}{NC}"
+            dns_bad = True
+            fail = True
+
+        r4 = subprocess.run(["launchctl", "print", f"system/{dns_lock_label}"],
+                            capture_output=True)
+        infra += ("  lock✓" if r4.returncode == 0 else f"  {YELLOW}no-lock{NC}")
+    elif dns_hijack:
+        infra += f"  {YELLOW}DNS(需手动检查){NC}"
+    else:
+        infra += "  DNS(proxy模式)"
 
     watchdog_log = f"{sb_dir}/dns-watchdog.log"
     if os.path.isfile(watchdog_log):
