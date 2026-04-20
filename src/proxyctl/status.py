@@ -1,10 +1,14 @@
 """proxyctl status — 系统状态面板（并发采集数据，顺序打印）"""
 
 import os
+import platform
 import re
 import subprocess
 import socket
 from concurrent.futures import ThreadPoolExecutor
+
+IS_MACOS = platform.system() == "Darwin"
+IS_LINUX = platform.system() == "Linux"
 
 
 RED    = "\033[0;31m"
@@ -61,6 +65,24 @@ def _ifconfig_ip(iface: str) -> str:
 # ── 数据采集函数（可并发） ────────────────────────────────────────────────────
 
 def _gather_engine(engine) -> dict:
+    """采集引擎进程信息：PID、运行次数、运行时间。"""
+    if IS_LINUX:
+        # systemd --user：用 systemctl show 获取 PID
+        r = subprocess.run(
+            ["systemctl", "--user", "show", engine.unit, "-p", "MainPID", "--value"],
+            capture_output=True, text=True
+        )
+        pid = r.stdout.strip()
+        daemon_up = bool(pid and pid != "0")
+        runs = ""
+        etime = ""
+        if daemon_up:
+            r2 = subprocess.run(["ps", "-o", "etime=", "-p", pid],
+                                capture_output=True, text=True)
+            etime = r2.stdout.strip()
+        return {"pid": pid, "runs": runs, "daemon_up": daemon_up, "etime": etime}
+
+    # macOS: launchctl
     pid   = _launchctl_pid(engine.label)
     runs  = _launchctl_runs(engine.label)
     daemon_up = bool(pid and pid != "0")
@@ -73,19 +95,34 @@ def _gather_engine(engine) -> dict:
 
 
 def _gather_ports(claude_proxy_label: str) -> dict:
+    """采集端口监听状态。"""
     ports = {desc: _port_listening(p)
              for p, desc in [(7890, "proxy"), (9090, "api")]}
-    cp_label   = f"system/{claude_proxy_label}"
-    cp_running = _launchctl_running(cp_label, sudo=True)
-    cp_pid     = _launchctl_pid(cp_label, sudo=True) if cp_running else ""
-    cp_port    = _port_listening(7891) if cp_running else False
+    cp_running = False
+    cp_pid = ""
+    cp_port = False
+    if IS_MACOS:
+        cp_label   = f"system/{claude_proxy_label}"
+        cp_running = _launchctl_running(cp_label, sudo=True)
+        cp_pid     = _launchctl_pid(cp_label, sudo=True) if cp_running else ""
+        cp_port    = _port_listening(7891) if cp_running else False
     return {"ports": ports, "cp_running": cp_running,
             "cp_pid": cp_pid, "cp_port": cp_port}
 
 
 def _gather_tun(engine, daemon_up: bool) -> dict:
-    """采集 TUN 专属数据。"""
+    """采集 TUN 专属数据（Linux 最小集不启用 TUN，返回空数据）。"""
     tun_iface = addr = mtu = ""
+    fakeip = hijack = ""
+    excludes = []
+    route_iface = ""
+
+    if not IS_MACOS:
+        # Linux 最小集：proxy-only mode，无 TUN
+        return {"tun_iface": "", "addr": "", "mtu": "",
+                "fakeip": "off", "hijack": "", "excludes": [],
+                "route_iface": ""}
+
     if daemon_up:
         r = subprocess.run(["ifconfig", "-l"], capture_output=True, text=True)
         for iface in r.stdout.split():
@@ -139,7 +176,10 @@ def _gather_tun(engine, daemon_up: bool) -> dict:
 
 
 def _gather_proxy_settings() -> dict:
-    """采集系统代理设置（networksetup）。"""
+    """采集系统代理设置（仅 macOS，Linux 返回空）。"""
+    if not IS_MACOS:
+        return {"active_svc": "", "info": {}}
+
     # 找活跃网络服务
     active_svc = ""
     for svc in ["Wi-Fi", "USB 10/100/1000 LAN", "Thunderbolt Bridge", "Ethernet"]:
@@ -174,8 +214,14 @@ def _gather_proxy_settings() -> dict:
 
 
 def _gather_dns(dns_lock_label: str) -> dict:
-    """采集 DNS 状态。"""
+    """采集 DNS 状态（macOS: scutil --dns，Linux: 简化检测）。"""
     dns_up  = _port_listening(53)
+
+    if not IS_MACOS:
+        # Linux 最小集：不劫持 DNS，只检查 53 端口
+        return {"dns_up": dns_up, "lock_up": False, "sys_dns": "",
+                "resolvers": [], "overrides": []}
+
     lock_up = _launchctl_running(f"system/{dns_lock_label}")
 
     r = subprocess.run(["scutil", "--dns"], capture_output=True, text=True)
@@ -444,9 +490,18 @@ def _print_network(d_net: dict):
 # ── 主入口 ────────────────────────────────────────────────────────────────────
 
 def cmd_status(engine, api: str, api_secret: str,
-               dns_lock_label: str, claude_proxy_label: str, sb_dir: str,
-               mode: str = ""):
-    """proxyctl status — 并发采集数据，顺序打印状态面板。"""
+               config: dict, mode: str = ""):
+    """proxyctl status — 并发采集数据，顺序打印状态面板。
+
+    Args:
+        engine: Backend 实例
+        api: Clash API 基础 URL
+        api_secret: Clash API Bearer token
+        config: 全局配置字典
+        mode: 代理模式字符串（tun/proxy/mixed）
+    """
+    dns_lock_label = config.get("dns_lock_label", "com.proxyctl.dns-lock")
+    claude_proxy_label = config.get("claude_proxy_label", "com.proxyctl.claude-proxy")
 
     # 全部 section 并发采集，拿到一个打印一个
     with ThreadPoolExecutor(max_workers=8) as pool:
