@@ -102,10 +102,14 @@ def _gather_ports(claude_proxy_label: str) -> dict:
     cp_pid = ""
     cp_port = False
     if IS_MACOS:
-        cp_label   = f"system/{claude_proxy_label}"
+        cp_label = f"system/{claude_proxy_label}"
         cp_running = _launchctl_running(cp_label, sudo=True)
-        cp_pid     = _launchctl_pid(cp_label, sudo=True) if cp_running else ""
-        cp_port    = _port_listening(7891) if cp_running else False
+        # fallback：兼容 sb 遗留的 com.singbox.claude-proxy
+        if not cp_running and claude_proxy_label != "com.singbox.claude-proxy":
+            cp_label = "system/com.singbox.claude-proxy"
+            cp_running = _launchctl_running(cp_label, sudo=True)
+        cp_pid = _launchctl_pid(cp_label, sudo=True) if cp_running else ""
+        cp_port = _port_listening(7891) if cp_running else False
     return {"ports": ports, "cp_running": cp_running,
             "cp_pid": cp_pid, "cp_port": cp_port}
 
@@ -223,6 +227,9 @@ def _gather_dns(dns_lock_label: str) -> dict:
                 "resolvers": [], "overrides": []}
 
     lock_up = _launchctl_running(f"system/{dns_lock_label}")
+    # fallback：兼容 sb 遗留的 com.singbox.dns-lock
+    if not lock_up and dns_lock_label != "com.singbox.dns-lock":
+        lock_up = _launchctl_running("system/com.singbox.dns-lock")
 
     r = subprocess.run(["scutil", "--dns"], capture_output=True, text=True)
     sys_dns = ""
@@ -466,47 +473,49 @@ def _print_proxy_settings(d_proxy: dict, daemon_up: bool, mode: str):
 def _print_dns(daemon_up: bool, d_dns: dict, mode: str):
     """打印 DNS 状态段。
 
-    mode 决定了 DNS 的期望状态：
-    - tun/mixed：引擎劫持 DNS，期望系统 DNS → 127.0.0.1，53 端口应监听
-    - proxy：纯代理模式，不劫持 DNS，不检查 53 端口和系统 DNS 指向
+    始终显示 listen/system/lock 的实际状态。
+    mode 决定的是"异常判定标准"：
+    - tun/mixed：DNS 必须指向 127.0.0.1，否则标红
+    - proxy：只显示事实，不判定对错
     """
     dns_hijack = mode in ("tun", "mixed")
 
     print(f"\n{BOLD}DNS{NC}")
 
-    if dns_hijack:
-        # TUN/mixed 模式：需要 53 端口和系统 DNS 指向 127.0.0.1
-        if d_dns["dns_up"]:
-            print(f"  listen  {GREEN}127.0.0.1:53{NC}")
-        elif daemon_up:
-            print(f"  listen  {RED}127.0.0.1:53 ✗{NC}")
-        else:
-            print(f"  listen  — (daemon stopped)")
+    # listen: 53 端口是否在监听
+    if d_dns["dns_up"]:
+        print(f"  listen  {GREEN}127.0.0.1:53{NC}")
+    elif daemon_up and dns_hijack:
+        # tun/mixed 模式下 53 没起来才算错
+        print(f"  listen  {RED}127.0.0.1:53 ✗{NC}")
+    elif daemon_up:
+        # proxy 模式下 53 没起来是正常的
+        print(f"  listen  — (proxy 模式，不需要)")
+    else:
+        print(f"  listen  — (daemon stopped)")
 
-        sys_dns = d_dns["sys_dns"]
+    # system: 当前系统 DNS 指向
+    sys_dns = d_dns.get("sys_dns", "")
+    if dns_hijack:
         if sys_dns == "127.0.0.1":
             tag = f"{GREEN}→ 127.0.0.1{NC}" if daemon_up else \
                   f"{RED}→ 127.0.0.1{NC} (daemon 未运行，DNS 将不可用!)"
         else:
             tag = (f"{RED}→ {sys_dns or 'unknown'}{NC} (应为 127.0.0.1)"
                    if daemon_up else f"→ {sys_dns or 'unknown'}")
-        print(f"  system  {tag}")
-
-        if d_dns["lock_up"]:
-            tag = f"{GREEN}✓{NC} running" if daemon_up else \
-                  f"{YELLOW}✓{NC} running (daemon 未运行，建议 proxyctl dns-unlock)"
-        else:
-            tag = "— not running"
-        print(f"  lock    {tag}")
     else:
-        # proxy 模式：不劫持 DNS，仅显示当前状态作为参考
-        sys_dns = d_dns.get("sys_dns", "")
-        if sys_dns:
-            print(f"  system  → {sys_dns} (proxy 模式，未劫持)")
-        else:
-            print(f"  mode    proxy（未劫持系统 DNS）")
+        tag = f"→ {sys_dns or 'DHCP'}"
+    print(f"  system  {tag}")
 
-    if d_dns["overrides"]:
+    # lock: dns-lock watchdog 状态
+    if d_dns.get("lock_up"):
+        tag = f"{GREEN}✓{NC} running" if daemon_up else \
+              f"{YELLOW}✓{NC} running (daemon 未运行，建议 proxyctl dns-unlock)"
+    else:
+        tag = "— not running"
+    print(f"  lock    {tag}")
+
+    if d_dns.get("overrides"):
         print(f"  {YELLOW}⚠ /etc/resolver/ 覆盖: {' '.join(d_dns['overrides'])}{NC}")
 
 
@@ -522,7 +531,9 @@ def _print_network(d_net: dict):
     iface = d_net.get("default_iface", "")
     ip = d_net.get("default_ip", "")
     if iface and ip:
-        print(f"  {iface:<8s}{ip}")
+        # macOS 扩展：30.x 网段标记为办公网
+        corp_tag = f"  {GREEN}办公网{NC}" if IS_MACOS and ip.startswith("30.") else ""
+        print(f"  {iface:<8s}{ip}{corp_tag}")
     elif iface:
         print(f"  {iface:<8s}{YELLOW}no IP{NC}")
     else:
