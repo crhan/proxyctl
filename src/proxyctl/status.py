@@ -96,8 +96,8 @@ def _gather_engine(engine) -> dict:
 
 def _gather_ports(claude_proxy_label: str) -> dict:
     """采集端口监听状态。"""
-    ports = {desc: _port_listening(p)
-             for p, desc in [(7890, "proxy"), (9090, "api")]}
+    ports = [(p, desc, _port_listening(p))
+             for p, desc in [(7890, "proxy"), (9090, "api")]]
     cp_running = False
     cp_pid = ""
     cp_port = False
@@ -393,13 +393,14 @@ def _print_engine(engine, mode: str, d_engine: dict, d_ports: dict):
         print(f"  daemon  — stopped")
 
     port_parts = []
-    for desc, ok in d_ports["ports"].items():
+    for port_num, desc, ok in d_ports["ports"]:
+        label = f"{desc}:{port_num}"
         if ok:
-            port_parts.append(f"{GREEN}{desc}{NC}")
+            port_parts.append(f"{GREEN}{label}{NC}")
         elif d_engine["daemon_up"]:
-            port_parts.append(f"{RED}{desc}✗{NC}")
+            port_parts.append(f"{RED}{label}✗{NC}")
         else:
-            port_parts.append(f"{desc}—")
+            port_parts.append(f"{label}—")
     print(f"  ports  {' '.join(port_parts)}")
 
     if d_ports["cp_running"]:
