@@ -488,44 +488,92 @@ def cmd_check(engine, api: str, api_secret: str,
         mode_tag = f"{YELLOW}{mode}{NC}"
     print(f"{BOLD}[1/4] 基础状态{NC}  {BOLD}{GREEN}{engine.name}{NC} · {mode_tag}")
 
-    # daemon
-    r = subprocess.run(["launchctl", "print", engine.label],
-                       capture_output=True, text=True)
-    pid = next((l.split()[-1] for l in r.stdout.splitlines() if "pid =" in l), "")
-    daemon_up = bool(pid and pid != "0")
+    # daemon 检测（平台感知）
+    daemon_up = False
+    pid = ""
+    if IS_MACOS:
+        r = subprocess.run(["launchctl", "print", engine.label],
+                           capture_output=True, text=True)
+        pid = next((l.split()[-1] for l in r.stdout.splitlines() if "pid =" in l), "")
+        daemon_up = bool(pid and pid != "0")
+    else:
+        r = subprocess.run(["systemctl", "--user", "show", engine.unit,
+                            "-p", "MainPID", "--value"],
+                           capture_output=True, text=True)
+        pid = r.stdout.strip()
+        daemon_up = bool(pid and pid != "0")
+
     if daemon_up:
         r2 = subprocess.run(["ps", "-o", "etime=", "-p", pid],
                              capture_output=True, text=True)
         etime = r2.stdout.strip()
         print(f"  {GREEN}✓{NC} daemon PID {pid}, uptime {etime or '?'}")
     else:
-        print(f"  {RED}✗{NC} daemon not running — 执行 sb start")
+        print(f"  {RED}✗{NC} daemon not running — 执行 proxyctl start")
         return
 
-    # 端口
+    # 端口检测（proxy 模式不检查 53）
+    dns_hijack = mode in ("tun", "mixed")
+    check_ports = [(53, "dns"), (7890, "proxy"), (9090, "api")] if dns_hijack \
+                  else [(7890, "proxy"), (9090, "api")]
     ok_ports, fail_ports = [], []
-    for port, desc in [(53, "dns"), (7890, "proxy"), (9090, "api")]:
-        (ok_ports if _port_listening(port) else fail_ports).append(desc)
-        if not _port_listening(port):
+    for port, desc in check_ports:
+        if _port_listening(port):
+            ok_ports.append(f"{desc}:{port}")
+        else:
+            fail_ports.append(f"{desc}:{port}")
             fail = True
 
-    cp_label = f"system/{claude_proxy_label}"
-    r = subprocess.run(["sudo", "launchctl", "print", cp_label], capture_output=True)
-    if r.returncode == 0:
-        cp_status = (f"{GREEN}claude-proxy✓{NC}" if _port_listening(7891)
-                     else f"{YELLOW}claude-proxy(no-port){NC}")
-    else:
-        cp_status = f"{YELLOW}claude-proxy✗{NC}"
+    # claude-proxy（仅 macOS）
+    cp_status = ""
+    if IS_MACOS:
+        cp_label = f"system/{claude_proxy_label}"
+        r = subprocess.run(["sudo", "launchctl", "print", cp_label], capture_output=True)
+        cp_found = r.returncode == 0
+        # fallback：兼容 sb 遗留 label
+        if not cp_found and claude_proxy_label != "com.singbox.claude-proxy":
+            r = subprocess.run(["sudo", "launchctl", "print",
+                                "system/com.singbox.claude-proxy"], capture_output=True)
+            cp_found = r.returncode == 0
+        if cp_found:
+            cp_status = (f"{GREEN}claude-proxy✓{NC}" if _port_listening(7891)
+                         else f"{YELLOW}claude-proxy(no-port){NC}")
+        else:
+            cp_status = f"{YELLOW}claude-proxy✗{NC}"
 
     if ok_ports:
-        print(f"  {GREEN}✓{NC} ports: {' '.join(ok_ports)}  {cp_status}")
+        parts = f"  {GREEN}✓{NC} ports: {' '.join(ok_ports)}"
+        if cp_status:
+            parts += f"  {cp_status}"
+        print(parts)
     if fail_ports:
-        print(f"  {RED}✗{NC} missing: {' '.join(fail_ports)}  {cp_status}")
+        parts = f"  {RED}✗{NC} missing: {' '.join(fail_ports)}"
+        if cp_status and not ok_ports:
+            parts += f"  {cp_status}"
+        print(parts)
 
-    # 网络/DNS/watchdog 状态行
-    en0_ip = subprocess.run(["ifconfig", "en0"], capture_output=True, text=True).stdout
-    en0_addr = next((l.split()[1] for l in en0_ip.splitlines()
-                     if l.strip().startswith("inet ") and len(l.split()) >= 2), "")
+    # 网络环境状态行
+    if IS_MACOS:
+        en0_r = subprocess.run(["ifconfig", "en0"], capture_output=True, text=True)
+        en0_addr = next((l.split()[1] for l in en0_r.stdout.splitlines()
+                         if l.strip().startswith("inet ") and len(l.split()) >= 2), "")
+    else:
+        # Linux：获取默认出口 IP
+        en0_addr = ""
+        r_route = subprocess.run(["ip", "route", "show", "default"],
+                                 capture_output=True, text=True)
+        default_iface = ""
+        for i, tok in enumerate(r_route.stdout.split()):
+            if tok == "dev" and i + 1 < len(r_route.stdout.split()):
+                default_iface = r_route.stdout.split()[i + 1]
+                break
+        if default_iface:
+            r_ip = subprocess.run(["ip", "-4", "addr", "show", default_iface],
+                                  capture_output=True, text=True)
+            for line in r_ip.stdout.splitlines():
+                if "inet " in line:
+                    en0_addr = line.split()[1].split("/")[0]
+                    break
     # 企业网络检测：仅当配置了 corp_dns.server 时启用
     corp_net = False
     corp_via = ""
@@ -538,7 +586,7 @@ def cmd_check(engine, api: str, api_secret: str,
         if en0_addr.startswith(corp_prefix):
             corp_net = True
             corp_via = f"直连({en0_addr})"
-        else:
+        elif IS_MACOS:
             r2 = subprocess.run(["ifconfig", "-l"], capture_output=True, text=True)
             for iface in r2.stdout.split():
                 if not iface.startswith("utun"):
