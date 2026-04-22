@@ -828,6 +828,41 @@ def cmd_dns_unlock(config: dict):
     print(f"已删除 {dns_lock_plist} (源文件保留在 {DEFAULT_CONFIG_DIR}/launchdaemons/)")
 
 
+# ── 命令：env ────────────────────────────────────────────────────────────────
+
+def cmd_env(config: dict, unset: bool = False):
+    """输出设置/清除代理环境变量的 shell 语句。
+
+    用法：
+        eval $(proxyctl env)         # 设置代理
+        eval $(proxyctl env --unset) # 清除代理
+
+    Args:
+        config: 全局配置字典
+        unset: True 则输出 unset 语句
+    """
+    if unset:
+        for var in ("http_proxy", "https_proxy", "all_proxy",
+                     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                     "no_proxy", "NO_PROXY"):
+            print(f"unset {var};")
+        return
+
+    port = 7890  # mixed-port
+    proxy_http = f"http://127.0.0.1:{port}"
+    proxy_socks = f"socks5://127.0.0.1:{port}"
+    no_proxy = "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+
+    for var in ("http_proxy", "HTTP_PROXY"):
+        print(f"export {var}={proxy_http};")
+    for var in ("https_proxy", "HTTPS_PROXY"):
+        print(f"export {var}={proxy_http};")
+    for var in ("all_proxy", "ALL_PROXY"):
+        print(f"export {var}={proxy_socks};")
+    for var in ("no_proxy", "NO_PROXY"):
+        print(f"export {var}={no_proxy};")
+
+
 # ── 帮助 ──────────────────────────────────────────────────────────────────────
 
 VERSION = "0.1.0"
@@ -864,6 +899,8 @@ def cmd_help(verbose: bool = False):
     print("│  mode [tun|proxy]   切换运行模式                               │")
     print("│  dns-lock           启动 DNS 看门狗 daemon                       │")
     print("│  dns-unlock         停止 DNS 看门狗                             │")
+    print("│  env                输出代理环境变量  eval $(proxyctl env)      │")
+    print("│  env --unset        清除代理环境变量  eval $(proxyctl env off)  │")
     print("└────────────────────────────────────────────────────────────────┘")
 
     print("\n┌─ 其他 ─────────────────────────────────────────────────────────┐")
@@ -919,9 +956,10 @@ def main():
 
     # 检查 api_secret 配置
     if not api_secret:
-        print(f"{YELLOW}警告：未在配置文件中找到 api_secret{NC}")
-        print(f"  请在 {CONFIG_FILE} 中配置 api_secret: <your-clash-api-secret>")
-        print()
+        print(f"{YELLOW}警告：未在配置文件中找到 api_secret{NC}", file=sys.stderr)
+        print(f"  请在 {CONFIG_FILE} 中配置 api_secret: <your-clash-api-secret>",
+              file=sys.stderr)
+        print(file=sys.stderr)
 
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
 
@@ -955,6 +993,9 @@ def main():
         cmd_dns_lock(config)
     elif cmd == "dns-unlock":
         cmd_dns_unlock(config)
+    elif cmd == "env":
+        unset = "--unset" in sys.argv[2:] or "off" in sys.argv[2:]
+        cmd_env(config, unset=unset)
     elif cmd == "audit":
         arg = sys.argv[2] if len(sys.argv) > 2 else "1"
         apply_mode = (arg == "apply")
