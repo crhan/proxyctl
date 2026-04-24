@@ -367,7 +367,7 @@ def _grep_log_connections(domain: str, max_entries: int = 5) -> list:
             continue
         try:
             r = subprocess.run(
-                ["grep", "--text", f"--> {domain}:", f],
+                ["grep", "--text", "--", f"--> {domain}:", f],
                 capture_output=True, text=True, timeout=5
             )
             if r.stdout.strip():
@@ -384,7 +384,7 @@ def _grep_log_connections(domain: str, max_entries: int = 5) -> list:
                 r = subprocess.run(
                     ["journalctl", "--user", "--no-pager", "-u", "mihomo.service",
                      "-u", "sing-box.service", "--since", "24 hours ago",
-                     "--grep", f"--> {domain}:"],
+                     "--grep", f"-- {domain}:"],
                     capture_output=True, text=True, timeout=5
                 )
                 if r.stdout.strip():
