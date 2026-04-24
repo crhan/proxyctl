@@ -130,23 +130,49 @@ def _section_dns(domain: str, api: str, secret: str,
         except Exception:
             print(f"  {RED}DNS 查询失败{NC}")
     elif data is not None:
-        # Clash API /dns/query 不走 nameserver-policy，可能漏掉 corp-dns 路由的域名。
-        # 先用 mihomo DNS listener (127.0.0.1:53) 补查，它走完整解析栈含 nameserver-policy。
-        mihomo_ips = []
+        # Clash API /dns/query 无结果，尝试其他 DNS 解析路径
+        fallback_ips = []
+        fallback_src = ""
+
+        # 1. 尝试 mihomo DNS listener（仅当 53 端口在监听时）
+        import socket as _sock
+        dns_listening = False
         try:
-            r = subprocess.run(
-                ["dig", "@127.0.0.1", "+short", "+timeout=5", domain, "A"],
-                capture_output=True, text=True, timeout=7
-            )
-            mihomo_ips = [l.strip() for l in r.stdout.splitlines()
-                          if l.strip() and not l.strip().endswith(".")]
-        except Exception:
+            with _sock.create_connection(("127.0.0.1", 53), timeout=0.3):
+                dns_listening = True
+        except OSError:
             pass
 
-        if mihomo_ips:
-            # mihomo 实际能解析，只是 API 端点不支持此路径
-            print(f"  {DIM}(Clash API 无结果，mihomo DNS 解析到:){NC}")
-            for ip in mihomo_ips:
+        if dns_listening:
+            try:
+                r = subprocess.run(
+                    ["dig", "@127.0.0.1", "+short", "+timeout=5", domain, "A"],
+                    capture_output=True, text=True, timeout=7
+                )
+                fallback_ips = [l.strip() for l in r.stdout.splitlines()
+                                if l.strip() and not l.strip().endswith(".")]
+                if fallback_ips:
+                    fallback_src = "mihomo DNS"
+            except Exception:
+                pass
+
+        # 2. mihomo DNS 不可用或无结果，用系统 DNS
+        if not fallback_ips:
+            try:
+                r = subprocess.run(
+                    ["dig", "+short", "+timeout=3", domain, "A"],
+                    capture_output=True, text=True, timeout=5
+                )
+                fallback_ips = [l.strip() for l in r.stdout.splitlines()
+                                if l.strip() and not l.strip().endswith(".")]
+                if fallback_ips:
+                    fallback_src = "系统 DNS"
+            except Exception:
+                pass
+
+        if fallback_ips:
+            print(f"  {DIM}(Clash API 无结果，{fallback_src} 解析到:){NC}")
+            for ip in fallback_ips:
                 resolved_ips.append(ip)
                 is_fake = ip.startswith("198.18.") or ip.startswith("198.19.")
                 tag = f"{RED}fakeip{NC}" if is_fake else f"{GREEN}real{NC}"
@@ -323,8 +349,8 @@ def _section_connections(domain: str, resolved_ips: list,
     domain_conns = []
     for _ in range(3):
         data = _api_get(api, "/connections", secret)
-        if data:
-            for c in data.get("connections", []):
+        if data and isinstance(data, dict):
+            for c in (data.get("connections") or []):
                 m  = c.get("metadata", {})
                 h  = m.get("host", "")
                 di = m.get("destinationIP", "")
