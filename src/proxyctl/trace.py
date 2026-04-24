@@ -341,9 +341,78 @@ def _section_connectivity(scheme: str, domain: str, port, path: str,
     return lines, remote_ip
 
 
+def _grep_log_connections(domain: str, max_entries: int = 5) -> list:
+    """从 mihomo/sing-box 日志中 grep 域名的最近连接记录。
+
+    解析格式：[TCP] src --> domain:port match Rule(payload) using group[node]
+
+    Args:
+        domain: 目标域名
+        max_entries: 最多返回几条（去重后）
+
+    Returns:
+        [{"time": "07:42:13", "proto": "TCP", "rule": "DomainSuffix(github.com)",
+          "chain": "proxy[日本4(IP)(直连)]"}, ...]
+    """
+    import os as _os
+    home = _os.path.expanduser("~")
+    log_candidates = [
+        f"{home}/.config/mihomo/mihomo.log",
+        f"{home}/.config/sing-box/sing-box.log",
+    ]
+    log_file = ""
+    for f in log_candidates:
+        if _os.path.isfile(f):
+            log_file = f
+            break
+    if not log_file:
+        return []
+
+    # 从日志尾部搜索（避免读整个大文件）
+    try:
+        r = subprocess.run(
+            ["grep", "--text", f"--> {domain}:", log_file],
+            capture_output=True, text=True, timeout=5
+        )
+        lines = r.stdout.strip().splitlines()
+    except Exception:
+        return []
+
+    if not lines:
+        return []
+
+    # 解析并去重（按 rule+chain 去重，保留最近的）
+    results = []
+    seen = set()
+    for line in reversed(lines):
+        # time="2026-04-25T07:42:13..." ... [TCP] ... match Rule using chain
+        t_match = re.search(r'T(\d{2}:\d{2}:\d{2})', line)
+        p_match = re.search(r'\[(TCP|UDP)\]', line)
+        r_match = re.search(r'match\s+(\S+)', line)
+        c_match = re.search(r'using\s+(.+?)(?:\s*$|")', line)
+
+        if r_match and c_match:
+            entry_time = t_match.group(1) if t_match else "?"
+            proto = p_match.group(1) if p_match else "?"
+            rule = r_match.group(1)
+            chain = c_match.group(1)
+            key = f"{rule}|{chain}"
+            if key not in seen:
+                seen.add(key)
+                results.append({
+                    "time": entry_time, "proto": proto,
+                    "rule": rule, "chain": chain,
+                })
+            if len(results) >= max_entries:
+                break
+
+    results.reverse()  # 时间正序
+    return results
+
+
 def _section_connections(domain: str, resolved_ips: list,
                          predicted_proxy: str, api: str, secret: str):
-    """[4/4] 实际连接验证 — 从 Clash API 活跃连接中取真实路由。"""
+    """[4/4] 实际连接验证 — 从 Clash API 活跃连接 + 日志历史中取路由信息。"""
     print(f"\n{BOLD}[4/4] 实际连接{NC}")
 
     domain_conns = []
@@ -362,9 +431,18 @@ def _section_connections(domain: str, resolved_ips: list,
         time.sleep(0.3)
 
     if not domain_conns:
-        print(f"  {DIM}无活跃连接记录 (连接可能已关闭){NC}")
-        if predicted_proxy:
-            print(f"  {DIM}基于规则预测，该域名应走: {BOLD}{predicted_proxy}{NC}")
+        # 没有活跃连接，从引擎日志中捞历史记录
+        log_conns = _grep_log_connections(domain)
+        if log_conns:
+            print(f"  {DIM}(无活跃连接，以下为日志中最近的记录){NC}")
+            for entry in log_conns:
+                print(f"  {entry['time']}  {entry['proto']} → "
+                      f"{CYAN}{entry['rule']}{NC} using "
+                      f"{GREEN}{entry['chain']}{NC}")
+        else:
+            print(f"  {DIM}无活跃连接，日志中也无记录{NC}")
+            if predicted_proxy:
+                print(f"  {DIM}基于规则预测，该域名应走: {BOLD}{predicted_proxy}{NC}")
         return
 
     # 去重：按 rule+chains
