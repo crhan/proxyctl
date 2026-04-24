@@ -9,6 +9,8 @@
 #   - loginctl enable-linger $USER（允许用户服务在登出后继续运行）
 #   - mihomo 二进制在 ~/.local/bin/mihomo
 #   - 配置文件在 ~/.config/mihomo/config.yaml
+#
+# 注意：使用 /bin/sh -c 重定向而非 StandardOutput=append: 以兼容 systemd < 240
 
 [Unit]
 Description=Mihomo Proxy Engine (managed by proxyctl)
@@ -17,11 +19,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/mihomo -d %h/.config/mihomo
+ExecStart=/bin/sh -c 'exec %h/.local/bin/mihomo -d %h/.config/mihomo >> %h/.config/mihomo/mihomo.log 2>> %h/.config/mihomo/mihomo.err'
 Restart=on-failure
 RestartSec=5
-StandardOutput=append:%h/.config/mihomo/mihomo.log
-StandardError=append:%h/.config/mihomo/mihomo.err
 
 [Install]
 WantedBy=default.target

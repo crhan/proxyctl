@@ -360,22 +360,39 @@ def _grep_log_connections(domain: str, max_entries: int = 5) -> list:
         f"{home}/.config/mihomo/mihomo.log",
         f"{home}/.config/sing-box/sing-box.log",
     ]
-    log_file = ""
+    # 尝试从日志文件 grep
+    lines = []
     for f in log_candidates:
-        if _os.path.isfile(f):
-            log_file = f
-            break
-    if not log_file:
-        return []
+        if not _os.path.isfile(f):
+            continue
+        try:
+            r = subprocess.run(
+                ["grep", "--text", f"--> {domain}:", f],
+                capture_output=True, text=True, timeout=5
+            )
+            if r.stdout.strip():
+                lines = r.stdout.strip().splitlines()
+                break
+        except Exception:
+            pass
 
-    # 从日志尾部搜索（避免读整个大文件）
-    try:
-        r = subprocess.run(
-            ["grep", "--text", f"--> {domain}:", log_file],
-            capture_output=True, text=True, timeout=5
-        )
-        lines = r.stdout.strip().splitlines()
-    except Exception:
+    # 日志文件没结果（可能被 systemd journal 截走），尝试 journalctl
+    if not lines:
+        import platform as _plat
+        if _plat.system() == "Linux":
+            try:
+                r = subprocess.run(
+                    ["journalctl", "--user", "--no-pager", "-u", "mihomo.service",
+                     "-u", "sing-box.service", "--since", "24 hours ago",
+                     "--grep", f"--> {domain}:"],
+                    capture_output=True, text=True, timeout=5
+                )
+                if r.stdout.strip():
+                    lines = r.stdout.strip().splitlines()
+            except Exception:
+                pass
+
+    if not lines:
         return []
 
     if not lines:
