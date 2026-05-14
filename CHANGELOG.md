@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-05-14
+
+### Added
+- `.python-version` 固定开发期 Python 为 3.13（与 CI 最新矩阵一致）。
+- README 加 Changelog 章节，提供 CHANGELOG 入口。
+- `CHANGELOG.md`（本文件，按 Keep a Changelog 格式回填历史）。
+
+### Changed
+- `pyproject.toml` `[project.urls]` 增加 `Changelog` 和 `Repository`，
+  PyPI 项目页将显示对应链接。
+
 ## [0.1.1] — 2026-05-14
 
 ### Changed
@@ -56,6 +67,7 @@
 - `cli.main()` 处理 `--help/-h/help` 后未 return，导致继续落入默认 else 分支
   二次调用 `cmd_help()`，help 输出重复两次。
 
-[Unreleased]: https://github.com/crhan/proxyctl/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/crhan/proxyctl/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/crhan/proxyctl/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/crhan/proxyctl/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/crhan/proxyctl/releases/tag/v0.1.0

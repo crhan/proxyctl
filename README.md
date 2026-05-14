@@ -198,6 +198,10 @@ python3 bin/proxyctl status
 export PROXYCTL_DEBUG=1
 ```
 
+## Changelog
+
+版本变更记录见 [CHANGELOG.md](https://github.com/crhan/proxyctl/blob/main/CHANGELOG.md)。
+
 ## License
 
 MIT
