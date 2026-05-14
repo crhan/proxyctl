@@ -47,6 +47,20 @@ corp_dns:
   #     mode: direct
 
 # ─────────────────────────────────────────────────────────────
+# 辅助 daemon（如 claude-proxy，secondary sing-box for AI 流量等）
+# ─────────────────────────────────────────────────────────────
+# proxyctl daemon <name> <subcmd> 用来管理这些 daemon。
+# 留空则禁用相关命令。
+extra_daemons: {}
+# 示例：
+# extra_daemons:
+#   claude-proxy:
+#     label: com.example.claude-proxy
+#     plist_src: /path/to/com.example.claude-proxy.plist
+#     log_path:  /path/to/claude-proxy.err
+#     port: 7891
+
+# ─────────────────────────────────────────────────────────────
 # 其他配置
 # ─────────────────────────────────────────────────────────────
 # 日志级别：info (默认) | debug | warn | error

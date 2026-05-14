@@ -878,6 +878,178 @@ def _render_dns_lock_plist(src: str, backend: Backend, config: dict) -> str:
     return text
 
 
+def cmd_engine(backend: Backend, target: str, config: dict):
+    """proxyctl engine [singbox|mihomo] — 切换代理引擎。
+
+    无参时打印当前引擎 + 已部署 plist 状态。
+    切换时执行：停旧 daemon → 撤旧 plist → 装新 plist → 起新 daemon。
+    引擎持久化到 ~/.config/proxyctl/engine 文件。
+    """
+    engine_file = os.path.join(DEFAULT_CONFIG_DIR, "engine")
+    if not target:
+        cur = backend.name
+        sb_ok = os.path.isfile("/Library/LaunchDaemons/com.singbox.tun.plist")
+        mh_ok = os.path.isfile("/Library/LaunchDaemons/com.mihomo.tun.plist")
+        print(f"当前引擎: {cur}")
+        print(f"已部署 plist: singbox={sb_ok} mihomo={mh_ok}")
+        print("切换: proxyctl engine singbox | proxyctl engine mihomo")
+        return
+
+    if target not in ("singbox", "mihomo"):
+        print("用法: proxyctl engine [singbox|mihomo]")
+        sys.exit(1)
+    if target == backend.name:
+        print(f"已经是 {target}，无需切换")
+        return
+    if not IS_MACOS:
+        print(f"{YELLOW}engine 切换暂仅支持 macOS launchd{NC}")
+        sys.exit(1)
+
+    new_backend_cfg = dict(config)
+    new_backend_cfg["backend"] = target
+    new_backend = get_backend(new_backend_cfg)
+
+    plist_src = os.path.join(DEFAULT_CONFIG_DIR, "launchdaemons",
+                              os.path.basename(new_backend.plist))
+    # 预检
+    if not os.path.isfile(plist_src):
+        print(f"{RED}✗{NC} plist 源文件不存在: {plist_src}")
+        sys.exit(1)
+    if not os.path.isfile(new_backend.config_file):
+        print(f"{RED}✗{NC} 配置文件不存在: {new_backend.config_file}")
+        sys.exit(1)
+
+    print(f"停止 {backend.name} ...")
+    dns_lock_stop(config)
+    dns_deactivate(config)
+    proxy_deactivate()
+    run(["launchctl", "bootout", backend.label], sudo=True)
+    run(["/bin/rm", "-f", backend.plist], sudo=True)
+
+    r = run(["/bin/cp", plist_src, new_backend.plist], sudo=True, capture=True)
+    if r.returncode != 0:
+        print(f"{RED}✗{NC} 部署 plist 失败")
+        sys.exit(1)
+
+    # 持久化引擎选择
+    os.makedirs(DEFAULT_CONFIG_DIR, exist_ok=True)
+    with open(engine_file, "w") as f:
+        f.write(target)
+
+    print(f"启动 {new_backend.name} ...")
+    r = run(["launchctl", "bootstrap", "system", new_backend.plist],
+            sudo=True, capture=True)
+    if r.returncode != 0:
+        print(f"{RED}✗{NC} 启动失败")
+        sys.exit(1)
+
+    _wait_ready(new_backend)
+    dns_activate(config)
+    dns_lock_start(config)
+    print("DNS → 127.0.0.1 (已激活)")
+    if get_mode(new_backend) == "proxy":
+        proxy_activate()
+        print("系统代理 → 127.0.0.1:7890")
+    print(f"{GREEN}引擎已切换到 {new_backend.name}{NC}")
+    print(f"{CYAN}提示: 把 engine: {target} 写到 ~/.config/proxyctl/config.yaml 保持持久{NC}")
+
+
+def cmd_daemon(name: str, subcmd: str, config: dict):
+    """proxyctl daemon [name] [subcmd] — 管理 config.extra_daemons 中声明的辅助 daemon。
+
+    config 示例：
+      extra_daemons:
+        my-secondary:
+          label: com.example.my-secondary
+          plist_src: /path/to/com.example.my-secondary.plist
+          log_path:  /path/to/my-secondary.log
+          port: 7891
+    """
+    if not IS_MACOS:
+        print(f"{YELLOW}daemon 命令暂仅支持 macOS launchd{NC}")
+        return
+
+    daemons = (config.get("extra_daemons") or {})
+
+    if not name:
+        if not daemons:
+            print(f"{YELLOW}—{NC} config.yaml 中未声明任何 extra_daemons")
+            return
+        print(f"{BOLD}已声明的 daemon:{NC}")
+        for d_name, d_cfg in daemons.items():
+            label = d_cfg.get("label", "?")
+            running = launchctl_running(f"system/{label}", sudo=True)
+            mark = f"{GREEN}✓{NC}" if running else f"{YELLOW}—{NC}"
+            print(f"  {mark} {d_name}  label={label}")
+        return
+
+    d_cfg = daemons.get(name)
+    if not d_cfg:
+        print(f"{RED}✗{NC} 未声明的 daemon: {name}")
+        print(f"  请在 config.yaml extra_daemons 中加入 {name} 段")
+        sys.exit(1)
+
+    label    = d_cfg.get("label", "")
+    plist_src = os.path.expanduser(d_cfg.get("plist_src", ""))
+    log_path  = os.path.expanduser(d_cfg.get("log_path", ""))
+    port      = d_cfg.get("port")
+    if not label:
+        print(f"{RED}✗{NC} daemon {name} 缺少 label 字段")
+        sys.exit(1)
+
+    full_label = f"system/{label}"
+    plist_dst = f"/Library/LaunchDaemons/{label}.plist"
+
+    subcmd = subcmd or "status"
+    if subcmd == "start":
+        if launchctl_running(full_label, sudo=True):
+            print(f"{name} 已在运行")
+            return
+        if not os.path.isfile(plist_dst):
+            if not os.path.isfile(plist_src):
+                print(f"{RED}✗{NC} plist 源文件不存在: {plist_src}")
+                sys.exit(1)
+            run(["/bin/cp", plist_src, plist_dst], sudo=True)
+        r = run(["launchctl", "bootstrap", "system", plist_dst],
+                sudo=True, capture=True)
+        if r.returncode != 0:
+            print(f"{RED}✗{NC} {name} 启动失败")
+            sys.exit(1)
+        if port:
+            wait_port(int(port), timeout=10)
+            print(f"{GREEN}✓{NC} {name} started (127.0.0.1:{port})")
+        else:
+            print(f"{GREEN}✓{NC} {name} started")
+
+    elif subcmd == "stop":
+        if launchctl_running(full_label, sudo=True):
+            run(["launchctl", "bootout", full_label], sudo=True)
+            print(f"{name} stopped")
+        else:
+            print(f"{name} 未在运行")
+
+    elif subcmd == "restart":
+        run(["launchctl", "kickstart", "-k", full_label], sudo=True)
+        print(f"{name} restarted")
+
+    elif subcmd == "log":
+        if not log_path:
+            print(f"{RED}✗{NC} daemon {name} 未声明 log_path")
+            sys.exit(1)
+        os.execvp("tail", ["tail", "-f", log_path])
+
+    else:  # status
+        if launchctl_running(full_label, sudo=True):
+            r = subprocess.run(["sudo", "launchctl", "print", full_label],
+                               capture_output=True, text=True)
+            pid = next((l.split()[-1] for l in r.stdout.splitlines()
+                        if "pid =" in l), "?")
+            port_str = f", port {port}" if port else ""
+            print(f"{GREEN}✓{NC} {name} running (PID {pid}{port_str})")
+        else:
+            print(f"{RED}✗{NC} {name} not running")
+
+
 def cmd_dns_lock(config: dict, backend: Backend):
     if not IS_MACOS:
         print(f"{YELLOW}dns-lock 仅支持 macOS（Linux 不劫持系统 DNS）{NC}")
@@ -996,12 +1168,14 @@ def cmd_help(verbose: bool = False):
     print("└────────────────────────────────────────────────────────────────┘")
 
     print("\n┌─ 配置管理 ─────────────────────────────────────────────────────┐")
-    print("│  mode [tun|proxy]   切换运行模式                               │")
-    print("│  dns-lock           启动 DNS 看门狗 daemon                       │")
-    print("│  dns-unlock         停止 DNS 看门狗                             │")
-    print("│  env                输出代理环境变量  eval $(proxyctl env)      │")
-    print("│  env --unset        清除代理环境变量  eval $(proxyctl env off)  │")
-    print("│  plugins            显示已加载插件                              │")
+    print("│  engine [singbox|mihomo]  切换代理引擎                          │")
+    print("│  mode [tun|proxy]         切换运行模式                          │")
+    print("│  dns-lock                 启动 DNS 看门狗 daemon                │")
+    print("│  dns-unlock               停止 DNS 看门狗                       │")
+    print("│  daemon [name] [subcmd]   管理 extra_daemons (claude-proxy 等)  │")
+    print("│  env                      输出代理环境变量                      │")
+    print("│  env --unset              清除代理环境变量                      │")
+    print("│  plugins                  显示已加载插件                        │")
     print("└────────────────────────────────────────────────────────────────┘")
 
     print("\n┌─ 其他 ─────────────────────────────────────────────────────────┐")
@@ -1101,6 +1275,17 @@ def main():
         cmd_env(config, unset=unset)
     elif cmd == "plugins":
         cmd_plugins(registry)
+    elif cmd == "engine":
+        target = sys.argv[2] if len(sys.argv) > 2 else ""
+        cmd_engine(backend, target, config)
+    elif cmd == "daemon":
+        name = sys.argv[2] if len(sys.argv) > 2 else ""
+        subcmd = sys.argv[3] if len(sys.argv) > 3 else ""
+        cmd_daemon(name, subcmd, config)
+    elif cmd == "claude-proxy":
+        # sb 时代别名，等价于 `proxyctl daemon claude-proxy <subcmd>`
+        subcmd = sys.argv[2] if len(sys.argv) > 2 else "status"
+        cmd_daemon("claude-proxy", subcmd, config)
     elif cmd == "audit":
         arg = sys.argv[2] if len(sys.argv) > 2 else "1"
         apply_mode = (arg == "apply")
