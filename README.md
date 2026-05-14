@@ -1,5 +1,10 @@
 # proxyctl
 
+[![PyPI](https://img.shields.io/pypi/v/proxyctl.svg)](https://pypi.org/project/proxyctl/)
+[![CI](https://github.com/crhan/proxyctl/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/crhan/proxyctl/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/pypi/pyversions/proxyctl.svg)](https://pypi.org/project/proxyctl/)
+[![License](https://img.shields.io/pypi/l/proxyctl.svg)](https://github.com/crhan/proxyctl/blob/main/LICENSE)
+
 **Proxy configuration lifecycle management** — 不是静态配置，而是配置演进框架。
 
 ## 定位
@@ -56,40 +61,21 @@ proxyctl bench proxy claude       # 测指定组
 
 ## 安装
 
-### 快速安装
+### 从 PyPI 安装（推荐）
 
 ```bash
-# 1. 克隆仓库
-git clone https://github.com/crhan/proxyctl.git
-cd proxyctl
+# 用 uv（推荐，单命令隔离环境）
+uv tool install proxyctl
 
-# 2. 运行安装脚本
-./install.sh
+# 或者 pipx
+pipx install proxyctl
 
-# 3. 配置 API
-nano ~/.config/proxyctl/config.yaml
-# 填入 api_secret: your-clash-api-secret
+# 或者 pip（不推荐全局污染）
+pip install --user proxyctl
 
-# 4. 验证
+# 验证
+proxyctl --version          # proxyctl v0.1.0
 proxyctl --help
-proxyctl status
-```
-
-### 手动安装
-
-```bash
-# 1. 克隆仓库
-git clone https://github.com/crhan/proxyctl.git
-cd proxyctl
-
-# 2. 复制文件
-cp bin/proxyctl ~/.local/bin/
-chmod +x ~/.local/bin/proxyctl
-
-# 3. 配置
-mkdir -p ~/.config/proxyctl
-cp config.yaml.example ~/.config/proxyctl/config.yaml
-# 编辑 config.yaml，填入 api_secret
 ```
 
 ### 安装后端
@@ -102,7 +88,38 @@ brew install mihomo
 brew install sing-box
 ```
 
-详细安装指南请参考 [docs/INSTALL.md](docs/INSTALL.md)
+### 配置 API
+
+```bash
+mkdir -p ~/.config/proxyctl
+# 把 https://github.com/crhan/proxyctl/blob/main/config.yaml.example 拷过来
+curl -fsSL https://raw.githubusercontent.com/crhan/proxyctl/main/config.yaml.example \
+  -o ~/.config/proxyctl/config.yaml
+# 编辑 config.yaml，填入 api_secret
+```
+
+### 注册 macOS LaunchDaemon（可选）
+
+如果需要把 mihomo/sing-box 作为 launchd 服务托管（开机自启 + 守护进程重启），
+克隆仓库并跑 `install.sh`：
+
+```bash
+git clone https://github.com/crhan/proxyctl.git
+cd proxyctl
+./install.sh        # 安装 plist 到 /Library/LaunchDaemons
+```
+
+> 仅需要命令行用 `proxyctl status`/`check`/`trace` 等命令，**不必跑 install.sh**。
+
+### 从源码开发
+
+```bash
+git clone https://github.com/crhan/proxyctl.git
+cd proxyctl
+uv sync --group dev          # 装运行 + 测试依赖
+uv run pytest                # 跑测试
+uv run proxyctl status       # 用本地源代码版本
+```
 
 ## 配置示例
 

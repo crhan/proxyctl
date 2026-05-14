@@ -1,0 +1,27 @@
+# Dependabot 配置 — 自动跟进 GitHub Actions 版本
+#
+# 主要目标：避免 action 版本过期触发 Node.js 运行时 deprecation 等强制升级。
+# Python 依赖管理走 uv，dependabot 暂未原生支持 uv.lock；如需追 deps，
+# 改用 Renovate 或本地 `uv sync --upgrade`。
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    groups:
+      # 把 actions/* 官方动作合到一个 PR，减少噪声
+      official-actions:
+        patterns:
+          - "actions/*"
