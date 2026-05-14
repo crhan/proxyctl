@@ -1259,6 +1259,7 @@ def main():
     if len(sys.argv) > 1:
         if sys.argv[1] in ("--help", "-h", "help"):
             cmd_help(verbose=True)
+            return
         elif sys.argv[1] in ("--version", "-v"):
             print(f"proxyctl v{VERSION}")
             sys.exit(0)
