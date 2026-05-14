@@ -27,6 +27,8 @@ dependencies = ["pyyaml>=6.0"]
 [project.urls]
 Homepage = "https://github.com/crhan/proxyctl"
 Issues = "https://github.com/crhan/proxyctl/issues"
+Changelog = "https://github.com/crhan/proxyctl/blob/main/CHANGELOG.md"
+Repository = "https://github.com/crhan/proxyctl"
 
 [project.scripts]
 proxyctl = "proxyctl.cli:main"
