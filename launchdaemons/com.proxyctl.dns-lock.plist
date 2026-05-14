@@ -8,13 +8,30 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>/opt/homebrew/bin/proxyctl-dns-watchdog</string>
+    <string>/Users/yourname/.local/bin/proxyctl-dns-watchdog</string>
   </array>
-  <!-- 每 30 秒轮询一次。VPN 通过 configd 内存动态存储改 DNS，WatchPaths 感知不到，轮询是唯一可靠方案 -->
+  <!-- 每 30 秒轮询一次。VPN 通过 configd 内存动态存储改 DNS，
+       WatchPaths 感知不到，轮询是唯一可靠方案 -->
   <key>StartInterval</key>
   <integer>30</integer>
   <key>RunAtLoad</key>
   <true/>
+  <!-- 由 install.sh / proxyctl dns-lock 根据 config.yaml 渲染 -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PROXYCTL_CONFIG_DIR</key>
+    <string>/Users/yourname/.config/proxyctl</string>
+    <key>PROXYCTL_API_BASE</key>
+    <string>http://127.0.0.1:9090</string>
+    <key>PROXYCTL_API_SECRET</key>
+    <string></string>
+    <key>PROXYCTL_ENGINE_LABEL</key>
+    <string>system/com.mihomo.tun</string>
+    <key>PROXYCTL_CORP_DOMAIN</key>
+    <string></string>
+    <key>PROXYCTL_TUIC_HEALTHCHECK</key>
+    <string>1</string>
+  </dict>
   <key>StandardOutPath</key>
   <string>/Users/yourname/.config/proxyctl/dns-watchdog.log</string>
   <key>StandardErrorPath</key>

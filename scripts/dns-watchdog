@@ -1,20 +1,37 @@
 #!/bin/bash
-# proxyctl-dns-watchdog - 系统 DNS 锁定为 127.0.0.1
-# 由 launchd StartInterval: 30 触发，每 30 秒轮询
+# proxyctl dns-watchdog — 由 launchd StartInterval: 30 触发，每 30s 跑一次
 #
-# 三层修复：
-#   1. networksetup — 对抗 DHCP 覆盖
-#   2. 劫持 AnyConnect DNS 条目 — vpnagentd 不监控自己 value 的变化
-#   3. scutil 兜底注入 — 对抗其他未知覆盖源
+# 通用职责（按层执行）：
+#   1. networksetup — 对抗 DHCP 覆盖 (macOS Wi-Fi / Ethernet 服务)
+#   2. AnyConnect VPN DNS key 劫持 — 仅当 $PROXYCTL_CORP_DOMAIN 配置时启用
+#   3. scutil 兜底注入 — primary resolver != 127.0.0.1 时纠正
+#   4. user-local 扩展 — source $PROXYCTL_CONFIG_DIR/dns-watchdog.local（如存在）
+#   5. TUIC/QUIC outbound 健康检测 — 滑动窗口防抖 + 失败上下文埋点 + 触顶通知
 #
-# 幂等操作，重复执行无副作用。以 root 运行（LaunchDaemon）。
+# 设计原则：
+#   - 主体保持通用，本机特例（公司路由注入、Tailscale 100.x 修复、企业 DNS 域名等）
+#     都走 dns-watchdog.local。
+#   - 幂等：重复执行无副作用，root 运行。
+#
+# 环境变量：
+#   PROXYCTL_CONFIG_DIR     必填，~/.config/proxyctl
+#   PROXYCTL_API_BASE       默认 http://127.0.0.1:9090
+#   PROXYCTL_API_SECRET     Clash API token，触顶埋点采集 proxy.now 用
+#   PROXYCTL_ENGINE_LABEL   默认 system/com.mihomo.tun
+#   PROXYCTL_CORP_DOMAIN    AnyConnect 劫持时挂的 DomainName（空则跳过层 2）
+#   PROXYCTL_TUIC_HEALTHCHECK  设为 "0" 关闭层 5（默认开启）
 
-# 可通过环境变量覆盖，默认使用 ~/.config/proxyctl
-CONFIG_DIR="${PROXYCTL_CONFIG_DIR:-/Users/yourname/.config/proxyctl}"
+CONFIG_DIR="${PROXYCTL_CONFIG_DIR:-$HOME/.config/proxyctl}"
 LOG="${CONFIG_DIR}/dns-watchdog.log"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 
-# --- 层 1: networksetup（对抗 DHCP）---
+API_BASE="${PROXYCTL_API_BASE:-http://127.0.0.1:9090}"
+API_SECRET="${PROXYCTL_API_SECRET:-}"
+LABEL="${PROXYCTL_ENGINE_LABEL:-system/com.mihomo.tun}"
+CORP_DOMAIN="${PROXYCTL_CORP_DOMAIN:-}"
+TUIC_HEALTHCHECK="${PROXYCTL_TUIC_HEALTHCHECK:-1}"
+
+# ─── 层 1: networksetup（对抗 DHCP）──────────────────────────────────────────
 while IFS= read -r svc; do
     [ -z "$svc" ] && continue
     current_dns=$(networksetup -getdnsservers "$svc" 2>/dev/null)
@@ -33,32 +50,31 @@ while IFS= read -r svc; do
     echo "$TIMESTAMP [fix-networksetup] $svc: $current_dns → 127.0.0.1" >> "$LOG"
 done < <(networksetup -listallnetworkservices 2>/dev/null | tail -n +2 | grep -v '^\*')
 
-# --- 层 2: 劫持 AnyConnect 自己的 DNS 条目 ---
+# ─── 层 2: AnyConnect 自有 DNS key 劫持（仅当配了 corp domain）─────────────
 # vpnagentd 监控 SCDynamicStore 新 key 的创建，但不监控自己 value 的变化。
-# 直接改 com.cisco.anyconnect 条目的 ServerAddresses → 127.0.0.1
-AC_KEY="State:/Network/Service/com.cisco.anyconnect/DNS"
-ac_dns=$(echo "show $AC_KEY" | scutil 2>/dev/null)
-
-if echo "$ac_dns" | grep -q "ServerAddresses"; then
-    # AnyConnect DNS 条目存在
-    if ! echo "$ac_dns" | grep -q "127\.0\.0\.1"; then
-        # 提取原始 domain 和 order，保持条目结构一致
-        domain=$(echo "$ac_dns" | awk '/DomainName/{gsub(/^[^:]+: /,""); print; exit}')
-        search_order=$(echo "$ac_dns" | awk '/SearchOrder/{gsub(/^[^:]+: /,""); print; exit}')
-        scutil <<SCUTIL
+# 直接改 com.cisco.anyconnect 条目的 ServerAddresses → 127.0.0.1 不会被覆盖。
+if [ -n "$CORP_DOMAIN" ]; then
+    AC_KEY="State:/Network/Service/com.cisco.anyconnect/DNS"
+    ac_dns=$(echo "show $AC_KEY" | scutil 2>/dev/null)
+    if echo "$ac_dns" | grep -q "ServerAddresses"; then
+        if ! echo "$ac_dns" | grep -q "127\.0\.0\.1"; then
+            domain=$(echo "$ac_dns" | awk '/DomainName/{gsub(/^[^:]+: /,""); print; exit}')
+            search_order=$(echo "$ac_dns" | awk '/SearchOrder/{gsub(/^[^:]+: /,""); print; exit}')
+            scutil <<SCUTIL
 d.init
-d.add DomainName ${domain:-example.com}
-d.add SearchDomains * ${domain:-example.com}
+d.add DomainName ${domain:-$CORP_DOMAIN}
+d.add SearchDomains * ${domain:-$CORP_DOMAIN}
 d.add SearchOrder # ${search_order:-1}
 d.add ServerAddresses * 127.0.0.1
-d.add SupplementalMatchDomains * "" ${domain:-example.com}
+d.add SupplementalMatchDomains * "" ${domain:-$CORP_DOMAIN}
 set $AC_KEY
 SCUTIL
-        echo "$TIMESTAMP [fix-anyconnect] $AC_KEY → 127.0.0.1" >> "$LOG"
+            echo "$TIMESTAMP [fix-anyconnect] $AC_KEY → 127.0.0.1" >> "$LOG"
+        fi
     fi
 fi
 
-# --- 层 3: scutil 兜底 ---
+# ─── 层 3: scutil 兜底 ──────────────────────────────────────────────────────
 primary=$(scutil --dns 2>/dev/null | awk '/^resolver #1/{f=1} f && /nameserver\[0\]/{print $3; exit}')
 if [ "$primary" != "127.0.0.1" ]; then
     scutil <<'SCUTIL'
@@ -70,6 +86,127 @@ SCUTIL
     echo "$TIMESTAMP [fix-scutil-fallback] primary: $primary → injected 127.0.0.1" >> "$LOG"
 fi
 
-# --- 层 4: 内网路由注入 (可选) ---
-# 如果用户有 Tailscale 100.64/10 冲突问题，可以在此添加路由注入逻辑
-# 默认不启用，避免影响非企业用户
+# ─── 层 4: 用户本机扩展（路由注入 / Tailscale 修复 / 任意自定义）────────────
+# 在 $PROXYCTL_CONFIG_DIR/dns-watchdog.local 里写 bash，可用以下变量：
+#   $TIMESTAMP $LOG $LABEL $sb_pid（仅层 5 之前，下面会重新设置）
+#   $CORP_DOMAIN $API_BASE $API_SECRET $CONFIG_DIR
+LOCAL_HOOK="${CONFIG_DIR}/dns-watchdog.local"
+if [ -f "$LOCAL_HOOK" ]; then
+    # shellcheck disable=SC1090
+    source "$LOCAL_HOOK"
+fi
+
+# ─── 层 5: TUIC 代理健康检测（滑动窗口 + 上下文埋点 + 桌面通知）─────────────
+# 当 PROXYCTL_TUIC_HEALTHCHECK=0 时跳过。否则：
+#   - 连续 2 次（~60s）proxy timeout 且 direct 正常 → kickstart 引擎
+#   - 60 分钟滑动窗口内最多 MAX_RESTARTS_IN_WINDOW 次 restart
+#   - 触顶后继续探测，proxy 自然恢复时打 [tuic-restored] 解除 stuck
+#   - 触顶时通过 sudo -u <console_user> osascript 发桌面通知
+#   - 每条 tuic-* 日志都带 proxy.now/relay.now/mihomo_uptime/last_wake ctx
+if [ "$TUIC_HEALTHCHECK" != "0" ]; then
+    FAIL_FLAG="/tmp/proxyctl-proxy-fail"
+    RESTART_HISTORY_FILE="/tmp/proxyctl-recover-history"
+    STUCK_FLAG="/tmp/proxyctl-recover-stuck"
+    WINDOW_SECONDS="${PROXYCTL_TUIC_WINDOW:-3600}"
+    MAX_RESTARTS_IN_WINDOW="${PROXYCTL_TUIC_MAX_RESTARTS:-3}"
+    TEST_URL="${PROXYCTL_TUIC_TEST_URL:-http://www.gstatic.com/generate_204}"
+    DIRECT_PROBE_URL="${PROXYCTL_TUIC_DIRECT_URL:-https://www.baidu.com}"
+
+    sb_pid=$(launchctl print "$LABEL" 2>/dev/null | grep "pid =" | awk '{print $3}')
+    if [ -n "$sb_pid" ] && [ "$sb_pid" != "0" ]; then
+        # 重启后 90 秒冷却期，跳过检测
+        if [ -f /tmp/proxyctl-recover-cooldown ]; then
+            last_recover=$(cat /tmp/proxyctl-recover-cooldown 2>/dev/null)
+            now_epoch=$(date +%s)
+            if [ $((now_epoch - last_recover)) -lt 90 ] 2>/dev/null; then
+                rm -f "$FAIL_FLAG"
+                exit 0
+            fi
+            rm -f /tmp/proxyctl-recover-cooldown
+        fi
+
+        # 计算滑动窗口内的 restart 次数（清理过期记录）
+        now_epoch=$(date +%s)
+        window_cutoff=$((now_epoch - WINDOW_SECONDS))
+        if [ -f "$RESTART_HISTORY_FILE" ]; then
+            awk -v cutoff="$window_cutoff" '$1+0 >= cutoff' "$RESTART_HISTORY_FILE" \
+                > "${RESTART_HISTORY_FILE}.new" 2>/dev/null
+            mv -f "${RESTART_HISTORY_FILE}.new" "$RESTART_HISTORY_FILE" 2>/dev/null
+            recent_count=$(wc -l < "$RESTART_HISTORY_FILE" 2>/dev/null | tr -d ' ')
+            [ -z "$recent_count" ] && recent_count=0
+        else
+            recent_count=0
+        fi
+
+        # 探测 proxy 7890
+        proxy_code=$(env -u http_proxy -u https_proxy -u all_proxy \
+            curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
+            --proxy socks5h://127.0.0.1:7890 \
+            "$TEST_URL" 2>/dev/null)
+
+        if [ "$proxy_code" = "204" ] || [ "$proxy_code" = "200" ]; then
+            rm -f "$FAIL_FLAG"
+            if [ -f "$STUCK_FLAG" ]; then
+                echo "$TIMESTAMP [tuic-restored] proxy recovered (was stuck, window_count=${recent_count}/${MAX_RESTARTS_IN_WINDOW})" >> "$LOG"
+                rm -f "$STUCK_FLAG"
+            fi
+        else
+            # 探测 direct（排除物理断网）
+            direct_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
+                --noproxy '*' "$DIRECT_PROBE_URL" 2>/dev/null)
+
+            if [ "$direct_code" -ge 200 ] 2>/dev/null && [ "$direct_code" -lt 500 ] 2>/dev/null; then
+                # 采集失败上下文（每次 warn/recover/stuck 都打全量信息便于事后分析）
+                if [ -n "$API_SECRET" ]; then
+                    proxy_now=$(curl -s --noproxy '*' --max-time 2 \
+                        -H "Authorization: Bearer $API_SECRET" \
+                        "$API_BASE/proxies/proxy" 2>/dev/null \
+                        | sed -n 's/.*"now":"\([^"]*\)".*/\1/p' | head -1)
+                else
+                    proxy_now=""
+                fi
+                mihomo_uptime=$(ps -o etime= -p "$sb_pid" 2>/dev/null | tr -d ' ')
+                last_wake=$(pmset -g log 2>/dev/null | grep -E "Wake[[:space:]]" | tail -1 | awk '{print $1" "$2}')
+                ctx="proxy.now='${proxy_now:-?}' mihomo_uptime=${mihomo_uptime:-?} last_wake='${last_wake:-?}'"
+
+                if [ "$recent_count" -ge "$MAX_RESTARTS_IN_WINDOW" ]; then
+                    # 触顶：不再 restart，但持续探测，等 proxy 自然恢复或人工介入
+                    if [ ! -f "$STUCK_FLAG" ]; then
+                        touch "$STUCK_FLAG"
+                        echo "$TIMESTAMP [tuic-stuck] window full (${recent_count}/${MAX_RESTARTS_IN_WINDOW} in ${WINDOW_SECONDS}s), auto-restart paused; $ctx" >> "$LOG"
+                        console_user=$(stat -f%Su /dev/console 2>/dev/null)
+                        if [ -n "$console_user" ] && [ "$console_user" != "root" ]; then
+                            sudo -u "$console_user" osascript -e 'display notification "Proxy 重复僵死，watchdog 已暂停自动恢复，请 proxyctl restart" with title "proxyctl watchdog stuck" sound name "Sosumi"' 2>/dev/null &
+                        fi
+                    fi
+                    rm -f "$FAIL_FLAG"
+                    exit 0
+                fi
+
+                if [ -f "$FAIL_FLAG" ]; then
+                    # 第二次连续失败 → restart，记录到 history
+                    echo "$now_epoch" >> "$RESTART_HISTORY_FILE"
+                    new_count=$((recent_count + 1))
+                    echo "$TIMESTAMP [tuic-recover] proxy timeout (direct ok), restarting (${new_count}/${MAX_RESTARTS_IN_WINDOW} in ${WINDOW_SECONDS}s); $ctx" >> "$LOG"
+                    launchctl kickstart -k "$LABEL"
+                    rm -f "$FAIL_FLAG"
+
+                    date +%s > /tmp/proxyctl-recover-cooldown
+
+                    # 等端口就绪
+                    for i in $(seq 1 20); do
+                        netstat -an 2>/dev/null | grep -q "127.0.0.1[.]53" && break
+                        sleep 0.5
+                    done
+                    sleep 3
+                else
+                    touch "$FAIL_FLAG"
+                    echo "$TIMESTAMP [tuic-warn] proxy timeout (code=$proxy_code), waiting for confirmation; $ctx" >> "$LOG"
+                fi
+            else
+                # direct 也挂了 → 物理断网，不动
+                rm -f "$FAIL_FLAG"
+            fi
+        fi
+    fi
+fi

@@ -557,6 +557,13 @@ def cmd_stop(backend: Backend, config: dict):
 def cmd_restart(backend: Backend, config: dict, *, clean: bool = False):
     if clean and os.path.isfile(backend.cache_file):
         os.remove(backend.cache_file)
+    # 人工介入后清掉 watchdog 的失败状态，避免误判为"还在触顶窗口内"
+    for f in ("/tmp/proxyctl-recover-history", "/tmp/proxyctl-recover-stuck",
+              "/tmp/proxyctl-proxy-fail", "/tmp/proxyctl-recover-cooldown",
+              "/tmp/sb-recover-history", "/tmp/sb-recover-stuck",
+              "/tmp/sb-recover-count", "/tmp/sb-proxy-fail"):
+        try: os.remove(f)
+        except (FileNotFoundError, PermissionError): pass
     service_restart(backend)
     print(f"{backend.name} restarted{'  (cache cleared)' if clean else ''}")
     _wait_ready(backend)
@@ -834,14 +841,51 @@ def _mode_singbox(config_path: str, target: str):
 
 # ── 命令：dns-lock / dns-unlock ───────────────────────────────────────────────
 
-def cmd_dns_lock(config: dict):
+def _render_dns_lock_plist(src: str, backend: Backend, config: dict) -> str:
+    """读 plist 模板，把 EnvironmentVariables 按 config 渲染后返回新内容。
+
+    保证仓库里的 plist 模板永远是占位（不带个人 secret/domain），实际部署时
+    才从 config.yaml 注入真实值。
+    """
+    import re as _re
+    text = open(src).read()
+
+    env_vars = {
+        "PROXYCTL_CONFIG_DIR": DEFAULT_CONFIG_DIR,
+        "PROXYCTL_API_BASE":   config.get("api_base", DEFAULTS["api_base"]),
+        "PROXYCTL_API_SECRET": config.get("api_secret", ""),
+        "PROXYCTL_ENGINE_LABEL": backend.label,
+        "PROXYCTL_CORP_DOMAIN": (config.get("corp_dns") or {}).get("domain", ""),
+        "PROXYCTL_TUIC_HEALTHCHECK":
+            "0" if config.get("watchdog", {}).get("tuic_healthcheck") is False else "1",
+    }
+
+    def _replace_env_value(m):
+        key = m.group(1)
+        if key in env_vars:
+            val = env_vars[key]
+            # 用 sax 安全的方式：仅替换 string 文本（plist 占位本就不含特殊 xml 字符）
+            return f"<key>{key}</key>\n    <string>{val}</string>"
+        return m.group(0)
+
+    text = _re.sub(
+        r"<key>([A-Z_]+)</key>\s*\n\s*<string>[^<]*</string>",
+        _replace_env_value,
+        text,
+    )
+    # 用户主目录占位替换（plist 路径用）
+    text = text.replace("/Users/yourname", HOME)
+    return text
+
+
+def cmd_dns_lock(config: dict, backend: Backend):
     if not IS_MACOS:
         print(f"{YELLOW}dns-lock 仅支持 macOS（Linux 不劫持系统 DNS）{NC}")
         return
     dns_lock_label = config.get("dns_lock_label", DEFAULTS["dns_lock_label"])
     dns_lock_plist = f"/Library/LaunchDaemons/{dns_lock_label}.plist"
     dns_lock_plist_src = os.path.join(DEFAULT_CONFIG_DIR, "launchdaemons", f"{dns_lock_label}.plist")
-    dns_watchdog = os.path.join(DEFAULT_CONFIG_DIR, "scripts", "dns-watchdog")
+    dns_watchdog = os.path.join(HOME, ".local", "bin", "proxyctl-dns-watchdog")
 
     if launchctl_running(f"system/{dns_lock_label}"):
         print("dns-lock daemon 已在运行")
@@ -852,10 +896,21 @@ def cmd_dns_lock(config: dict):
     if not os.access(dns_watchdog, os.X_OK):
         print(f"错误：看门狗脚本不可执行 {dns_watchdog}")
         sys.exit(1)
-    run(["cp", dns_lock_plist_src, dns_lock_plist], sudo=True)
-    run(["launchctl", "bootstrap", "system", dns_lock_plist], sudo=True)
+
+    rendered = _render_dns_lock_plist(dns_lock_plist_src, backend, config)
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".plist", delete=False) as f:
+        f.write(rendered)
+        tmp_plist = f.name
+    try:
+        run(["cp", tmp_plist, dns_lock_plist], sudo=True)
+        run(["launchctl", "bootstrap", "system", dns_lock_plist], sudo=True)
+    finally:
+        os.unlink(tmp_plist)
+
     print(f"{GREEN}dns-lock daemon 已安装并启动{NC}")
-    print(f"源文件：{dns_lock_plist_src}")
+    print(f"模板：{dns_lock_plist_src}")
+    print(f"部署：{dns_lock_plist}（已注入 EnvironmentVariables）")
 
 
 def cmd_dns_unlock(config: dict):
@@ -1038,7 +1093,7 @@ def main():
     elif cmd == "recover":
         cmd_recover(backend, config)
     elif cmd == "dns-lock":
-        cmd_dns_lock(config)
+        cmd_dns_lock(config, backend)
     elif cmd == "dns-unlock":
         cmd_dns_unlock(config)
     elif cmd == "env":
