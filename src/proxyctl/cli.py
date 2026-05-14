@@ -1176,7 +1176,7 @@ def cmd_env(config: dict, unset: bool = False):
 
 # ── 帮助 ──────────────────────────────────────────────────────────────────────
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 def cmd_help(verbose: bool = False):
     """打印帮助信息
