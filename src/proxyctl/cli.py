@@ -841,41 +841,68 @@ def _mode_singbox(config_path: str, target: str):
 
 # ── 命令：dns-lock / dns-unlock ───────────────────────────────────────────────
 
-def _render_dns_lock_plist(src: str, backend: Backend, config: dict) -> str:
-    """读 plist 模板，把 EnvironmentVariables 按 config 渲染后返回新内容。
+DNS_LOCK_PLIST_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{label}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>{watchdog_path}</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>30</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PROXYCTL_CONFIG_DIR</key>
+    <string>{config_dir}</string>
+    <key>PROXYCTL_API_BASE</key>
+    <string>{api_base}</string>
+    <key>PROXYCTL_API_SECRET</key>
+    <string>{api_secret}</string>
+    <key>PROXYCTL_ENGINE_LABEL</key>
+    <string>{engine_label}</string>
+    <key>PROXYCTL_CORP_DOMAIN</key>
+    <string>{corp_domain}</string>
+    <key>PROXYCTL_TUIC_HEALTHCHECK</key>
+    <string>{tuic_healthcheck}</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>{log_path}</string>
+  <key>StandardErrorPath</key>
+  <string>{log_path}</string>
+</dict>
+</plist>
+"""
 
-    保证仓库里的 plist 模板永远是占位（不带个人 secret/domain），实际部署时
-    才从 config.yaml 注入真实值。
+
+def _render_dns_lock_plist(backend: Backend, config: dict) -> str:
+    """根据 config 渲染 dns-lock plist 内容。
+
+    所有路径/label/secret 由 config + 默认值组合得出；plist 内容不依赖任何
+    仓库外文件（无须先复制模板到 ~/.config/proxyctl/launchdaemons/）。
     """
-    import re as _re
-    text = open(src).read()
+    dns_lock_label = config.get("dns_lock_label", DEFAULTS["dns_lock_label"])
+    watchdog_path = os.path.join(HOME, ".local", "bin", "proxyctl-dns-watchdog")
+    corp = (config.get("corp_dns") or {})
+    healthcheck_off = (config.get("watchdog") or {}).get("tuic_healthcheck") is False
 
-    env_vars = {
-        "PROXYCTL_CONFIG_DIR": DEFAULT_CONFIG_DIR,
-        "PROXYCTL_API_BASE":   config.get("api_base", DEFAULTS["api_base"]),
-        "PROXYCTL_API_SECRET": config.get("api_secret", ""),
-        "PROXYCTL_ENGINE_LABEL": backend.label,
-        "PROXYCTL_CORP_DOMAIN": (config.get("corp_dns") or {}).get("domain", ""),
-        "PROXYCTL_TUIC_HEALTHCHECK":
-            "0" if config.get("watchdog", {}).get("tuic_healthcheck") is False else "1",
-    }
-
-    def _replace_env_value(m):
-        key = m.group(1)
-        if key in env_vars:
-            val = env_vars[key]
-            # 用 sax 安全的方式：仅替换 string 文本（plist 占位本就不含特殊 xml 字符）
-            return f"<key>{key}</key>\n    <string>{val}</string>"
-        return m.group(0)
-
-    text = _re.sub(
-        r"<key>([A-Z_]+)</key>\s*\n\s*<string>[^<]*</string>",
-        _replace_env_value,
-        text,
+    return DNS_LOCK_PLIST_TEMPLATE.format(
+        label           = dns_lock_label,
+        watchdog_path   = watchdog_path,
+        config_dir      = DEFAULT_CONFIG_DIR,
+        api_base        = config.get("api_base", DEFAULTS["api_base"]),
+        api_secret      = config.get("api_secret", ""),
+        engine_label    = backend.label,
+        corp_domain     = corp.get("domain", ""),
+        tuic_healthcheck= "0" if healthcheck_off else "1",
+        log_path        = os.path.join(DEFAULT_CONFIG_DIR, "dns-watchdog.log"),
     )
-    # 用户主目录占位替换（plist 路径用）
-    text = text.replace("/Users/yourname", HOME)
-    return text
 
 
 def cmd_engine(backend: Backend, target: str, config: dict):
@@ -1050,39 +1077,51 @@ def cmd_daemon(name: str, subcmd: str, config: dict):
             print(f"{RED}✗{NC} {name} not running")
 
 
-def cmd_dns_lock(config: dict, backend: Backend):
+def cmd_dns_lock(config: dict, backend: Backend, *, reload: bool = False):
     if not IS_MACOS:
         print(f"{YELLOW}dns-lock 仅支持 macOS（Linux 不劫持系统 DNS）{NC}")
         return
     dns_lock_label = config.get("dns_lock_label", DEFAULTS["dns_lock_label"])
     dns_lock_plist = f"/Library/LaunchDaemons/{dns_lock_label}.plist"
-    dns_lock_plist_src = os.path.join(DEFAULT_CONFIG_DIR, "launchdaemons", f"{dns_lock_label}.plist")
     dns_watchdog = os.path.join(HOME, ".local", "bin", "proxyctl-dns-watchdog")
 
-    if launchctl_running(f"system/{dns_lock_label}"):
-        print("dns-lock daemon 已在运行")
+    full_label = f"system/{dns_lock_label}"
+    already_registered = launchctl_running(full_label)
+
+    # 默认行为：如果已 registered 且 plist 已存在，认为已装好
+    # reload=True：强制 bootout + 重写 plist + 重新 bootstrap
+    if already_registered and not reload:
+        print(f"dns-lock daemon 已注册（如需更新 plist，请运行 proxyctl dns-lock --reload）")
         return
-    if not os.path.isfile(dns_lock_plist_src):
-        print(f"错误：源文件不存在 {dns_lock_plist_src}")
-        sys.exit(1)
+
     if not os.access(dns_watchdog, os.X_OK):
         print(f"错误：看门狗脚本不可执行 {dns_watchdog}")
+        print(f"  请先把 scripts/dns-watchdog 安装到该位置（或重新跑 install.sh）")
         sys.exit(1)
 
-    rendered = _render_dns_lock_plist(dns_lock_plist_src, backend, config)
-    import tempfile
-    with tempfile.NamedTemporaryFile("w", suffix=".plist", delete=False) as f:
-        f.write(rendered)
-        tmp_plist = f.name
-    try:
-        run(["cp", tmp_plist, dns_lock_plist], sudo=True)
-        run(["launchctl", "bootstrap", "system", dns_lock_plist], sudo=True)
-    finally:
-        os.unlink(tmp_plist)
+    # reload 时先 bootout
+    if already_registered:
+        r0 = run(["launchctl", "bootout", full_label], sudo=True, capture=True)
+        if r0.returncode != 0:
+            print(f"{YELLOW}⚠{NC} bootout 失败（继续尝试 bootstrap）: {r0.stderr.strip()}")
+
+    rendered = _render_dns_lock_plist(backend, config)
+    # 通过 sudo tee 写入（sudoers 允许 /usr/bin/tee <target.plist>）
+    r = run(["tee", dns_lock_plist], sudo=True, stdin_text=rendered, capture=True)
+    if r.returncode != 0:
+        print(f"{RED}✗{NC} 写入 plist 失败: {r.stderr or '权限不足，请检查 sudoers'}")
+        sys.exit(1)
+
+    r2 = run(["launchctl", "bootstrap", "system", dns_lock_plist],
+             sudo=True, capture=True)
+    if r2.returncode != 0:
+        print(f"{RED}✗{NC} bootstrap 失败: {r2.stderr}")
+        sys.exit(1)
 
     print(f"{GREEN}dns-lock daemon 已安装并启动{NC}")
-    print(f"模板：{dns_lock_plist_src}")
-    print(f"部署：{dns_lock_plist}（已注入 EnvironmentVariables）")
+    print(f"label: {dns_lock_label}")
+    print(f"plist: {dns_lock_plist}  (内嵌模板渲染，含 config.yaml 注入的 env)")
+    print(f"日志:  {os.path.join(DEFAULT_CONFIG_DIR, 'dns-watchdog.log')}")
 
 
 def cmd_dns_unlock(config: dict):
@@ -1267,7 +1306,8 @@ def main():
     elif cmd == "recover":
         cmd_recover(backend, config)
     elif cmd == "dns-lock":
-        cmd_dns_lock(config, backend)
+        reload = "--reload" in sys.argv[2:]
+        cmd_dns_lock(config, backend, reload=reload)
     elif cmd == "dns-unlock":
         cmd_dns_unlock(config)
     elif cmd == "env":
