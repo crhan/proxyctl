@@ -1027,11 +1027,12 @@ def main():
     elif cmd == "check":
         from proxyctl.check import cmd_check
         mode_str = get_mode(backend)
-        cmd_check(backend, api_base, api_secret, config, mode_str)
+        cmd_check(backend, api_base, api_secret, config, mode_str, registry=registry)
     elif cmd == "bench":
         from proxyctl.check import cmd_bench
         bench_groups = sys.argv[2:] if len(sys.argv) > 2 else None
-        cmd_bench(api_base, api_secret, bench_groups)
+        default_groups = registry.collect("check_groups") if registry else None
+        cmd_bench(api_base, api_secret, bench_groups, default_groups=default_groups)
     elif cmd == "fix":
         cmd_fix(backend, config)
     elif cmd == "recover":

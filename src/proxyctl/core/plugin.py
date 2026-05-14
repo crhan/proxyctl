@@ -49,10 +49,15 @@ class OutboundProbe:
 
     通过指定不同的 mode + url，验证不同出口的实际 IP 归属。
     经典三种：proxy（走主代理）/ direct（绕代理）/ 命名组（走特定规则路由）。
+
+    extract_re：当 url 返回非纯 IP 时，用此正则提取（取第 0 个匹配）。
+                空则取响应整体（strip）。
     """
-    name: str               # 展示名，如 'proxy' / 'claude' / 'direct'
-    mode: str = "proxy"     # 'proxy' | 'direct'
-    url: str = "https://ifconfig.me"
+    name: str
+    mode: str = "proxy"
+    url: str = "https://api.ipify.org"
+    timeout: int = 8
+    extract_re: str = ""
 
 
 @dataclass

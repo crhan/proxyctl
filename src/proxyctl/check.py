@@ -1,8 +1,13 @@
-"""proxyctl check — 全面健康检查 (4 个阶段并发执行)"""
+"""proxyctl check — 全面健康检查 (4 个阶段并发执行)
+
+通用骨架，所有"本机感知"内容（测哪些 URL、关心哪些组、探哪些出口）都从
+PluginRegistry 收集，core 不感知具体业务。
+"""
 
 import json
 import os
 import platform
+import re as _re_mod
 import socket
 import subprocess
 import time
@@ -63,26 +68,20 @@ def _test_url(url: str, desc: str, mode: str = "proxy", timeout: int = 8) -> tup
         return False, f"  {YELLOW}?{NC} {desc:<18s} {url:<44s} {YELLOW}{code}{NC}"
 
 
-def _test_corp_dns(desc: str, corp_server: str, test_domain: str) -> tuple:
-    """测试企业 DNS 可达性。
+def _test_dns(desc: str, server: str, domain: str) -> tuple:
+    """通用 DNS 可达性测试：dig @server domain（用于 CheckTarget mode='dns'）。
 
-    Args:
-        desc: 测试项描述文本
-        corp_server: 企业 DNS 服务器 IP
-        test_domain: 用于测试的企业内部域名
-
-    Returns:
-        (ok: bool, line: str)，调用方负责 print。
+    url 格式：dns:<server>:<domain>
     """
     r = subprocess.run(
-        ["dig", f"@{corp_server}", "+short", "+timeout=3", test_domain],
+        ["dig", f"@{server}", "+short", "+timeout=3", domain],
         capture_output=True, text=True, timeout=5
     )
     ok = r.returncode == 0 and r.stdout.strip()
     if ok:
-        return True,  f"  {GREEN}✓{NC} {desc:<18s} {corp_server:<44s} {GREEN}ok{NC}"
+        return True,  f"  {GREEN}✓{NC} {desc:<18s} {server:<44s} {GREEN}ok{NC}"
     else:
-        return False, f"  {RED}✗{NC} {desc:<18s} {corp_server:<44s} {RED}timeout{NC}"
+        return False, f"  {RED}✗{NC} {desc:<18s} {server:<44s} {RED}timeout{NC}"
 
 
 def _test_tcp(host: str, port: int, desc: str) -> tuple:
@@ -95,8 +94,13 @@ def _test_tcp(host: str, port: int, desc: str) -> tuple:
         return False, f"  {RED}✗{NC} {desc:<18s} {addr:<44s} {RED}unreachable{NC}"
 
 
-def _proxy_groups_section(api_base: str, api_secret: str) -> bool:
-    """检查并自动修复代理组，打印节点明细。返回是否全部正常。"""
+def _proxy_groups_section(api_base: str, api_secret: str,
+                           groups: list[str] | None = None) -> bool:
+    """检查并自动修复代理组，打印节点明细。返回是否全部正常。
+
+    Args:
+        groups: 要展示的组名列表。None 时回退到 ["proxy"]。
+    """
     r = subprocess.run(
         ["curl", "-s", "--noproxy", "*",
          "-H", f"Authorization: Bearer {api_secret}",
@@ -260,7 +264,7 @@ def _proxy_groups_section(api_base: str, api_secret: str) -> bool:
 
     # 跟踪哪些组已经作为 selector 子组展开过，避免重复
     shown = set()
-    for gname in ["proxy", "claude", "residential-us", "residential-sg"]:
+    for gname in (groups or ["proxy"]):
         if gname in shown:
             continue
         g = proxies.get(gname)
@@ -323,16 +327,18 @@ def _fmt_ip(ip: str, geo: str) -> str:
     return f"{ip:<15s}"
 
 
-def cmd_bench(api: str, api_secret: str, groups: list = None):
+def cmd_bench(api: str, api_secret: str, groups: list = None,
+              default_groups: list[str] | None = None):
     """
-    sb bench [group...] — 对指定代理组的全部节点发起测速，默认测所有组。
+    proxyctl bench [group...] — 对指定代理组的全部节点发起测速，默认测全部组。
 
     参数:
-        api        -- Clash API base URL (e.g. http://127.0.0.1:9090)
-        api_secret -- Clash API Bearer token
-        groups     -- 要测速的组名列表；None 表示测全部默认组
+        api            -- Clash API base URL (e.g. http://127.0.0.1:9090)
+        api_secret     -- Clash API Bearer token
+        groups         -- 命令行指定的组名列表；None 表示用 default_groups
+        default_groups -- 未指定 groups 时的默认组列表（由插件 check_groups 提供）
     """
-    DEFAULT_GROUPS = ["proxy", "claude", "residential-us", "residential-sg"]
+    DEFAULT_GROUPS = default_groups or ["proxy"]
     TEST_URL       = "https://www.gstatic.com/generate_204"
     TIMEOUT_MS     = 5000   # 每个节点的测速超时（毫秒）
     MAX_WORKERS    = 16     # 并发测速线程数
@@ -419,11 +425,31 @@ def cmd_bench(api: str, api_secret: str, groups: list = None):
 
     # ── 重新拉取并展示最新延迟 ────────────────────────────────────────────────
     print()
-    _proxy_groups_section(api, api_secret)
+    _proxy_groups_section(api, api_secret, groups=list(group_members.keys()))
+
+
+def _fetch_probe(probe, env_clean: dict) -> str:
+    """根据 OutboundProbe 配置发起一次 IP 查询，返回提取后的 IP。"""
+    cmd = ["curl", "-s", "--max-time", str(probe.timeout)]
+    if probe.mode == "proxy":
+        cmd += ["--proxy", "socks5h://127.0.0.1:7890"]
+    else:
+        cmd += ["--noproxy", "*"]
+    cmd.append(probe.url)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           env=env_clean, timeout=probe.timeout + 4)
+    except subprocess.TimeoutExpired:
+        return ""
+    text = (r.stdout or "").strip()
+    if probe.extract_re:
+        m = _re_mod.search(probe.extract_re, text)
+        return m.group(0) if m else ""
+    return text
 
 
 def cmd_check(engine, api: str, api_secret: str,
-              config: dict, mode_str: str = ""):
+              config: dict, mode_str: str = "", registry=None):
     """proxyctl check — 4 阶段全面健康检查。
 
     Args:
@@ -432,6 +458,7 @@ def cmd_check(engine, api: str, api_secret: str,
         api_secret: Clash API Bearer token
         config: 全局配置字典
         mode_str: 代理模式字符串（tun/proxy/mixed）
+        registry: PluginRegistry，提供 check_targets/check_outbound_probes/check_groups
     """
     dns_lock_label = config.get("dns_lock_label", "com.proxyctl.dns-lock")
     claude_proxy_label = config.get("claude_proxy_label", "com.proxyctl.claude-proxy")
@@ -439,42 +466,24 @@ def cmd_check(engine, api: str, api_secret: str,
     corp_dns = config.get("corp_dns", {}) or {}
     fail = False
 
-    # [4/4] IP 请求完全独立，进入 cmd_check 就立刻发出
-    import threading, re as _re
-    cache_file = f"{HOME}/.config/sing-box/.ipgeo-cache"
-    env_clean  = {k: v for k, v in os.environ.items()
-                  if k not in ("http_proxy", "https_proxy", "all_proxy",
-                               "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")}
-    proxy_ip = direct_ip = claude_ip = ""
+    import threading
 
-    def _fetch_proxy_ip():
-        nonlocal proxy_ip
-        r = subprocess.run(
-            ["curl", "-s", "--max-time", "6", "--proxy", "socks5h://127.0.0.1:7890",
-             "https://ifconfig.me"],
-            capture_output=True, text=True, env=env_clean, timeout=10)
-        proxy_ip = r.stdout.strip()
+    env_clean = {k: v for k, v in os.environ.items()
+                 if k not in ("http_proxy", "https_proxy", "all_proxy",
+                              "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")}
 
-    def _fetch_direct_ip():
-        nonlocal direct_ip
-        r = subprocess.run(
-            ["curl", "-s", "--noproxy", "*", "--max-time", "4",
-             "https://myip.ipip.net"],
-            capture_output=True, text=True, env=env_clean, timeout=6)
-        m = _re.search(r'(\d+\.\d+\.\d+\.\d+)', r.stdout)
-        direct_ip = m.group(1) if m else ""
+    # [4/4] 出口 IP 探测：从插件收集到的 probes 决定有哪些出口
+    probes = []
+    if registry is not None:
+        probes = registry.collect("check_outbound_probes", ctx={})
+    probe_ips: dict[str, str] = {p.name: "" for p in probes}
 
-    def _fetch_claude_ip():
-        nonlocal claude_ip
-        # 通过 7890 代理访问 ipinfo.io（规则路由到 claude 组），反映真实出口
-        r = subprocess.run(
-            ["curl", "-s", "--max-time", "8", "--proxy", "socks5h://127.0.0.1:7890",
-             "https://ipinfo.io/ip"],
-            capture_output=True, text=True, env=env_clean, timeout=12)
-        claude_ip = r.stdout.strip()
+    def _make_fetcher(probe):
+        def _run():
+            probe_ips[probe.name] = _fetch_probe(probe, env_clean)
+        return _run
 
-    ip_threads = [threading.Thread(target=fn)
-                  for fn in (_fetch_proxy_ip, _fetch_direct_ip, _fetch_claude_ip)]
+    ip_threads = [threading.Thread(target=_make_fetcher(p)) for p in probes]
     for t in ip_threads:
         t.start()
 
@@ -641,73 +650,86 @@ def cmd_check(engine, api: str, api_secret: str,
 
     # ── 2. 代理组 ─────────────────────────────────────────────────────────────
     print(f"{BOLD}[2/4] 代理组{NC}")
-    _proxy_groups_section(api, api_secret)
+    groups = []
+    if registry is not None:
+        groups = registry.collect("check_groups")
+    _proxy_groups_section(api, api_secret, groups=groups)
 
     # ── 3. 连通性 ─────────────────────────────────────────────────────────────
-    tests = [
-        ("https://www.google.com",    "google",    "proxy"),
-        ("https://github.com",        "github",    "proxy"),
-        ("https://discord.com",       "discord",   "proxy"),
-        ("https://www.telegram.org",  "telegram",  "proxy"),
-        ("https://api.anthropic.com", "anthropic", "proxy"),
-        ("https://www.baidu.com",     "baidu",     "direct"),
-        ("https://www.alipay.com",    "alipay",    "direct"),
-    ]
-    if corp_net:
-        # 企业网络连通性测试（从 corp_dns 配置读取）
-        corp_tests = config.get("corp_dns", {}).get("check_targets", [])
-        if corp_server and corp_test_domain:
-            tests.append(("corp-dns", "corp-dns", "corp-dns"))
-        for target in corp_tests:
-            # 格式: {"url": "tcp:10.0.0.1:22", "name": "server-1", "mode": "tcp"}
-            tests.append((target["url"], target["name"], target.get("mode", "direct")))
+    # 从所有插件收集 check_targets。corp-network 等内置插件根据 ctx.corp_net 决定是否启用。
+    ctx = {"corp_net": corp_net, "mode": mode, "engine": engine.name}
+    targets = []
+    if registry is not None:
+        targets = registry.collect("check_targets", ctx=ctx)
+
+    # 应用 only_when 过滤
+    def _target_enabled(t):
+        if not getattr(t, "only_when", None):
+            return True
+        try:
+            return bool(t.only_when(ctx))
+        except Exception:
+            return True
+    targets = [t for t in targets if _target_enabled(t)]
 
     # [3/4] 连通性：每个测试完成立刻打印，不等其他测试
     print(f"{BOLD}[3/4] 连通性{NC}")
 
-    results  = [None] * len(tests)
-    ready    = [threading.Event() for _ in tests]
+    if not targets:
+        print(f"  {YELLOW}—{NC} 无连通性测试项（请在 ~/.config/proxyctl/plugins/ "
+              f"放插件提供 check_targets）")
 
-    def _run_test(idx, url, desc, mode_):
+    results  = [None] * len(targets)
+    ready    = [threading.Event() for _ in targets]
+
+    def _run_test(idx, target):
         try:
-            if mode_ == "corp-dns":
-                ok, line = _test_corp_dns(desc, corp_server, corp_test_domain)
-            elif mode_ == "tcp":
-                parts = url.removeprefix("tcp:").rsplit(":", 1)
-                ok, line = _test_tcp(parts[0], int(parts[1]), desc)
+            if target.mode == "dns":
+                # url 格式: dns:<server>:<domain>
+                _, server, domain = target.url.split(":", 2)
+                ok, line = _test_dns(target.name, server, domain)
+            elif target.mode == "tcp":
+                parts = target.url.removeprefix("tcp:").rsplit(":", 1)
+                ok, line = _test_tcp(parts[0], int(parts[1]), target.name)
             else:
-                ok, line = _test_url(url, desc, mode_)
+                ok, line = _test_url(target.url, target.name,
+                                     target.mode, target.timeout)
         except Exception as e:
-            ok, line = False, f"  {RED}✗{NC} {desc}  error: {e}"
+            ok, line = False, f"  {RED}✗{NC} {target.name}  error: {e}"
         results[idx] = (line, ok)
         ready[idx].set()
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        for idx, (url, desc, mode_) in enumerate(tests):
-            pool.submit(_run_test, idx, url, desc, mode_)
+    if targets:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for idx, target in enumerate(targets):
+                pool.submit(_run_test, idx, target)
+            for idx in range(len(targets)):
+                ready[idx].wait()
+                line, ok = results[idx]
+                print(line)
+                if not ok:
+                    fail = True
 
-        # 按顺序等待并打印，每个 ready 时立刻输出
-        for idx in range(len(tests)):
-            ready[idx].wait()
-            line, ok = results[idx]
-            print(line)
-            if not ok:
-                fail = True
-
-    # [4/4] 出口 IP：等 IP 线程结束，此时大概率已经跑完了
+    # [4/4] 出口 IP：等 IP 线程结束并展示每个 probe 的结果
     print(f"{BOLD}[4/4] 出口 IP{NC}")
     for t in ip_threads:
         t.join()
 
-    proxy_geo  = _ipgeo(proxy_ip,  cache_file, api_secret)
-    claude_geo = _ipgeo(claude_ip, cache_file, api_secret)
-    direct_geo = _ipgeo(direct_ip, cache_file, api_secret)
+    cache_file = os.path.join(sb_dir, ".ipgeo-cache")
+    if not probes:
+        print(f"  {YELLOW}—{NC} 无出口探测项")
+    for probe in probes:
+        ip = probe_ips.get(probe.name, "")
+        geo = _ipgeo(ip, cache_file, api_secret)
+        print(f"  {probe.name:<7s}{_fmt_ip(ip, geo)}")
 
-    print(f"  proxy  {_fmt_ip(proxy_ip, proxy_geo)}")
-    print(f"  claude {_fmt_ip(claude_ip, claude_geo)}")
-    print(f"  direct {_fmt_ip(direct_ip, direct_geo)}")
-    if proxy_ip and direct_ip:
-        if proxy_ip != direct_ip:
+    # 分流校验：当同时有 proxy 出口和 direct 出口时比较
+    proxy_probe_ip  = next((probe_ips[p.name] for p in probes
+                            if p.mode == "proxy" and p.name == "proxy"), "")
+    direct_probe_ip = next((probe_ips[p.name] for p in probes
+                            if p.mode == "direct"), "")
+    if proxy_probe_ip and direct_probe_ip:
+        if proxy_probe_ip != direct_probe_ip:
             print(f"  {GREEN}✓{NC} 分流正常")
         else:
             print(f"  {YELLOW}!{NC} 出口相同 — 检查分流规则")
