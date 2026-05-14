@@ -630,22 +630,39 @@ def cmd_check(engine, api: str, api_secret: str,
             infra += f"  {RED}DNS→{sys_dns or '?'}{NC}"
             dns_bad = True
             fail = True
-
-        r4 = subprocess.run(["launchctl", "print", f"system/{dns_lock_label}"],
-                            capture_output=True)
-        infra += ("  lock✓" if r4.returncode == 0 else f"  {YELLOW}no-lock{NC}")
     elif dns_hijack:
         infra += f"  {YELLOW}DNS(需手动检查){NC}"
     else:
         infra += "  DNS(proxy模式)"
 
-    watchdog_log = f"{sb_dir}/dns-watchdog.log"
-    if os.path.isfile(watchdog_log):
-        for line in reversed(open(watchdog_log).readlines()):
-            if "[tuic-recover]" in line:
-                ts = " ".join(line.split()[:2])
-                infra += f"  {CYAN}last-recover:{ts}{NC}"
+    # dns-lock 看门狗状态 — 任何模式下都重要（这是观察 watchdog 是否在跑的关键指标）
+    if IS_MACOS:
+        r4 = subprocess.run(["launchctl", "print", f"system/{dns_lock_label}"],
+                            capture_output=True)
+        # fallback：兼容 sb 时代的 com.singbox.dns-lock label
+        lock_ok = r4.returncode == 0
+        if not lock_ok and dns_lock_label != "com.singbox.dns-lock":
+            r4b = subprocess.run(["launchctl", "print",
+                                  "system/com.singbox.dns-lock"],
+                                 capture_output=True)
+            lock_ok = r4b.returncode == 0
+        infra += ("  lock✓" if lock_ok else f"  {YELLOW}no-lock{NC}")
+
+    # 最近 watchdog tuic-recover/tuic-stuck 时间（昨天加的观察点）
+    for log_path in (f"{sb_dir}/dns-watchdog.log",
+                      f"{HOME}/.config/sing-box/dns-watchdog.log"):
+        if os.path.isfile(log_path):
+            try:
+                for line in reversed(open(log_path).readlines()):
+                    if "[tuic-recover]" in line or "[tuic-stuck]" in line:
+                        ts = " ".join(line.split()[:2])
+                        infra += f"  {CYAN}last-recover:{ts}{NC}"
+                        break
+                else:
+                    continue
                 break
+            except (OSError, ValueError):
+                pass
     print(f"  {infra}")
 
     # ── 2. 代理组 ─────────────────────────────────────────────────────────────
