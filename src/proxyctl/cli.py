@@ -46,6 +46,7 @@ DEFAULTS = {
 }
 
 SCRIPTS_DIR = os.path.dirname(os.path.realpath(__file__))
+USER_PLUGIN_DIR = os.path.join(DEFAULT_CONFIG_DIR, "plugins")
 
 
 def load_config() -> dict:
@@ -170,6 +171,50 @@ def get_backend(config: dict) -> Backend:
         return MihomoBackend(config)
     else:
         return SingboxBackend(config)
+
+
+# ── 插件加载 ─────────────────────────────────────────────────────────────────
+
+def load_plugins(config: dict):
+    """加载内置 + 用户插件目录，返回 registry。
+
+    用户禁用某插件：在 config.yaml 加 `plugins_disabled: [name1, name2]`。
+    用户插件目录：~/.config/proxyctl/plugins/*.py
+    """
+    from proxyctl.core.plugin import build_registry
+    return build_registry(config, USER_PLUGIN_DIR)
+
+
+def cmd_plugins(registry):
+    """proxyctl plugins — 显示已加载插件 + 加载期错误。"""
+    print(f"{BOLD}插件列表{NC}  (内置 + ~/.config/proxyctl/plugins/)")
+    if not registry.plugins and not registry.errors:
+        print(f"  {YELLOW}—{NC} 无已加载插件")
+    for p in registry.plugins:
+        # 简略列出该插件实现了哪些 hook（识别 dataclass 返回的方法）
+        hook_names = [
+            "check_groups", "check_targets", "check_outbound_probes",
+            "dns_hooks", "route_hooks", "status_sections",
+            "watchdog_layers", "audit_skip_hosts", "audit_known_proxy_kw",
+        ]
+        active = []
+        for h in hook_names:
+            method = getattr(type(p), h, None)
+            base_method = getattr(__import__("proxyctl.core.plugin",
+                                              fromlist=["Plugin"]).Plugin, h)
+            # 比较函数对象，子类覆盖才算 active
+            if method is not None and method is not base_method:
+                active.append(h)
+        active_str = ", ".join(active) if active else "(no hooks)"
+        print(f"  {GREEN}✓{NC} {CYAN}{p.name or type(p).__name__}{NC}  "
+              f"[{type(p).__module__}]  {active_str}")
+    if registry.errors:
+        print(f"\n{YELLOW}加载错误:{NC}")
+        for source, err in registry.errors:
+            print(f"  {RED}✗{NC} {source}  {err}")
+    print(f"\n用户插件目录: {USER_PLUGIN_DIR}")
+    if not os.path.isdir(USER_PLUGIN_DIR):
+        print(f"  {YELLOW}—{NC} 目录不存在（首次使用请 mkdir -p）")
 
 
 # ── 基础工具 ─────────────────────────────────────────────────────────────────
@@ -901,6 +946,7 @@ def cmd_help(verbose: bool = False):
     print("│  dns-unlock         停止 DNS 看门狗                             │")
     print("│  env                输出代理环境变量  eval $(proxyctl env)      │")
     print("│  env --unset        清除代理环境变量  eval $(proxyctl env off)  │")
+    print("│  plugins            显示已加载插件                              │")
     print("└────────────────────────────────────────────────────────────────┘")
 
     print("\n┌─ 其他 ─────────────────────────────────────────────────────────┐")
@@ -951,6 +997,7 @@ def main():
 
     config = load_config()
     backend = get_backend(config)
+    registry = load_plugins(config)
     api_base = config.get("api_base", DEFAULTS["api_base"])
     api_secret = config.get("api_secret", "")
 
@@ -996,6 +1043,8 @@ def main():
     elif cmd == "env":
         unset = "--unset" in sys.argv[2:] or "off" in sys.argv[2:]
         cmd_env(config, unset=unset)
+    elif cmd == "plugins":
+        cmd_plugins(registry)
     elif cmd == "audit":
         arg = sys.argv[2] if len(sys.argv) > 2 else "1"
         apply_mode = (arg == "apply")
