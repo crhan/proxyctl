@@ -1021,7 +1021,7 @@ def main():
     elif cmd == "status":
         from proxyctl.status import cmd_status
         mode_str = get_mode(backend)
-        cmd_status(backend, api_base, api_secret, config, mode_str)
+        cmd_status(backend, api_base, api_secret, config, mode_str, registry=registry)
     elif cmd == "log":
         os.execvp("tail", ["tail", "-f", backend.log_file])
     elif cmd == "check":

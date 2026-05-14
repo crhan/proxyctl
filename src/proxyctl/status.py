@@ -255,12 +255,11 @@ def _gather_dns(dns_lock_label: str) -> dict:
 
 
 def _gather_network(engine) -> dict:
-    """采集网络环境数据。
+    """采集通用网络环境：默认出口网卡 + IP。
 
-    核心能力（跨平台）：默认出口网卡和 IP。
-    macOS 扩展：企业网检测、VPN 接口、Tailscale、TUIC relay。
+    本机特例（企业 VPN 接口、Tailscale peer、TUIC relay 解析路径等）走
+    StatusSection 插件，不在 core 里采集。
     """
-    # 核心：默认出口网卡和 IP
     default_iface = ""
     default_ip = ""
 
@@ -290,86 +289,7 @@ def _gather_network(engine) -> dict:
                     default_ip = line.split()[1].split("/")[0]
                     break
 
-    result = {
-        "default_iface": default_iface,
-        "default_ip": default_ip,
-    }
-
-    if not IS_MACOS:
-        return result
-
-    # ── macOS 扩展：企业 VPN、Tailscale、Relay ──────────────────────────
-    vpn_iface = vpn_ip = ""
-    r = subprocess.run(["ifconfig", "-l"], capture_output=True, text=True)
-    for iface in r.stdout.split():
-        if not iface.startswith("utun"):
-            continue
-        ri = subprocess.run(["ifconfig", iface], capture_output=True, text=True)
-        for line in ri.stdout.splitlines():
-            if "inet 30." in line:
-                parts = line.split()
-                if len(parts) >= 2:
-                    vpn_iface, vpn_ip = iface, parts[1]
-                    break
-        if vpn_iface:
-            break
-    result["vpn_iface"] = vpn_iface
-    result["vpn_ip"] = vpn_ip
-
-    # Tailscale
-    ts_self = ts_peer_ip = ts_latency = ts_via = ""
-    ts_state = "absent"
-    if subprocess.run(["which", "tailscale"], capture_output=True).returncode == 0:
-        ts_self = subprocess.run(["tailscale", "ip", "-4"],
-                                  capture_output=True, text=True).stdout.strip()
-        if ts_self:
-            r = subprocess.run(["tailscale", "status"],
-                                capture_output=True, text=True)
-            for line in r.stdout.splitlines():
-                if "home-ubuntu" in line:
-                    ts_peer_ip = line.split()[0]
-                    break
-            if ts_peer_ip:
-                rp = subprocess.run(
-                    ["tailscale", "ping", "--c", "1", "--timeout", "2s", ts_peer_ip],
-                    capture_output=True, text=True
-                )
-                ts_latency = next(
-                    (w for w in rp.stdout.split() if w.endswith("ms")), "")
-                ts_via = next(
-                    (w for i, w in enumerate(rp.stdout.split())
-                     if i > 0 and rp.stdout.split()[i - 1] == "via"), "")
-                ts_state = "ok" if ts_latency else "unreachable"
-            else:
-                ts_state = "no-peer"
-        else:
-            ts_state = "no-login"
-    result.update({
-        "ts_self": ts_self, "ts_peer_ip": ts_peer_ip,
-        "ts_latency": ts_latency, "ts_via": ts_via, "ts_state": ts_state,
-    })
-
-    # TUIC relay 解析路径
-    relay_host = relay_ip = relay_path = ""
-    try:
-        import yaml
-        cfg = yaml.safe_load(open(f"{HOME}/.config/mihomo/config.yaml"))
-        relay_host = next((p.get("server", "") for p in cfg.get("proxies", [])
-                           if p.get("type") == "tuic"), "")
-        if relay_host:
-            try:
-                relay_ip   = socket.getaddrinfo(relay_host, 443,
-                                                socket.AF_INET)[0][4][0]
-                relay_path = "LAN" if relay_ip.startswith("192.168.") else "WAN"
-            except Exception:
-                pass
-    except Exception:
-        pass
-    result.update({
-        "relay_host": relay_host, "relay_ip": relay_ip, "relay_path": relay_path,
-    })
-
-    return result
+    return {"default_iface": default_iface, "default_ip": default_ip}
 
 
 # ── 打印函数（顺序执行，使用采集结果） ───────────────────────────────────────
@@ -520,65 +440,28 @@ def _print_dns(daemon_up: bool, d_dns: dict, mode: str):
         print(f"  {YELLOW}⚠ /etc/resolver/ 覆盖: {' '.join(d_dns['overrides'])}{NC}")
 
 
-def _print_network(d_net: dict):
-    """打印网络状态段。
+def _print_network(d_net: dict, ctx: dict | None = None, registry=None):
+    """打印网络状态段（通用部分）：默认出口网卡 + IP。
 
-    核心（跨平台）：默认出口网卡 + IP。
-    macOS 扩展：企业网/VPN、Tailscale、TUIC relay。
+    其他信息（企业 VPN、Tailscale、TUIC relay 等）由插件的 StatusSection 提供，
+    在打印完通用部分后由 core 统一调度。
     """
     print(f"\n{BOLD}网络{NC}")
 
-    # 核心：默认出口
     iface = d_net.get("default_iface", "")
     ip = d_net.get("default_ip", "")
     if iface and ip:
-        # macOS 扩展：30.x 网段标记为办公网
-        corp_tag = f"  {GREEN}办公网{NC}" if IS_MACOS and ip.startswith("30.") else ""
-        print(f"  {iface:<8s}{ip}{corp_tag}")
+        print(f"  {iface:<8s}{ip}")
     elif iface:
         print(f"  {iface:<8s}{YELLOW}no IP{NC}")
     else:
         print(f"  default {YELLOW}无默认路由{NC}")
 
-    # ── macOS 扩展 ──
-    if not IS_MACOS:
-        return
-
-    # 企业内网 VPN
-    if d_net.get("vpn_iface"):
-        print(f"  内网    {GREEN}✓{NC} {d_net['vpn_iface']}({d_net['vpn_ip']})")
-    elif ip.startswith("30."):
-        print(f"  内网    {GREEN}✓{NC} 直连")
-
-    # Tailscale
-    ts = d_net.get("ts_state", "absent")
-    if ts == "absent":
-        pass
-    elif ts == "no-login":
-        print(f"  tailsc  {YELLOW}—{NC} 未登录")
-    elif ts == "no-peer":
-        print(f"  tailsc  {YELLOW}!{NC} {d_net['ts_self']} (peer home-ubuntu 离线)")
-    elif ts == "ok":
-        via = f"via {d_net['ts_via']}" if d_net.get("ts_via") else ""
-        print(f"  tailsc  {GREEN}✓{NC} {d_net['ts_self']} → "
-              f"{d_net['ts_peer_ip']} {d_net['ts_latency']} {via}".rstrip())
-    elif ts == "unreachable":
-        print(f"  tailsc  {RED}✗{NC} {d_net['ts_self']} → "
-              f"{d_net['ts_peer_ip']} 不可达")
-
-    # TUIC relay
-    if d_net.get("relay_host"):
-        if d_net.get("relay_ip"):
-            print(f"  relay   {GREEN}✓{NC} {d_net['relay_host']} → "
-                  f"{d_net['relay_ip']} ({d_net['relay_path']})")
-        else:
-            print(f"  relay   {RED}✗{NC} {d_net['relay_host']} DNS 解析失败")
-
 
 # ── 主入口 ────────────────────────────────────────────────────────────────────
 
 def cmd_status(engine, api: str, api_secret: str,
-               config: dict, mode: str = ""):
+               config: dict, mode: str = "", registry=None):
     """proxyctl status — 并发采集数据，顺序打印状态面板。
 
     Args:
@@ -587,6 +470,7 @@ def cmd_status(engine, api: str, api_secret: str,
         api_secret: Clash API Bearer token
         config: 全局配置字典
         mode: 代理模式字符串（tun/proxy/mixed）
+        registry: PluginRegistry，提供 status_sections（VPN/Tailscale/TUIC relay 等）
     """
     dns_lock_label = config.get("dns_lock_label", "com.proxyctl.dns-lock")
     claude_proxy_label = config.get("claude_proxy_label", "com.proxyctl.claude-proxy")
@@ -600,6 +484,13 @@ def cmd_status(engine, api: str, api_secret: str,
         f_dns     = pool.submit(_gather_dns, dns_lock_label)
         f_network = pool.submit(_gather_network, engine)
 
+        # 插件 status_sections：每个 section 并发跑 gather
+        ctx = {"engine": engine.name, "mode": mode, "config": config}
+        sections = []
+        if registry is not None:
+            sections = registry.collect("status_sections", ctx=ctx)
+        f_sections = [(s, pool.submit(s.gather, ctx)) for s in sections]
+
         d_engine  = f_engine.result()
         d_ports   = f_ports.result()
         _print_engine(engine, mode, d_engine, d_ports)
@@ -611,6 +502,17 @@ def cmd_status(engine, api: str, api_secret: str,
         _print_proxy_settings(f_proxy.result(), daemon_up, mode)
         _print_dns(daemon_up, f_dns.result(), mode)
         _print_network(f_network.result())
+
+        # 插件 sections（VPN/Tailscale/TUIC relay 等本机特例都走这里）
+        for section, future in f_sections:
+            try:
+                data = future.result()
+                section.render(ctx, data)
+            except Exception as e:
+                import sys
+                sys.stderr.write(
+                    f"[plugin warning] status_section {section.name} failed: {e}\n"
+                )
 
     # 环境变量代理
     env_parts = [f"{var}={os.environ[var]}"
