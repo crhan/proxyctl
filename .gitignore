@@ -69,4 +69,7 @@ claude-proxy.log
 # 测试
 .pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
+coverage.xml
+junit.xml
