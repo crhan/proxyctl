@@ -5,6 +5,19 @@
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-05-15
+
+### Fixed
+- `cmd_start` / `cmd_stop` / `cmd_restart` / `cmd_fix` 接入 `RouteHook` 调度
+  （`_apply_route_hooks`）。`RouteHook` 数据类自插件机制引入起就已定义，但
+  CLI 一直未调用，导致用户插件（如本机 Tailscale 100.64/10 精细路由覆盖）
+  无法在启动 / 重启 / fix 流程中真正生效。
+
+### Notes
+- proxyctl 本体不含任何站点或网段特征，具体子网清单（典型场景：
+  公司内网在 Tailscale `100.64.0.0/10` 段内的服务器）由用户插件 / 用户
+  watchdog hook（`$CONFIG_DIR/dns-watchdog.local`）提供。
+
 ## [0.1.2] — 2026-05-14
 
 ### Added
@@ -67,7 +80,8 @@
 - `cli.main()` 处理 `--help/-h/help` 后未 return，导致继续落入默认 else 分支
   二次调用 `cmd_help()`，help 输出重复两次。
 
-[Unreleased]: https://github.com/crhan/proxyctl/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/crhan/proxyctl/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/crhan/proxyctl/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/crhan/proxyctl/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/crhan/proxyctl/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/crhan/proxyctl/releases/tag/v0.1.0
