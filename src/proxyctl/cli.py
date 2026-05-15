@@ -518,9 +518,33 @@ def _wait_ready(backend: Backend):
     time.sleep(3)
 
 
+# ── 路由钩子调度 ──────────────────────────────────────────────────────────────
+
+def _apply_route_hooks(registry, ctx: dict, action: str) -> None:
+    """调度所有插件的 RouteHook。action ∈ {'activate', 'deactivate'}。
+
+    单个 hook 失败只打 warning，不中断主流程——路由注入是辅助优化，
+    不能让某个插件挂了拖死 start/stop。
+    """
+    if registry is None:
+        return
+    hooks = registry.collect("route_hooks")
+    for h in hooks:
+        fn = getattr(h, action, None)
+        if fn is None:
+            continue
+        try:
+            fn(ctx)
+        except Exception as e:
+            sys.stderr.write(
+                f"[route_hook warning] {h.name}.{action} failed: "
+                f"{type(e).__name__}: {e}\n"
+            )
+
+
 # ── 命令：start ───────────────────────────────────────────────────────────────
 
-def cmd_start(backend: Backend, config: dict):
+def cmd_start(backend: Backend, config: dict, registry=None):
     r = service_start(backend, config)
     if r.returncode != 0:
         print(f"{RED}✗{NC} {backend.name} 启动失败")
@@ -538,10 +562,18 @@ def cmd_start(backend: Backend, config: dict):
             proxy_activate()
             print("系统代理 → 127.0.0.1:7890 (已激活)")
 
+    _apply_route_hooks(registry,
+                       {"engine": backend.name, "config": config, "phase": "start"},
+                       "activate")
+
 
 # ── 命令：stop ────────────────────────────────────────────────────────────────
 
-def cmd_stop(backend: Backend, config: dict):
+def cmd_stop(backend: Backend, config: dict, registry=None):
+    _apply_route_hooks(registry,
+                       {"engine": backend.name, "config": config, "phase": "stop"},
+                       "deactivate")
+
     if IS_MACOS:
         dns_lock_stop(config)
         dns_deactivate(config)
@@ -554,7 +586,7 @@ def cmd_stop(backend: Backend, config: dict):
 
 # ── 命令：restart ─────────────────────────────────────────────────────────────
 
-def cmd_restart(backend: Backend, config: dict, *, clean: bool = False):
+def cmd_restart(backend: Backend, config: dict, *, clean: bool = False, registry=None):
     if clean and os.path.isfile(backend.cache_file):
         os.remove(backend.cache_file)
     # 人工介入后清掉 watchdog 的失败状态，避免误判为"还在触顶窗口内"
@@ -578,10 +610,14 @@ def cmd_restart(backend: Backend, config: dict, *, clean: bool = False):
         else:
             proxy_deactivate()
 
+    _apply_route_hooks(registry,
+                       {"engine": backend.name, "config": config, "phase": "restart"},
+                       "activate")
+
 
 # ── 命令：fix ─────────────────────────────────────────────────────────────────
 
-def cmd_fix(backend: Backend, config: dict):
+def cmd_fix(backend: Backend, config: dict, registry=None):
     """修复引擎状态：运行中则重注入 DNS/代理，已停止则还原系统配置。"""
     api_base = config.get("api_base", DEFAULTS["api_base"])
     api_secret = config.get("api_secret", "")
@@ -602,6 +638,11 @@ def cmd_fix(backend: Backend, config: dict):
             if get_mode(backend) == "proxy":
                 proxy_activate()
                 print(f"  {GREEN}✓{NC} 系统代理 → 127.0.0.1:7890")
+
+            _apply_route_hooks(registry,
+                               {"engine": backend.name, "config": config,
+                                "phase": "fix"},
+                               "activate")
         else:
             print(f"{BOLD}[引擎运行中] 尝试热重载配置{NC}")
 
@@ -1280,13 +1321,13 @@ def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
 
     if cmd == "start":
-        cmd_start(backend, config)
+        cmd_start(backend, config, registry=registry)
     elif cmd == "stop":
-        cmd_stop(backend, config)
+        cmd_stop(backend, config, registry=registry)
     elif cmd == "restart":
-        cmd_restart(backend, config)
+        cmd_restart(backend, config, registry=registry)
     elif cmd == "restart-clean":
-        cmd_restart(backend, config, clean=True)
+        cmd_restart(backend, config, clean=True, registry=registry)
     elif cmd == "status":
         from proxyctl.status import cmd_status
         mode_str = get_mode(backend)
@@ -1303,7 +1344,7 @@ def main():
         default_groups = registry.collect("check_groups") if registry else None
         cmd_bench(api_base, api_secret, bench_groups, default_groups=default_groups)
     elif cmd == "fix":
-        cmd_fix(backend, config)
+        cmd_fix(backend, config, registry=registry)
     elif cmd == "recover":
         cmd_recover(backend, config)
     elif cmd == "dns-lock":
