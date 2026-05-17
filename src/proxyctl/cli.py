@@ -43,6 +43,8 @@ DEFAULTS = {
     "api_secret": "",     # 必填：Clash API Bearer token
     "config_dir": os.path.join(HOME, ".config"),
     "dns_lock_label": "com.proxyctl.dns-lock",
+    # 引擎对外暴露的 HTTP/SOCKS mixed-port（应与 mihomo config 的 port/mixed-port 一致）
+    "proxy_port": 7890,
 }
 
 SCRIPTS_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -514,7 +516,8 @@ def _wait_ready(backend: Backend):
     """
     if IS_MACOS:
         wait_port(53, timeout=10)
-    wait_port(7890, timeout=10)
+    wait_port(int(backend.config.get("proxy_port", DEFAULTS["proxy_port"])),
+              timeout=10)
     time.sleep(3)
 
 
@@ -1200,7 +1203,7 @@ def cmd_env(config: dict, unset: bool = False):
             print(f"unset {var};")
         return
 
-    port = 7890  # mixed-port
+    port = int(config.get("proxy_port", DEFAULTS["proxy_port"]))  # mixed-port
     proxy_http = f"http://127.0.0.1:{port}"
     proxy_socks = f"socks5://127.0.0.1:{port}"
     no_proxy = "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"

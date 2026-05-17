@@ -94,10 +94,17 @@ def _gather_engine(engine) -> dict:
     return {"pid": pid, "runs": runs, "daemon_up": daemon_up, "etime": etime}
 
 
-def _gather_ports(claude_proxy_label: str) -> dict:
-    """采集端口监听状态。"""
-    ports = [(p, desc, _port_listening(p))
-             for p, desc in [(7890, "proxy"), (9090, "api")]]
+def _gather_ports(claude_proxy_label: str,
+                   port_list: list[tuple[int, str]] | None = None) -> dict:
+    """采集端口监听状态。
+
+    Args:
+        port_list: [(port, desc), ...]，由调用方根据 config/api_base 解析后传入。
+                   None 时回退到 [(7890,"proxy"), (9090,"api")] 以兼容旧调用。
+    """
+    if port_list is None:
+        port_list = [(7890, "proxy"), (9090, "api")]
+    ports = [(p, desc, _port_listening(p)) for p, desc in port_list]
     cp_running = False
     cp_pid = ""
     cp_port = False
@@ -475,10 +482,20 @@ def cmd_status(engine, api: str, api_secret: str,
     dns_lock_label = config.get("dns_lock_label", "com.proxyctl.dns-lock")
     claude_proxy_label = config.get("claude_proxy_label", "com.proxyctl.claude-proxy")
 
+    # 端口列表：proxy 取 config.proxy_port，api 从 api_base URL 解析
+    proxy_port = int(config.get("proxy_port", 7890))
+    api_port = 9090
+    try:
+        from urllib.parse import urlparse
+        api_port = urlparse(api).port or 9090
+    except Exception:
+        pass
+    port_list = [(proxy_port, "proxy"), (api_port, "api")]
+
     # 全部 section 并发采集，拿到一个打印一个
     with ThreadPoolExecutor(max_workers=8) as pool:
         f_engine  = pool.submit(_gather_engine, engine)
-        f_ports   = pool.submit(_gather_ports, claude_proxy_label)
+        f_ports   = pool.submit(_gather_ports, claude_proxy_label, port_list)
         f_tun     = pool.submit(_gather_tun, engine, True)
         f_proxy   = pool.submit(_gather_proxy_settings)
         f_dns     = pool.submit(_gather_dns, dns_lock_label)

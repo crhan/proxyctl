@@ -36,10 +36,11 @@ def _port_listening(port: int) -> bool:
         return False
 
 
-def _test_url(url: str, desc: str, mode: str = "proxy", timeout: int = 8) -> tuple:
+def _test_url(url: str, desc: str, mode: str = "proxy", timeout: int = 8,
+              proxy_port: int = 7890) -> tuple:
     """
     测试 URL 可达性。
-    mode=proxy: 走 socks5h://127.0.0.1:7890
+    mode=proxy: 走 socks5h://127.0.0.1:{proxy_port}（需配置 mixed-port 或 socks-port）
     mode=direct: 绕过所有代理 (--noproxy '*')
     返回 (ok: bool, line: str)，调用方负责 print。
     """
@@ -49,7 +50,7 @@ def _test_url(url: str, desc: str, mode: str = "proxy", timeout: int = 8) -> tup
     cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
            "--max-time", str(timeout)]
     if mode == "proxy":
-        cmd += ["--proxy", "socks5h://127.0.0.1:7890"]
+        cmd += ["--proxy", f"socks5h://127.0.0.1:{proxy_port}"]
     else:
         cmd += ["--noproxy", "*"]
     cmd.append(url)
@@ -281,7 +282,8 @@ def _proxy_groups_section(api_base: str, api_secret: str,
     return True
 
 
-def _ipgeo(ip: str, cache_file: str, api_secret: str) -> str:
+def _ipgeo(ip: str, cache_file: str, api_secret: str,
+            proxy_port: int = 7890) -> str:
     """查询 IP 归属地，带文件缓存。返回 'city,country|org' 格式。"""
     if not ip:
         return ""
@@ -293,7 +295,8 @@ def _ipgeo(ip: str, cache_file: str, api_secret: str) -> str:
            if k not in ("http_proxy", "https_proxy", "all_proxy",
                         "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")}
     r = subprocess.run(
-        ["curl", "-s", "--max-time", "6", "--proxy", "socks5h://127.0.0.1:7890",
+        ["curl", "-s", "--max-time", "6",
+         "--proxy", f"socks5h://127.0.0.1:{proxy_port}",
          f"https://ipinfo.io/{ip}/json"],
         capture_output=True, text=True, env=env, timeout=10
     )
@@ -428,11 +431,11 @@ def cmd_bench(api: str, api_secret: str, groups: list = None,
     _proxy_groups_section(api, api_secret, groups=list(group_members.keys()))
 
 
-def _fetch_probe(probe, env_clean: dict) -> str:
+def _fetch_probe(probe, env_clean: dict, proxy_port: int = 7890) -> str:
     """根据 OutboundProbe 配置发起一次 IP 查询，返回提取后的 IP。"""
     cmd = ["curl", "-s", "--max-time", str(probe.timeout)]
     if probe.mode == "proxy":
-        cmd += ["--proxy", "socks5h://127.0.0.1:7890"]
+        cmd += ["--proxy", f"socks5h://127.0.0.1:{proxy_port}"]
     else:
         cmd += ["--noproxy", "*"]
     cmd.append(probe.url)
@@ -478,9 +481,13 @@ def cmd_check(engine, api: str, api_secret: str,
         probes = registry.collect("check_outbound_probes", ctx={})
     probe_ips: dict[str, str] = {p.name: "" for p in probes}
 
+    # 临时常量：probes 在端口解析之前启动，所以这里用 config 直接拿
+    _probe_proxy_port = int(config.get("proxy_port", 7890))
+
     def _make_fetcher(probe):
         def _run():
-            probe_ips[probe.name] = _fetch_probe(probe, env_clean)
+            probe_ips[probe.name] = _fetch_probe(probe, env_clean,
+                                                  proxy_port=_probe_proxy_port)
         return _run
 
     ip_threads = [threading.Thread(target=_make_fetcher(p)) for p in probes]
@@ -521,10 +528,13 @@ def cmd_check(engine, api: str, api_secret: str,
         print(f"  {RED}✗{NC} daemon not running — 执行 proxyctl start")
         return
 
-    # 端口检测（proxy 模式不检查 53）
+    # 端口检测（proxy 模式不检查 53）— 端口来自 config + api_base
+    from urllib.parse import urlparse
+    proxy_port = int(config.get("proxy_port", 7890))
+    api_port = urlparse(api).port or 9090
     dns_hijack = mode in ("tun", "mixed")
-    check_ports = [(53, "dns"), (7890, "proxy"), (9090, "api")] if dns_hijack \
-                  else [(7890, "proxy"), (9090, "api")]
+    check_ports = [(53, "dns"), (proxy_port, "proxy"), (api_port, "api")] if dns_hijack \
+                  else [(proxy_port, "proxy"), (api_port, "api")]
     ok_ports, fail_ports = [], []
     for port, desc in check_ports:
         if _port_listening(port):
@@ -710,7 +720,8 @@ def cmd_check(engine, api: str, api_secret: str,
                 ok, line = _test_tcp(parts[0], int(parts[1]), target.name)
             else:
                 ok, line = _test_url(target.url, target.name,
-                                     target.mode, target.timeout)
+                                     target.mode, target.timeout,
+                                     proxy_port=proxy_port)
         except Exception as e:
             ok, line = False, f"  {RED}✗{NC} {target.name}  error: {e}"
         results[idx] = (line, ok)
@@ -737,7 +748,7 @@ def cmd_check(engine, api: str, api_secret: str,
         print(f"  {YELLOW}—{NC} 无出口探测项")
     for probe in probes:
         ip = probe_ips.get(probe.name, "")
-        geo = _ipgeo(ip, cache_file, api_secret)
+        geo = _ipgeo(ip, cache_file, api_secret, proxy_port=proxy_port)
         print(f"  {probe.name:<7s}{_fmt_ip(ip, geo)}")
 
     # 分流校验：当同时有 proxy 出口和 direct 出口时比较
