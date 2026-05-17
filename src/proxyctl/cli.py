@@ -1310,7 +1310,7 @@ def _read_log_lines(path: str, tail_n: int | None) -> list:
 
 # ── 帮助 ──────────────────────────────────────────────────────────────────────
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 
 def cmd_help(verbose: bool = False):
     """打印帮助信息
@@ -1532,121 +1532,180 @@ def main():
               f"proxyctl explain 看'想改 X 去哪'  ({CYAN}--help{NC}{DIM} 看完整命令){NC}",
               file=sys.stderr)
 
-    if cmd == "start":
-        cmd_start(backend, config, registry=registry)
-    elif cmd == "stop":
-        cmd_stop(backend, config, registry=registry)
-    elif cmd == "restart":
-        cmd_restart(backend, config, registry=registry)
-    elif cmd == "restart-clean":
-        cmd_restart(backend, config, clean=True, registry=registry)
-    elif cmd == "status":
-        from proxyctl.status import cmd_status
-        mode_str = get_mode(backend)
-        cmd_status(backend, api_base, api_secret, config, mode_str, registry=registry)
-    elif cmd == "log":
-        cmd_log(backend, sys.argv[2:])
-    elif cmd == "check":
-        from proxyctl.check import cmd_check
-        mode_str = get_mode(backend)
-        cmd_check(backend, api_base, api_secret, config, mode_str, registry=registry)
-    elif cmd == "bench":
-        from proxyctl.check import cmd_bench
-        bench_groups = sys.argv[2:] if len(sys.argv) > 2 else None
-        default_groups = registry.collect("check_groups") if registry else None
-        cmd_bench(api_base, api_secret, bench_groups, default_groups=default_groups)
-    elif cmd == "fix":
-        _exec_with_lock("system", "fix", cmd_fix, backend, config, registry=registry)
-    elif cmd == "recover":
-        cmd_recover(backend, config)
-    elif cmd == "dns-lock":
-        reload = "--reload" in sys.argv[2:]
-        _exec_with_lock("daemon", "dns-lock", cmd_dns_lock,
-                        config, backend, reload=reload)
-    elif cmd == "dns-unlock":
-        _exec_with_lock("daemon", "dns-unlock", cmd_dns_unlock, config)
-    elif cmd == "env":
-        unset = "--unset" in sys.argv[2:] or "off" in sys.argv[2:]
-        cmd_env(config, unset=unset)
-    elif cmd == "plugins":
-        cmd_plugins(registry)
-    elif cmd == "engine":
-        target = sys.argv[2] if len(sys.argv) > 2 else ""
-        if target:
-            _exec_with_lock("config", "engine", cmd_engine, backend, target, config)
-        else:
-            cmd_engine(backend, target, config)
-    elif cmd == "daemon":
-        name = sys.argv[2] if len(sys.argv) > 2 else ""
-        subcmd = sys.argv[3] if len(sys.argv) > 3 else ""
-        if subcmd in ("start", "stop", "restart"):
-            _exec_with_lock("daemon", "daemon", cmd_daemon, name, subcmd, config)
-        else:
-            cmd_daemon(name, subcmd, config)
-    elif cmd == "claude-proxy":
-        # sb 时代别名，等价于 `proxyctl daemon claude-proxy <subcmd>`
-        subcmd = sys.argv[2] if len(sys.argv) > 2 else "status"
-        if subcmd in ("start", "stop", "restart"):
-            _exec_with_lock("daemon", "claude-proxy",
-                            cmd_daemon, "claude-proxy", subcmd, config)
-        else:
-            cmd_daemon("claude-proxy", subcmd, config)
-    elif cmd == "audit":
-        arg = sys.argv[2] if len(sys.argv) > 2 else "1"
-        apply_mode = (arg == "apply")
-        days_str = sys.argv[3] if (apply_mode and len(sys.argv) > 3) else (arg if not apply_mode else "1")
-        try:
-            days = int(days_str)
-        except ValueError:
-            days = 1
-        from proxyctl.audit import cmd_audit
-        if apply_mode:
-            _exec_with_lock("config", "audit", cmd_audit,
-                            days, api_base, api_secret, apply_mode)
-        else:
-            cmd_audit(days, api_base, api_secret, apply_mode)
-    elif cmd == "mode":
-        target = sys.argv[2] if len(sys.argv) > 2 else ""
-        if target in ("tun", "proxy"):
-            _exec_with_lock("config", "mode", cmd_mode, backend, target)
-        else:
-            cmd_mode(backend, target)
-    elif cmd == "trace":
-        if len(sys.argv) < 3:
-            _io.fail("trace 需要一个 domain 或 url 参数",
-                     hint="proxyctl trace github.com",
-                     doc="troubleshooting",
-                     code=_io.USAGE, cmd="trace",
-                     as_json=GLOBAL_FLAGS.get("json", False))
-        from proxyctl.trace import cmd_trace
-        cmd_trace(sys.argv[2], api_base, api_secret, config)
-    elif cmd == "explain":
-        from proxyctl import explain as _ex
-        _ex.set_global_flags(GLOBAL_FLAGS)
-        _ex.cmd_explain(sys.argv[2:], backend, config)
-    elif cmd in ("agent-guide", "agent_guide"):
-        from proxyctl import explain as _ex
-        _ex.set_global_flags(GLOBAL_FLAGS)
-        _ex.cmd_agent_guide(sys.argv[2:], backend, config)
-    elif cmd == "commands":
-        from proxyctl import explain as _ex
-        _ex.set_global_flags(GLOBAL_FLAGS)
-        _ex.cmd_commands(sys.argv[2:], backend, config)
-    elif cmd == "config":
-        from proxyctl import explain as _ex
-        _ex.set_global_flags(GLOBAL_FLAGS)
-        sub_args = sys.argv[2:]
-        if sub_args and sub_args[0] == "set":
-            _exec_with_lock("config", "config",
-                            _ex.cmd_config, sub_args, backend, config)
-        else:
-            _ex.cmd_config(sub_args, backend, config)
-    elif cmd == "doctor":
-        from proxyctl import explain as _ex
-        _ex.set_global_flags(GLOBAL_FLAGS)
-        _ex.cmd_doctor(sys.argv[2:], backend, config)
-    else:
+    ctx = {
+        "backend": backend, "config": config, "registry": registry,
+        "api_base": api_base, "api_secret": api_secret,
+        "args": sys.argv[2:],
+    }
+    handler = DISPATCH.get(cmd)
+    if handler is None:
         _suggest_command_and_exit(cmd)
+    handler(ctx)
+
+
+# ── Dispatch handlers + 路由表 ────────────────────────────────────────────
+
+def _h_start(ctx):    cmd_start(ctx["backend"], ctx["config"], registry=ctx["registry"])
+def _h_stop(ctx):     cmd_stop(ctx["backend"], ctx["config"], registry=ctx["registry"])
+def _h_restart(ctx):  cmd_restart(ctx["backend"], ctx["config"], registry=ctx["registry"])
+def _h_restart_clean(ctx):
+    cmd_restart(ctx["backend"], ctx["config"], clean=True, registry=ctx["registry"])
+def _h_recover(ctx):  cmd_recover(ctx["backend"], ctx["config"])
+def _h_dns_unlock(ctx):
+    _exec_with_lock("daemon", "dns-unlock", cmd_dns_unlock, ctx["config"])
+def _h_plugins(ctx):  cmd_plugins(ctx["registry"])
+
+def _h_status(ctx):
+    from proxyctl.status import cmd_status
+    mode_str = get_mode(ctx["backend"])
+    cmd_status(ctx["backend"], ctx["api_base"], ctx["api_secret"],
+               ctx["config"], mode_str, registry=ctx["registry"])
+
+def _h_log(ctx):
+    cmd_log(ctx["backend"], ctx["args"])
+
+def _h_check(ctx):
+    from proxyctl.check import cmd_check
+    mode_str = get_mode(ctx["backend"])
+    cmd_check(ctx["backend"], ctx["api_base"], ctx["api_secret"],
+              ctx["config"], mode_str, registry=ctx["registry"])
+
+def _h_bench(ctx):
+    from proxyctl.check import cmd_bench
+    bench_groups = ctx["args"] or None
+    default_groups = ctx["registry"].collect("check_groups") if ctx["registry"] else None
+    cmd_bench(ctx["api_base"], ctx["api_secret"], bench_groups,
+              default_groups=default_groups)
+
+def _h_fix(ctx):
+    _exec_with_lock("system", "fix", cmd_fix,
+                    ctx["backend"], ctx["config"], registry=ctx["registry"])
+
+def _h_dns_lock(ctx):
+    reload = "--reload" in ctx["args"]
+    _exec_with_lock("daemon", "dns-lock", cmd_dns_lock,
+                    ctx["config"], ctx["backend"], reload=reload)
+
+def _h_env(ctx):
+    unset = "--unset" in ctx["args"] or "off" in ctx["args"]
+    cmd_env(ctx["config"], unset=unset)
+
+def _h_engine(ctx):
+    target = ctx["args"][0] if ctx["args"] else ""
+    if target:
+        _exec_with_lock("config", "engine",
+                        cmd_engine, ctx["backend"], target, ctx["config"])
+    else:
+        cmd_engine(ctx["backend"], target, ctx["config"])
+
+def _h_daemon(ctx):
+    name = ctx["args"][0] if ctx["args"] else ""
+    subcmd = ctx["args"][1] if len(ctx["args"]) > 1 else ""
+    if subcmd in ("start", "stop", "restart"):
+        _exec_with_lock("daemon", "daemon", cmd_daemon, name, subcmd, ctx["config"])
+    else:
+        cmd_daemon(name, subcmd, ctx["config"])
+
+def _h_claude_proxy(ctx):
+    """daemon claude-proxy <subcmd> 的别名，向后兼容。"""
+    subcmd = ctx["args"][0] if ctx["args"] else "status"
+    if subcmd in ("start", "stop", "restart"):
+        _exec_with_lock("daemon", "claude-proxy",
+                        cmd_daemon, "claude-proxy", subcmd, ctx["config"])
+    else:
+        cmd_daemon("claude-proxy", subcmd, ctx["config"])
+
+def _h_audit(ctx):
+    arg = ctx["args"][0] if ctx["args"] else "1"
+    apply_mode = (arg == "apply")
+    days_str = (ctx["args"][1] if (apply_mode and len(ctx["args"]) > 1)
+                else (arg if not apply_mode else "1"))
+    try:
+        days = int(days_str)
+    except ValueError:
+        days = 1
+    from proxyctl.audit import cmd_audit
+    if apply_mode:
+        _exec_with_lock("config", "audit", cmd_audit,
+                        days, ctx["api_base"], ctx["api_secret"], apply_mode)
+    else:
+        cmd_audit(days, ctx["api_base"], ctx["api_secret"], apply_mode)
+
+def _h_mode(ctx):
+    target = ctx["args"][0] if ctx["args"] else ""
+    if target in ("tun", "proxy"):
+        _exec_with_lock("config", "mode", cmd_mode, ctx["backend"], target)
+    else:
+        cmd_mode(ctx["backend"], target)
+
+def _h_trace(ctx):
+    if not ctx["args"]:
+        _io.fail("trace 需要一个 domain 或 url 参数",
+                 hint="proxyctl trace github.com",
+                 doc="troubleshooting",
+                 code=_io.USAGE, cmd="trace",
+                 as_json=GLOBAL_FLAGS.get("json", False))
+    from proxyctl.trace import cmd_trace
+    cmd_trace(ctx["args"][0], ctx["api_base"], ctx["api_secret"], ctx["config"])
+
+def _h_explain(ctx):
+    from proxyctl import explain as _ex
+    _ex.cmd_explain(ctx["args"], ctx["backend"], ctx["config"])
+
+def _h_agent_guide(ctx):
+    from proxyctl import explain as _ex
+    _ex.cmd_agent_guide(ctx["args"], ctx["backend"], ctx["config"])
+
+def _h_commands(ctx):
+    from proxyctl import explain as _ex
+    _ex.cmd_commands(ctx["args"], ctx["backend"], ctx["config"])
+
+def _h_config(ctx):
+    from proxyctl import explain as _ex
+    if ctx["args"] and ctx["args"][0] == "set":
+        _exec_with_lock("config", "config",
+                        _ex.cmd_config, ctx["args"], ctx["backend"], ctx["config"])
+    else:
+        _ex.cmd_config(ctx["args"], ctx["backend"], ctx["config"])
+
+def _h_doctor(ctx):
+    from proxyctl import explain as _ex
+    _ex.cmd_doctor(ctx["args"], ctx["backend"], ctx["config"])
+
+def _h_completion(ctx):
+    from proxyctl import completion as _cmp
+    _cmp.cmd_completion(ctx["args"])
+
+
+DISPATCH: dict = {
+    "start":           _h_start,
+    "stop":            _h_stop,
+    "restart":         _h_restart,
+    "restart-clean":   _h_restart_clean,
+    "status":          _h_status,
+    "log":             _h_log,
+    "check":           _h_check,
+    "bench":           _h_bench,
+    "fix":             _h_fix,
+    "recover":         _h_recover,
+    "dns-lock":        _h_dns_lock,
+    "dns-unlock":      _h_dns_unlock,
+    "env":             _h_env,
+    "plugins":         _h_plugins,
+    "engine":          _h_engine,
+    "daemon":          _h_daemon,
+    "claude-proxy":    _h_claude_proxy,
+    "audit":           _h_audit,
+    "mode":            _h_mode,
+    "trace":           _h_trace,
+    "explain":         _h_explain,
+    "agent-guide":     _h_agent_guide,
+    "agent_guide":     _h_agent_guide,  # 下划线别名
+    "commands":        _h_commands,
+    "config":          _h_config,
+    "doctor":          _h_doctor,
+    "completion":      _h_completion,
+}
 
 
 def _exec_with_lock(lock_name: str, cmd_label: str, fn, *args, **kwargs):

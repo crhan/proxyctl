@@ -28,6 +28,9 @@ proxyctl commands --json      # 所有命令元数据：side_effects / needs_sud
 proxyctl doctor --json        # 5 项极简健康打分，自动化决策入口
 
 PROXYCTL_AGENT=1 proxyctl <cmd>  # 一键开启 --json + 关色 + 非交互
+
+proxyctl completion zsh > ~/.proxyctl.zsh   # shell 补全（bash / zsh / fish）
+man proxyctl                                # man page（install.sh 已装到 user-local）
 ```
 
 - 所有读类命令支持 `--json`（envelope schema v1：`schema_version / cmd / ok / data / error / code / hint / doc`）

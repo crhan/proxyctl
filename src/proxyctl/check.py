@@ -103,11 +103,15 @@ def _test_tcp(host: str, port: int, desc: str) -> tuple:
 
 
 def _proxy_groups_section(api_base: str, api_secret: str,
-                           groups: list[str] | None = None) -> bool:
+                           groups: list[str] | None = None,
+                           collect_into: list | None = None) -> bool:
     """检查并自动修复代理组，打印节点明细。返回是否全部正常。
 
     Args:
         groups: 要展示的组名列表。None 时回退到 ["proxy"]。
+        collect_into: 可选 list；如提供，把每组结构化数据 append 进去：
+            {"name": str, "now": str, "members": [{"name", "delay_ms", "is_now"}],
+             "tested_ago": str}
     """
     r = subprocess.run(
         ["curl", "-s", "--noproxy", "*",
@@ -279,6 +283,19 @@ def _proxy_groups_section(api_base: str, api_secret: str,
         if not g:
             continue
         print_group(gname)
+        if collect_into is not None:
+            members = g.get("all", [])
+            now = g.get("now", "")
+            collect_into.append({
+                "name": gname,
+                "type": g.get("type", ""),
+                "now": now,
+                "tested_ago": group_tested_ago(members),
+                "members": [
+                    {"name": m, "delay_ms": get_delay(m), "is_now": m == now}
+                    for m in members
+                ],
+            })
         # selector/fallback 展开的子组标记为已显示
         if g.get("type") in ("Selector", "Fallback"):
             for m in g.get("all", []):
@@ -784,7 +801,11 @@ def cmd_check(engine, api: str, api_secret: str,
     groups = []
     if registry is not None:
         groups = registry.collect("check_groups")
-    _proxy_groups_section(api, api_secret, groups=groups)
+    groups_data: list = []
+    _proxy_groups_section(api, api_secret, groups=groups,
+                          collect_into=groups_data if as_json else None)
+    if as_json:
+        collector["stages"]["groups"] = groups_data
 
     # ── 3. 连通性 ─────────────────────────────────────────────────────────────
     # 从所有插件收集 check_targets。corp-network 等内置插件根据 ctx.corp_net 决定是否启用。

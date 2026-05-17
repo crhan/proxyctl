@@ -39,6 +39,14 @@ uninstall_binaries() {
             warn "$target 不存在"
         fi
     done
+
+    local man_path="$HOME_DIR/.local/share/man/man1/proxyctl.1"
+    if [ -f "$man_path" ]; then
+        info "删除 man page: $man_path"
+        if [ -z "$DRY_RUN" ]; then
+            rm -f "$man_path"
+        fi
+    fi
 }
 
 # 卸载配置

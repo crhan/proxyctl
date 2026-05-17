@@ -5,6 +5,32 @@
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-05-17
+
+### Added
+- **`check --json` 的 groups stage 完整结构化** —
+  `[{name, type, now, tested_ago, members:[{name, delay_ms, is_now}]}]`，
+  替代原来的 `"skipped_in_json_v1"` 占位。
+- **`proxyctl completion [bash|zsh|fish]`** — 生成 shell 补全脚本，
+  从 COMMANDS_META + TOPICS 动态派生。一键 `eval "$(proxyctl completion zsh)"` 生效。
+  支持 `--json` 输出（envelope 含 script 字段）。
+- **`man/proxyctl.1`** — 完整的 groff man page，含全局 flag / 命令表 /
+  JSON envelope / 退出码 / 环境变量 / 文件位置 / 例子。
+  `install.sh` 自动安装到 `~/.local/share/man/man1/`；`uninstall.sh` 同步清理。
+  sdist 也带上 man page。
+
+### Changed
+- **`cli.main()` 重构** — 70+ 行 if-elif 替换为声明式 `DISPATCH` 路由表
+  + 24 个 `_h_*` handler 函数，每个 handler ≤10 行。
+  完整向后兼容（位置参数 / 别名 / 锁 / 拼写建议路径不变）。
+- **dispatch 完整性测试** — `tests/unit/test_dispatch_coverage.py` 断言
+  `DISPATCH` 表与 `COMMANDS_META` 完整对齐；防止新增命令时漏注册。
+
+### Notes
+- 345 passed（v0.2.1 基础 332 + 新增 13）。
+- 不做：argparse subparsers 完整重构（v0.3 backlog）—— 当前 dispatch 表
+  已足够清晰，强行 argparse 化 风险/收益比不划算。
+
 ## [0.2.1] — 2026-05-17
 
 ### Added — 第二批 Agent 友好打磨

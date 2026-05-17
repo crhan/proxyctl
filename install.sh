@@ -150,6 +150,17 @@ install_binaries() {
             fi
         done
     fi
+
+    # man page（macOS / Linux 通用，写到 user-local 路径无需 sudo）
+    if [ -f "$SCRIPT_DIR/man/proxyctl.1" ]; then
+        local man_dir="$HOME_DIR/.local/share/man/man1"
+        info "安装 man page → $man_dir/proxyctl.1"
+        if [ -z "$DRY_RUN" ]; then
+            mkdir -p "$man_dir"
+            cp "$SCRIPT_DIR/man/proxyctl.1" "$man_dir/proxyctl.1"
+        fi
+        warn "若 man 找不到，把 \"export MANPATH=\$HOME/.local/share/man:\$MANPATH\" 加进 rc"
+    fi
 }
 
 # macOS: 安装 launchdaemons

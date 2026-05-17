@@ -1,6 +1,6 @@
 [project]
 name = "proxyctl"
-version = "0.2.1"
+version = "0.2.2"
 description = "Proxy configuration lifecycle management for macOS and Linux"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -48,7 +48,8 @@ build-backend = "hatchling.build"
 packages = ["src/proxyctl"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/proxyctl", "README.md", "LICENSE", "pyproject.toml"]
+include = ["src/proxyctl", "README.md", "LICENSE", "pyproject.toml",
+           "man/proxyctl.1"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
