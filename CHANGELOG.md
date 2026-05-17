@@ -5,6 +5,53 @@
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-05-17
+
+> v0.3.0 引入 `--plain` / `--dry-run` 时的 4 处遗留 bug。无新增能力、无 schema 变更，
+> 0.3.1 的消费者可无感升级。
+
+### Fixed
+- **`audit --plain` 主路径 TypeError** —
+  `audit.py:442` 的 `_audit_emit(as_json, _sys, _real_stdout, collector)`
+  漏传 `as_plain` 参数（函数签名是 5 个位置参数，line 347 / 359 的早期返回
+  路径都对，只有这条主路径漏改）。导致任何走到"扫描到候选域名"路径的
+  `proxyctl audit [N] --plain` 直接抛 `TypeError: _audit_emit() missing 1
+  required positional argument: 'collector'` 退出 1。修复：line 442 补全
+  `as_plain`。
+- **`check --plain` connectivity 字段全错** —
+  `check.py:947-948` 用 `c.get('target')` 与 `c.get('http_code')` 拼 detail，
+  但 collector 里 connectivity 字段实际是 `name / url / mode / ok / message`
+  （v0.2.2 起就这样），结果 TSV 一律输出
+  `None=X;None=X;None=X`，agent 解析等于拿不到任何信息。改为
+  `name=ok` / `name=X` 真实字段渲染。
+- **`cmd_dns_unlock` 在 macOS 下 NameError** — `cli.py:1228` 的
+  `cmd_dns_unlock` 只定义 `dns_lock_label`，line 1239/1240 直接用
+  `dns_lock_plist`（未定义）→ macOS 用户执行 `proxyctl dns-unlock` 时
+  bootout 之后必触发 `NameError`，plist 文件永远删不掉、提示行永远不打印。
+  Linux 走 `IS_MACOS` 早返回不触发。补一行
+  `dns_lock_plist = f"/Library/LaunchDaemons/{dns_lock_label}.plist"`，
+  与 `cmd_dns_lock` (line 1184) 复用同一推导。
+- **`_plan_mode` / `_plan_engine` 输出 `system/system/...` 双前缀** —
+  `Backend.label` 已是 `system/com.mihomo.tun`（line 122 / 152），
+  `_plan_mode`(1727) 和 `_plan_engine`(1744) 又拼 `f"system/{backend.label}"`
+  → dry-run plan 的 `target` 字段输出
+  `launchctl kickstart -k system/system/com.mihomo.tun`。仅影响
+  `--dry-run` 展示，不影响真实执行（执行路径走 launchctl API），但 agent
+  解析 plan.target 复读会得到错误命令。改为直接用 `backend.label`。
+- **`trace --json` envelope.ok 语义错位** —
+  `cmd_trace` 把 `_section_connectivity` 返回值 `(lines, remote_ip)` 误解包
+  为 `(lines, conn_ok)`，把字符串 `remote_ip` 当布尔灌进 envelope 顶层
+  `ok` 与 `collector.connectivity.ok`，导致 HTTP 5xx / 重定向解析不到 IP
+  时 ok 跟随波动，agent 用 envelope.ok 判定 trace 命令是否跑成功会被误导。
+  改为：envelope 顶层 `ok` 固定为 True（trace 是诊断工具，命令本身跑完
+  即成功），新增 `data.stages.connectivity.remote_ip` 字段暴露原始 IP。
+
+### Added — 测试
+- `test_audit_plain_main_path_emits_tsv` — `audit --plain` 主路径 arity 回归。
+- `test_check_plain_connectivity_uses_real_keys` — `check --plain` connectivity
+  字段名回归（断言不含 `None`）。
+- 总测试数 428 → 430。
+
 ## [0.3.1] — 2026-05-17
 
 ### Fixed

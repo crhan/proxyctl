@@ -1230,6 +1230,7 @@ def cmd_dns_unlock(config: dict):
         print(f"{YELLOW}dns-unlock 仅支持 macOS{NC}")
         return
     dns_lock_label = config.get("dns_lock_label", DEFAULTS["dns_lock_label"])
+    dns_lock_plist = f"/Library/LaunchDaemons/{dns_lock_label}.plist"
 
     r = run(["launchctl", "bootout", f"system/{dns_lock_label}"], sudo=True, capture=True)
     if r.returncode == 0:
@@ -1723,7 +1724,7 @@ def _plan_mode(backend, target: str) -> list[dict]:
          "reversible": True,
          "side_effects": ["config-write"]},
         {"action": "subprocess",
-         "target": f"launchctl kickstart -k system/{backend.label}",
+         "target": f"launchctl kickstart -k {backend.label}",
          "summary": f"重启 launchd 服务以读取新 mode",
          "reversible": True, "requires_sudo": True,
          "side_effects": ["process"]},
@@ -1740,7 +1741,7 @@ def _plan_engine(backend, target: str) -> list[dict]:
         new_plist = f"/Library/LaunchDaemons/<{target}>.plist"
     return [
         {"action": "subprocess",
-         "target": f"launchctl bootout system/{backend.label}",
+         "target": f"launchctl bootout {backend.label}",
          "summary": f"停止当前引擎 {backend.name}",
          "reversible": True, "requires_sudo": True,
          "side_effects": ["process"]},

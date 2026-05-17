@@ -439,7 +439,7 @@ def cmd_audit(audit_days: int, api_base: str, api_secret: str, do_apply: bool):
     if candidates and not do_apply:
         print(f"\n执行 {BOLD}proxyctl audit apply{NC} 自动写入双 config")
 
-    _audit_emit(as_json, _sys, _real_stdout, collector)
+    _audit_emit(as_json, as_plain, _sys, _real_stdout, collector)
 
 
 def _audit_emit(as_json: bool, as_plain: bool, _sys, _real_stdout,

@@ -944,7 +944,7 @@ def cmd_check(engine, api: str, api_secret: str,
              "detail": "skipped_in_structured_modes"},
             {"stage": "connectivity",
              "ok": all(c.get("ok") for c in conn) if conn else False,
-             "detail": ";".join(f"{c.get('target')}={c.get('http_code') or 'X'}"
+             "detail": ";".join(f"{c.get('name')}={'ok' if c.get('ok') else 'X'}"
                                  for c in conn)},
             {"stage": "outbound_ip",
              "ok": bool(out_ip),

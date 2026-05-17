@@ -575,11 +575,12 @@ def cmd_trace(raw_input: str, api: str, secret: str, config: dict = None):
     }
 
     t.join()
-    lines, conn_ok = connectivity_result[0]
+    lines, remote_ip = connectivity_result[0]
     for line in lines:
         print(line)
     collector["stages"]["connectivity"] = {
-        "ok": bool(conn_ok),
+        "ok": bool(remote_ip),
+        "remote_ip": remote_ip,
         "lines": [_strip_ansi(line) for line in lines],
     }
 
@@ -588,8 +589,7 @@ def cmd_trace(raw_input: str, api: str, secret: str, config: dict = None):
     if as_json:
         _sys.stdout = _real_stdout
         from proxyctl._io import emit_json, envelope, OK
-        emit_json(envelope("trace", data=collector,
-                           ok=bool(conn_ok), code=OK))
+        emit_json(envelope("trace", data=collector, ok=True, code=OK))
         _sys.exit(0)
 
 
