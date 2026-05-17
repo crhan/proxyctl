@@ -18,6 +18,9 @@ CYAN   = "\033[0;36m"
 BOLD   = "\033[1m"
 NC     = "\033[0m"
 
+from proxyctl._io import maybe_disable_module_colors as _pc_maybe_disable
+_pc_maybe_disable(__name__)
+
 HOME = os.path.expanduser("~")
 
 
@@ -479,6 +482,13 @@ def cmd_status(engine, api: str, api_secret: str,
         mode: 代理模式字符串（tun/proxy/mixed）
         registry: PluginRegistry，提供 status_sections（VPN/Tailscale/TUIC relay 等）
     """
+    # 检测 --json 全局 flag（Step 2 注入到 explain._GLOBAL_FLAGS）
+    try:
+        from proxyctl.explain import GLOBAL_FLAGS_REF as _gf
+        as_json = bool(_gf().get("json"))
+    except Exception:
+        as_json = False
+
     dns_lock_label = config.get("dns_lock_label", "com.proxyctl.dns-lock")
     claude_proxy_label = config.get("claude_proxy_label", "com.proxyctl.claude-proxy")
 
@@ -510,31 +520,70 @@ def cmd_status(engine, api: str, api_secret: str,
 
         d_engine  = f_engine.result()
         d_ports   = f_ports.result()
-        _print_engine(engine, mode, d_engine, d_ports)
+        d_tun     = f_tun.result()
+        d_proxy   = f_proxy.result()
+        d_dns     = f_dns.result()
+        d_network = f_network.result()
         daemon_up = d_engine["daemon_up"]
 
-        if mode in ("tun", "mixed"):
-            _print_tun(engine, f_tun.result())
-
-        _print_proxy_settings(f_proxy.result(), daemon_up, mode)
-        _print_dns(daemon_up, f_dns.result(), mode)
-        _print_network(f_network.result())
-
-        # 插件 sections（VPN/Tailscale/TUIC relay 等本机特例都走这里）
+        d_sections: dict = {}
         for section, future in f_sections:
             try:
-                data = future.result()
-                section.render(ctx, data)
+                d_sections[section.name] = future.result()
             except Exception as e:
-                import sys
-                sys.stderr.write(
-                    f"[plugin warning] status_section {section.name} failed: {e}\n"
-                )
+                d_sections[section.name] = {"error": str(e)}
 
-    # 环境变量代理
-    env_parts = [f"{var}={os.environ[var]}"
+    env_proxy = {var: os.environ[var]
                  for var in ("http_proxy", "https_proxy", "all_proxy")
-                 if os.environ.get(var)]
-    if env_parts:
+                 if os.environ.get(var)}
+
+    if as_json:
+        from proxyctl._io import emit_json, envelope
+        data = {
+            "engine": d_engine,
+            "ports": d_ports,
+            "tun": d_tun if mode in ("tun", "mixed") else None,
+            "system_proxy": d_proxy,
+            "dns": d_dns,
+            "network": d_network,
+            "sections": _jsonify(d_sections),
+            "env": env_proxy,
+            "mode": mode,
+            "backend": engine.name,
+        }
+        emit_json(envelope("status", data=data,
+                           ok=bool(daemon_up),
+                           code=0 if daemon_up else 5))
+        return
+
+    # 人类模式：与之前一致的顺序渲染
+    _print_engine(engine, mode, d_engine, d_ports)
+    if mode in ("tun", "mixed"):
+        _print_tun(engine, d_tun)
+    _print_proxy_settings(d_proxy, daemon_up, mode)
+    _print_dns(daemon_up, d_dns, mode)
+    _print_network(d_network)
+    # 插件 sections（VPN/Tailscale/TUIC relay 等本机特例都走这里）
+    for section in sections:
+        try:
+            section.render(ctx, d_sections.get(section.name))
+        except Exception as e:
+            import sys
+            sys.stderr.write(
+                f"[plugin warning] status_section {section.name} failed: {e}\n"
+            )
+
+    if env_proxy:
         print(f"\n{BOLD}ENV{NC}")
-        print(f"  {' '.join(env_parts)}")
+        print(f"  {' '.join(f'{k}={v}' for k, v in env_proxy.items())}")
+
+
+def _jsonify(obj):
+    """递归地把对象转换成 JSON 可序列化的形式。"""
+    if isinstance(obj, dict):
+        return {str(k): _jsonify(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonify(x) for x in obj]
+    if isinstance(obj, (str, int, float, bool, type(None))):
+        return obj
+    return str(obj)

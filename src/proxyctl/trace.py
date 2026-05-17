@@ -17,6 +17,9 @@ BOLD   = "\033[1m"
 DIM    = "\033[2m"
 NC     = "\033[0m"
 
+from proxyctl._io import maybe_disable_module_colors as _pc_maybe_disable
+_pc_maybe_disable(__name__)
+
 
 def _detect_mode() -> dict:
     """

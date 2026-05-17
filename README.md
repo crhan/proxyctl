@@ -17,6 +17,24 @@ proxyctl 是一套 macOS 代理管理工具，核心价值在于提供**配置�
 
 它不告诉你"用什么配置"，而是帮你"管好配置"。
 
+## For AI Agents
+
+proxyctl 对 AI Agent（Claude Code 等自动化调用方）做了一等公民支持：
+
+```bash
+proxyctl agent-guide          # 给 LLM 的入门 markdown（能力边界 / 退出码 / 故障决策树）
+proxyctl explain              # "我想改 X 去哪？" 一屏速查（rules / nodes / config / ...）
+proxyctl commands --json      # 所有命令元数据：side_effects / needs_sudo / exit_codes
+proxyctl doctor --json        # 5 项极简健康打分，自动化决策入口
+
+PROXYCTL_AGENT=1 proxyctl <cmd>  # 一键开启 --json + 关色 + 非交互
+```
+
+- 所有读类命令支持 `--json`（envelope schema v1：`schema_version / cmd / ok / data / error / code / hint / doc`）
+- 错误信息一律带 `hint` + `doc`（指向 `proxyctl explain <topic>`）
+- 退出码分语义（`0 OK / 2 USAGE / 3 NOT_FOUND / 5 ENGINE_DOWN / 6 CONFIG_ERR / 7 NETWORK_ERR / 8 LOCKED`）
+- 写操作有文件锁；非 TTY 时自动 `NO_COLOR`；不读 stdin / 不 prompt
+
 ## 核心功能
 
 ### 状态面板

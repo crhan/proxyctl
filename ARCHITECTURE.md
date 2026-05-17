@@ -33,10 +33,18 @@ proxyctl 的核心价值在于提供**配置演进的闭环反馈**：
 
 ### 2. Agent 友好设计
 
-这套 CLI 的**输出格式**和**命令结构**天然适合 Agent 消费：
-- 结构化的输出（带颜色标记的表格）
-- 原子化的命令（每个命令做一件事）
-- 可脚本化的接口（返回码、JSON 输出）
+这套 CLI 把"自描述"做成了一等公民。Agent 不必读 README、不必猜路径：
+
+- `proxyctl agent-guide`：一份 ≤200 行的 markdown 入门，含能力边界、概念地图、退出码语义、故障决策树、JSON envelope 规范、non-interactive 承诺、footgun
+- `proxyctl explain [<topic>]`：回答"我要改 X 去哪？"。Topic 内容由当前 backend 动态计算（路径、端口），不硬编码
+- `proxyctl commands --json`：所有命令的元数据（`side_effects` / `needs_sudo` / `interactive` / `exit_codes` / `examples`），Agent 决策必备
+- `proxyctl doctor --json`：极简 5 项布尔健康打分（比 status 精简、比 check 快），自动化决策入口
+- `proxyctl config path | get`：让 Agent 无需 grep 就能定位/查询自身配置
+- 统一 JSON envelope（schema v1）：`schema_version / cmd / ok / data / error / code / hint / doc`
+- 分语义退出码：`2 USAGE / 3 NOT_FOUND / 5 ENGINE_DOWN / 6 CONFIG_ERR / 7 NETWORK_ERR / 8 LOCKED`
+- `PROXYCTL_AGENT=1` 一键模式：自动 `--json` + 关色 + 非交互
+
+更多 clig.dev 合规细节：TTY 自动检测、`NO_COLOR` 支持、`fcntl.flock` 写操作并发锁、SIGPIPE 安全（不抛 BrokenPipeError）。
 
 ### 3. 配置即代码 (Configuration as Code)
 

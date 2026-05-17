@@ -5,6 +5,67 @@
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-17
+
+### Added — Agent 接入一等公民
+- **新命令 `proxyctl agent-guide`** — 输出 ≤200 行 markdown，含能力边界 /
+  概念地图 / 退出码语义 / JSON envelope 规范 / 故障决策树 / non-interactive
+  承诺 / footgun。Agent 第一条该调用的命令。
+- **新命令 `proxyctl explain [<topic>]`** — 无参输出"想改 X 去哪？"速查表
+  （rules / nodes / config / dns / ports / ...）；带 topic 输出卡片
+  `SUMMARY / FILE / EDIT / VERIFY / NEXT`。13 个 topic，内容由当前 backend
+  动态计算路径，不硬编码。
+- **新命令 `proxyctl commands [--json]`** — 列出所有命令的元数据：
+  `group / side_effects / needs_sudo / interactive / supports_json /
+  exit_codes / examples`。Agent 决策必备。
+- **新命令 `proxyctl config path | get <key>`** — 让 Agent 无需 grep
+  就能定位/查询自身配置；支持 dot 路径（`corp_dns.server`）。
+  `set` 留作 v0.3。
+- **新命令 `proxyctl doctor [--json]`** — 极简 5 项布尔健康打分
+  （engine_up / port_listen / dns_ok / system_proxy_ok / connectivity_ok）
+  + score + hint。比 `status` 精简、比 `check` 快（<2 秒）。
+
+### Added — clig.dev 合规
+- 统一 JSON envelope（schema v1）：
+  `{schema_version, cmd, ok, data, error, code, hint, doc}`，失败时也输出完整
+  envelope 到 stdout。`status / doctor / explain / agent-guide / commands /
+  config / log` 全部支持 `--json`。
+- **分语义退出码**：
+  - `0` OK · `1` GENERIC（旧路径） · `2` USAGE · `3` NOT_FOUND ·
+  - `4` PERMISSION · `5` ENGINE_DOWN · `6` CONFIG_ERR ·
+  - `7` NETWORK_ERR · `8` LOCKED（写操作并发锁未拿到）
+- **颜色 / TTY 智能化**：非 TTY、`NO_COLOR`、`TERM=dumb`、`--no-color` flag、
+  `PROXYCTL_NO_COLOR=1`、`--json` 模式时一律关 ANSI。
+- **stdout / stderr 严格分流**：JSON / 数据 → stdout；错误、警告、提示、
+  进度 → stderr。错误信息一律带 `hint` + `doc`（指向 explain topic）。
+- **写操作并发锁**：`mode / engine / fix / dns-lock / dns-unlock /
+  daemon start|stop|restart / audit apply` 用 `fcntl.flock` 在
+  `~/.config/proxyctl/.lock.*` 加锁；拿不到锁立即 exit 8 + 结构化错误。
+- **拼写建议**：未识别子命令时 `difflib` 给"是否想要 X？"建议，exit 2。
+- **PROXYCTL_AGENT=1 一键模式**：等价 `--json` + `--no-color` + 非交互。
+- **`proxyctl log` 多模式**：保留默认 `tail -f`；新增 `--tail N` /
+  `--no-follow` / `--json`（JSON Lines）。`--json --no-follow` 不再死循环。
+- **SIGPIPE 安全**：`proxyctl commands --json | head` 不再抛
+  BrokenPipeError；Ctrl-C 退出码 130。
+- 全局 flag 位置无关：`--json` / `--no-color` / `--quiet` / `-q` 可在任意位置。
+
+### Changed
+- `--help` 顶部加 `AI Agent? → proxyctl agent-guide` 与
+  `想改 ... 去哪？ → proxyctl explain` 入口。
+- 裸 `proxyctl` 仍 = `status`（兼容），但 stderr 加一行 Agent 入口提示。
+- `cmd_recover` 引擎未运行 → `ENGINE_DOWN(5)`（旧 `1`）。
+- `trace` 缺参 → `USAGE(2)`（旧 `1`）。
+- `daemon <X>` 未声明 → `NOT_FOUND(3)`（旧 `1`），并列出已声明列表。
+- `proxyctl log` 文件不存在 → `NOT_FOUND(3)`。
+
+### Notes
+- 完整向后兼容：22 个既有命令的调用形式 100% 保留（包括
+  `proxyctl claude-proxy` 别名、`proxyctl audit 7`、`proxyctl audit apply`、
+  裸 `proxyctl` 等）。
+- 旧 `sys.exit(1)` 路径未动；只在新代码和上述列明的 4 条边界路径上启用新码。
+- 颜色改造：每个文件保留 `RED/GREEN/...` 模块常量，运行期由 `_io.set_no_color`
+  monkey-patch 抹空，零侵入 200+ 处 f-string。
+
 ## [0.1.5] — 2026-05-17
 
 ### Added

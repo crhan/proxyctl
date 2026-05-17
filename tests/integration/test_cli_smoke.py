@@ -114,9 +114,14 @@ def test_no_args_defaults_to_status(monkeypatch, patched_env):
     patched_env["cmd_status"].assert_called_once()
 
 
-def test_unknown_command_shows_help(monkeypatch, patched_env):
-    _run(monkeypatch, "nonsense-cmd")
-    patched_env["cmd_help"].assert_called_once()
+def test_unknown_command_did_you_mean(monkeypatch, patched_env, capsys):
+    """v0.2: 未识别子命令 → did-you-mean + USAGE(2)，不再走 cmd_help。"""
+    monkeypatch.setattr(sys, "argv", ["proxyctl", "nonsense-cmd"])
+    with pytest.raises(SystemExit) as ei:
+        cli.main()
+    assert ei.value.code == 2
+    err = capsys.readouterr().err
+    assert "未识别子命令" in err
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -231,12 +236,14 @@ def test_audit_invalid_days_falls_back_to_one(monkeypatch, patched_env):
 # ────────────────────────────────────────────────────────────────────────────
 
 def test_trace_requires_arg(monkeypatch, patched_env, capsys):
+    """v0.2: trace 缺参 → USAGE(2)，错误信息走 stderr，附 hint。"""
     monkeypatch.setattr(sys, "argv", ["proxyctl", "trace"])
     with pytest.raises(SystemExit) as ei:
         cli.main()
-    assert ei.value.code == 1
-    out = capsys.readouterr().out
-    assert "用法" in out or "usage" in out.lower()
+    assert ei.value.code == 2
+    err = capsys.readouterr().err
+    assert "trace" in err and ("domain" in err or "url" in err)
+    assert "hint" in err
 
 
 def test_trace_passes_domain(monkeypatch, patched_env):

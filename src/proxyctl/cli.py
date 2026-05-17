@@ -15,6 +15,10 @@ import subprocess
 import sys
 import time
 
+from proxyctl import _io
+from proxyctl._io import maybe_disable_module_colors
+maybe_disable_module_colors(__name__)
+
 # ── 平台检测 ────────────────────────────────────────────────────────────────
 PLATFORM = platform.system()   # "Darwin" | "Linux"
 IS_MACOS = PLATFORM == "Darwin"
@@ -34,6 +38,7 @@ GREEN = "\033[0;32m"
 YELLOW = "\033[0;33m"
 CYAN = "\033[0;36m"
 BOLD = "\033[1m"
+DIM = "\033[2m"
 NC = "\033[0m"
 
 # ── 默认配置（可通过 config.yaml 覆盖）───────────────────────────────────────
@@ -723,8 +728,11 @@ def cmd_recover(backend: Backend, config: dict):
         sys.exit(1)
 
     if not launchctl_running(backend.label):
-        print(f"{RED}✗{NC} {backend.name} 未运行，请先 proxyctl start")
-        sys.exit(1)
+        _io.fail(f"{backend.name} 未运行",
+                 hint="proxyctl start",
+                 doc="engine",
+                 code=_io.ENGINE_DOWN, cmd="recover",
+                 as_json=GLOBAL_FLAGS.get("json", False))
 
     t0 = time.monotonic()
     auth = ["-H", f"Authorization: Bearer {api_secret}"]
@@ -1059,9 +1067,13 @@ def cmd_daemon(name: str, subcmd: str, config: dict):
 
     d_cfg = daemons.get(name)
     if not d_cfg:
-        print(f"{RED}✗{NC} 未声明的 daemon: {name}")
-        print(f"  请在 config.yaml extra_daemons 中加入 {name} 段")
-        sys.exit(1)
+        declared = list(daemons.keys()) or ["(无)"]
+        _io.fail(f"未声明的 daemon: {name}",
+                 hint=f"已声明：{', '.join(declared)}；"
+                      f"在 {CONFIG_FILE} 的 extra_daemons: 段加入 {name}",
+                 doc="extra-daemons",
+                 code=_io.NOT_FOUND, cmd="daemon",
+                 as_json=GLOBAL_FLAGS.get("json", False))
 
     label    = d_cfg.get("label", "")
     plist_src = os.path.expanduser(d_cfg.get("plist_src", ""))
@@ -1227,9 +1239,78 @@ def cmd_env(config: dict, unset: bool = False):
         print(f"export {var}={no_proxy};")
 
 
+# ── 命令：log ─────────────────────────────────────────────────────────────────
+
+def cmd_log(backend: "Backend", args: list) -> None:
+    """proxyctl log [--tail N] [--no-follow] [--json]
+
+    无参 → tail -f（向后兼容）。
+    --tail N / --no-follow → 立即返回（agent 友好，不挂死）。
+    --json + --tail N / --no-follow → 输出 JSON Lines（每行 {ts, line, file}）。
+    """
+    log_file = backend.log_file
+    if not os.path.isfile(log_file):
+        _io.fail(f"日志文件不存在：{log_file}",
+                 hint=f"先 proxyctl start 让 {backend.name} 生成日志",
+                 code=_io.NOT_FOUND, cmd="log",
+                 as_json=GLOBAL_FLAGS.get("json", False))
+        return
+
+    tail_n: int | None = None
+    follow = True
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--no-follow":
+            follow = False
+        elif a == "--tail":
+            if i + 1 >= len(args):
+                _io.fail("--tail 需要一个数字参数", code=_io.USAGE, cmd="log",
+                         as_json=GLOBAL_FLAGS.get("json", False))
+            try:
+                tail_n = int(args[i + 1])
+            except ValueError:
+                _io.fail(f"--tail 参数不是数字：{args[i + 1]}",
+                         code=_io.USAGE, cmd="log",
+                         as_json=GLOBAL_FLAGS.get("json", False))
+            i += 1
+            follow = False
+        i += 1
+
+    as_json = GLOBAL_FLAGS.get("json", False)
+
+    if as_json:
+        # JSON Lines：每行一个对象（非 envelope，便于流式消费）
+        lines = _read_log_lines(log_file, tail_n)
+        for line in lines:
+            print(json.dumps({"file": log_file, "line": line.rstrip()},
+                             ensure_ascii=False))
+        return
+
+    if follow:
+        os.execvp("tail", ["tail", "-f", log_file])  # 向后兼容：默认行为不变
+
+    if tail_n is not None:
+        os.execvp("tail", ["tail", "-n", str(tail_n), log_file])
+    # --no-follow 且没指定 --tail：cat 全文
+    os.execvp("cat", ["cat", log_file])
+
+
+def _read_log_lines(path: str, tail_n: int | None) -> list:
+    """读日志为行列表；tail_n 为 None 表示读全文。"""
+    try:
+        with open(path, errors="replace") as f:
+            all_lines = f.readlines()
+    except OSError:
+        return []
+    if tail_n is None:
+        return all_lines
+    return all_lines[-tail_n:] if tail_n > 0 else []
+
+
 # ── 帮助 ──────────────────────────────────────────────────────────────────────
 
-VERSION = "0.1.5"
+VERSION = "0.2.0"
 
 def cmd_help(verbose: bool = False):
     """打印帮助信息
@@ -1239,6 +1320,10 @@ def cmd_help(verbose: bool = False):
     """
     print(f"proxyctl v{VERSION}")
     print("Proxy configuration lifecycle management\n")
+    print(f"{CYAN}AI Agent?{NC} → proxyctl agent-guide   "
+          f"({DIM}快速入门：能力边界 / 退出码 / JSON / 故障决策树{NC})")
+    print(f"{CYAN}想改 ... 去哪？{NC} → proxyctl explain   "
+          f"({DIM}规则 / 节点 / 配置 / DNS / 端口{NC})\n")
     print("用法：proxyctl <command> [options]\n")
 
     print("┌─ 基础操作 ─────────────────────────────────────────────────────┐")
@@ -1305,10 +1390,55 @@ def cmd_help(verbose: bool = False):
     sys.exit(0)
 
 
+# ── 全局 flag 预解析 ──────────────────────────────────────────────────────
+
+# 入口运行期填充，子命令可读取（如 status 决定是否 --json）
+GLOBAL_FLAGS: dict = {"json": False, "no_color": False, "quiet": False}
+
+
+def _extract_global_flags(argv: list) -> tuple:
+    """从 argv 中剥离全局 flag，返回 (剩余 argv, flag dict)。
+
+    clig.dev 原则：flag 位置无关 — 在任意位置出现的 --json / --no-color /
+    --quiet / -q 都会被识别并剥离，剩余位置参数顺序保持不变。
+    """
+    flags = {"json": False, "no_color": False, "quiet": False}
+    remaining = []
+    for a in argv:
+        if a == "--json":
+            flags["json"] = True
+        elif a == "--no-color":
+            flags["no_color"] = True
+        elif a in ("--quiet", "-q"):
+            flags["quiet"] = True
+        else:
+            remaining.append(a)
+    return remaining, flags
+
+
 # ── 主入口 ────────────────────────────────────────────────────────────────────
 
 def main():
-    # 处理全局标志
+    # 信号：避免 `proxyctl ... | head` 的 BrokenPipeError；Ctrl-C → exit 130
+    _io.install_signal_handlers()
+
+    # 全局 flag：从 sys.argv 中剥离（位置无关），子命令分发不变
+    new_argv, gflags = _extract_global_flags(sys.argv)
+    sys.argv = new_argv
+    GLOBAL_FLAGS.update(gflags)
+
+    # PROXYCTL_AGENT=1 一键模式：等价 --json + --no-color
+    if _io.agent_mode_active():
+        GLOBAL_FLAGS["json"] = True
+        GLOBAL_FLAGS["no_color"] = True
+
+    # 关色决策：显式 --no-color / --json / PROXYCTL_AGENT 强制；否则按 TTY+env 自动
+    if GLOBAL_FLAGS["no_color"] or GLOBAL_FLAGS["json"]:
+        _io.set_no_color(True)
+    else:
+        _io.auto_color_init()
+
+    # 处理全局帮助 / 版本（位置仍要求是第一个非全局参数）
     if len(sys.argv) > 1:
         if sys.argv[1] in ("--help", "-h", "help"):
             cmd_help(verbose=True)
@@ -1332,6 +1462,16 @@ def main():
 
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
 
+    # 把全局 flag 共享给 explain（status/doctor 等子命令通过它读 --json）
+    from proxyctl import explain as _ex_share
+    _ex_share.set_global_flags(GLOBAL_FLAGS)
+
+    # 裸 proxyctl → 默认 status，但补一条"Agent 入口"提示到 stderr（不污染 stdout）
+    if len(sys.argv) == 1 and not GLOBAL_FLAGS.get("json"):
+        print(f"{DIM}提示：proxyctl agent-guide 给 Agent / "
+              f"proxyctl explain 看'想改 X 去哪'  ({CYAN}--help{NC}{DIM} 看完整命令){NC}",
+              file=sys.stderr)
+
     if cmd == "start":
         cmd_start(backend, config, registry=registry)
     elif cmd == "stop":
@@ -1345,7 +1485,7 @@ def main():
         mode_str = get_mode(backend)
         cmd_status(backend, api_base, api_secret, config, mode_str, registry=registry)
     elif cmd == "log":
-        os.execvp("tail", ["tail", "-f", backend.log_file])
+        cmd_log(backend, sys.argv[2:])
     elif cmd == "check":
         from proxyctl.check import cmd_check
         mode_str = get_mode(backend)
@@ -1356,14 +1496,15 @@ def main():
         default_groups = registry.collect("check_groups") if registry else None
         cmd_bench(api_base, api_secret, bench_groups, default_groups=default_groups)
     elif cmd == "fix":
-        cmd_fix(backend, config, registry=registry)
+        _exec_with_lock("system", "fix", cmd_fix, backend, config, registry=registry)
     elif cmd == "recover":
         cmd_recover(backend, config)
     elif cmd == "dns-lock":
         reload = "--reload" in sys.argv[2:]
-        cmd_dns_lock(config, backend, reload=reload)
+        _exec_with_lock("daemon", "dns-lock", cmd_dns_lock,
+                        config, backend, reload=reload)
     elif cmd == "dns-unlock":
-        cmd_dns_unlock(config)
+        _exec_with_lock("daemon", "dns-unlock", cmd_dns_unlock, config)
     elif cmd == "env":
         unset = "--unset" in sys.argv[2:] or "off" in sys.argv[2:]
         cmd_env(config, unset=unset)
@@ -1371,15 +1512,25 @@ def main():
         cmd_plugins(registry)
     elif cmd == "engine":
         target = sys.argv[2] if len(sys.argv) > 2 else ""
-        cmd_engine(backend, target, config)
+        if target:
+            _exec_with_lock("config", "engine", cmd_engine, backend, target, config)
+        else:
+            cmd_engine(backend, target, config)
     elif cmd == "daemon":
         name = sys.argv[2] if len(sys.argv) > 2 else ""
         subcmd = sys.argv[3] if len(sys.argv) > 3 else ""
-        cmd_daemon(name, subcmd, config)
+        if subcmd in ("start", "stop", "restart"):
+            _exec_with_lock("daemon", "daemon", cmd_daemon, name, subcmd, config)
+        else:
+            cmd_daemon(name, subcmd, config)
     elif cmd == "claude-proxy":
         # sb 时代别名，等价于 `proxyctl daemon claude-proxy <subcmd>`
         subcmd = sys.argv[2] if len(sys.argv) > 2 else "status"
-        cmd_daemon("claude-proxy", subcmd, config)
+        if subcmd in ("start", "stop", "restart"):
+            _exec_with_lock("daemon", "claude-proxy",
+                            cmd_daemon, "claude-proxy", subcmd, config)
+        else:
+            cmd_daemon("claude-proxy", subcmd, config)
     elif cmd == "audit":
         arg = sys.argv[2] if len(sys.argv) > 2 else "1"
         apply_mode = (arg == "apply")
@@ -1389,19 +1540,80 @@ def main():
         except ValueError:
             days = 1
         from proxyctl.audit import cmd_audit
-        cmd_audit(days, api_base, api_secret, apply_mode)
+        if apply_mode:
+            _exec_with_lock("config", "audit", cmd_audit,
+                            days, api_base, api_secret, apply_mode)
+        else:
+            cmd_audit(days, api_base, api_secret, apply_mode)
     elif cmd == "mode":
         target = sys.argv[2] if len(sys.argv) > 2 else ""
-        cmd_mode(backend, target)
+        if target in ("tun", "proxy"):
+            _exec_with_lock("config", "mode", cmd_mode, backend, target)
+        else:
+            cmd_mode(backend, target)
     elif cmd == "trace":
         if len(sys.argv) < 3:
-            print("用法：proxyctl trace <domain|url>")
-            print("  诊断域名的完整访问链路：DNS → 规则预测 → 连通性测试 → 实际连接验证")
-            sys.exit(1)
+            _io.fail("trace 需要一个 domain 或 url 参数",
+                     hint="proxyctl trace github.com",
+                     doc="troubleshooting",
+                     code=_io.USAGE, cmd="trace",
+                     as_json=GLOBAL_FLAGS.get("json", False))
         from proxyctl.trace import cmd_trace
         cmd_trace(sys.argv[2], api_base, api_secret, config)
+    elif cmd == "explain":
+        from proxyctl import explain as _ex
+        _ex.set_global_flags(GLOBAL_FLAGS)
+        _ex.cmd_explain(sys.argv[2:], backend, config)
+    elif cmd in ("agent-guide", "agent_guide"):
+        from proxyctl import explain as _ex
+        _ex.set_global_flags(GLOBAL_FLAGS)
+        _ex.cmd_agent_guide(sys.argv[2:], backend, config)
+    elif cmd == "commands":
+        from proxyctl import explain as _ex
+        _ex.set_global_flags(GLOBAL_FLAGS)
+        _ex.cmd_commands(sys.argv[2:], backend, config)
+    elif cmd == "config":
+        from proxyctl import explain as _ex
+        _ex.set_global_flags(GLOBAL_FLAGS)
+        _ex.cmd_config(sys.argv[2:], backend, config)
+    elif cmd == "doctor":
+        from proxyctl import explain as _ex
+        _ex.set_global_flags(GLOBAL_FLAGS)
+        _ex.cmd_doctor(sys.argv[2:], backend, config)
     else:
-        cmd_help()
+        _suggest_command_and_exit(cmd)
+
+
+def _exec_with_lock(lock_name: str, cmd_label: str, fn, *args, **kwargs):
+    """包装写操作：拿不到锁则 LOCKED(8) 失败；拿到则执行。"""
+    try:
+        with _io.with_lock(lock_name):
+            return fn(*args, **kwargs)
+    except BlockingIOError:
+        _io.fail(f"另一个 proxyctl 写操作正在进行（lock: {lock_name}）",
+                 hint="稍后重试；或排查是否有挂死的 proxyctl 进程",
+                 code=_io.LOCKED, cmd=cmd_label,
+                 as_json=GLOBAL_FLAGS.get("json", False))
+
+
+def _known_commands() -> list:
+    """所有可识别的顶层命令（含别名）。"""
+    from proxyctl.explain import COMMANDS_META
+    names = [c["name"] for c in COMMANDS_META]
+    names += ["restart-clean", "help"]
+    return sorted(set(names))
+
+
+def _suggest_command_and_exit(unknown: str) -> None:
+    """未识别子命令 → 拼写建议 + 退出码 USAGE(2)。"""
+    import difflib
+    cands = difflib.get_close_matches(unknown, _known_commands(), n=3, cutoff=0.5)
+    as_json = GLOBAL_FLAGS.get("json", False)
+    hint = "proxyctl commands  # 查看所有命令"
+    if cands:
+        hint = f"是否想要：{', '.join(cands)} ？  ({hint})"
+    _io.fail(f"未识别子命令：{unknown}", hint=hint, doc="agent",
+             code=_io.USAGE, cmd=unknown, as_json=as_json)
 
 
 if __name__ == "__main__":
