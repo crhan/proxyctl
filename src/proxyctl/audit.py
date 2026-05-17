@@ -270,16 +270,24 @@ def cmd_audit(audit_days: int, api_base: str, api_secret: str, do_apply: bool):
 
     --json 模式：human print 静默；最终 envelope 包含 candidates / proxy_ok /
     unknown / new_suffixes / applied 等结构化字段。
+    --plain 模式：human print 静默；末尾输出 candidates TSV 表（domain/count/ip/country）。
     """
     import io as _io_mod
     import sys as _sys
     try:
         from proxyctl.explain import GLOBAL_FLAGS_REF as _gf
-        as_json = bool(_gf().get("json"))
+        flags = _gf()
+        as_json = bool(flags.get("json"))
+        as_plain = bool(flags.get("plain"))
     except Exception:
         as_json = False
+        as_plain = False
+    if as_json and as_plain:
+        from proxyctl import _io as _pc_io
+        _pc_io.fail("--json 与 --plain 互斥",
+                    hint="选择其一", code=_pc_io.USAGE, cmd="audit")
     _real_stdout = _sys.stdout
-    if as_json:
+    if as_json or as_plain:
         _sys.stdout = _io_mod.StringIO()
 
     collector: dict = {
@@ -336,7 +344,7 @@ def cmd_audit(audit_days: int, api_base: str, api_secret: str, do_apply: bool):
 
     if not proxy_domains:
         print("  没有发现走代理的域名流量。")
-        _audit_emit(as_json, _sys, _real_stdout, collector)
+        _audit_emit(as_json, as_plain, _sys, _real_stdout, collector)
         return
 
     # 步骤 3: 读双 config 规则，过滤已有明确规则的域名
@@ -348,7 +356,7 @@ def cmd_audit(audit_days: int, api_base: str, api_secret: str, do_apply: bool):
 
     if not uncovered:
         print("  所有走代理的域名都已被显式规则覆盖，无遗漏。")
-        _audit_emit(as_json, _sys, _real_stdout, collector)
+        _audit_emit(as_json, as_plain, _sys, _real_stdout, collector)
         return
     collector["uncovered_count"] = len(uncovered)
 
@@ -434,12 +442,21 @@ def cmd_audit(audit_days: int, api_base: str, api_secret: str, do_apply: bool):
     _audit_emit(as_json, _sys, _real_stdout, collector)
 
 
-def _audit_emit(as_json: bool, _sys, _real_stdout, collector: dict) -> None:
-    """audit --json：恢复 stdout，输出 envelope，退出。
-    人类模式：no-op。"""
-    if not as_json:
-        return
-    _sys.stdout = _real_stdout
-    from proxyctl._io import emit_json, envelope
-    emit_json(envelope("audit", data=collector, ok=True))
-    _sys.exit(0)
+def _audit_emit(as_json: bool, as_plain: bool, _sys, _real_stdout,
+                collector: dict) -> None:
+    """audit 结构化输出：
+      --json 模式：envelope（含全量 collector）
+      --plain 模式：candidates TSV（domain / count / ip / country）
+      人类模式：no-op（输出已在 print 中完成）"""
+    if as_json:
+        _sys.stdout = _real_stdout
+        from proxyctl._io import emit_json, envelope
+        emit_json(envelope("audit", data=collector, ok=True))
+        _sys.exit(0)
+    if as_plain:
+        _sys.stdout = _real_stdout
+        from proxyctl._io import emit_tsv
+        emit_tsv(collector.get("candidates", []),
+                 cols=["host", "count", "ip", "country"])
+        _sys.exit(0)
+    return

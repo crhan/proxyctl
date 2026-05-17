@@ -225,10 +225,14 @@ def test_audit_apply_with_days(monkeypatch, patched_env):
     assert args[3] is True
 
 
-def test_audit_invalid_days_falls_back_to_one(monkeypatch, patched_env):
-    _run(monkeypatch, "audit", "not-a-number")
-    days = patched_env["cmd_audit"].call_args[0][0]
-    assert days == 1
+def test_audit_invalid_days_usage_error(monkeypatch, patched_env, capsys):
+    """0.3.0：audit 参数既不是数字也不是 'apply' → USAGE(2)，不再静默 fallback。"""
+    monkeypatch.setattr(sys, "argv", ["proxyctl", "audit", "not-a-number"])
+    with pytest.raises(SystemExit) as ei:
+        cli.main()
+    assert ei.value.code == 2
+    err = capsys.readouterr().err
+    assert "未识别 audit 参数" in err
 
 
 # ────────────────────────────────────────────────────────────────────────────

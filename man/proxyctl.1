@@ -1,9 +1,10 @@
-.TH PROXYCTL 1 "2026-05" "proxyctl 0.2.2" "User Commands"
+.TH PROXYCTL 1 "2026-05" "proxyctl 0.3.0" "User Commands"
 .SH NAME
 proxyctl \- Proxy configuration lifecycle management for macOS / Linux
 .SH SYNOPSIS
 .B proxyctl
-[\fB--json\fR] [\fB--no-color\fR] [\fB--quiet\fR] \fICOMMAND\fR [\fIARGS...\fR]
+[\fB--json\fR | \fB--plain\fR] [\fB--dry-run\fR] [\fB--no-color\fR] [\fB--quiet\fR]
+\fICOMMAND\fR [\fIARGS...\fR]
 .SH DESCRIPTION
 .B proxyctl
 是一套面向 macOS（含 Linux 部分支持）的代理引擎生命周期管理工具，
@@ -11,13 +12,29 @@ proxyctl \- Proxy configuration lifecycle management for macOS / Linux
 .PP
 它不负责安装代理引擎、不改具体规则、不改订阅——这些去 mihomo 自身的配置文件里改。
 .PP
-\fBAI Agent 友好\fR：所有读类命令支持 \fB--json\fR；
+\fBAI Agent 友好（v0.3）\fR：
+envelope schema v2（meta.ts/elapsed_ms/proxyctl_version/request_id）；
+所有写命令支持 \fB--dry-run\fR 输出结构化 plan；
+audit / check 支持 \fB--plain\fR TSV 输出；
 \fBPROXYCTL_AGENT=1\fR 一键开启 JSON + 关色 + 非交互；
-错误信息一律带 \fIhint\fR + \fIdoc\fR；退出码分语义；写操作用文件锁。
+错误信息一律带 \fIhints[]\fR + \fIdoc\fR（指向 explain topic）；
+退出码分语义；写操作 fcntl.flock 互斥锁。
+详细接入协议见 \fBproxyctl agent-guide\fR 与仓库根 \fIAGENTS.md\fR。
 .SH GLOBAL OPTIONS
 .TP
 .BR --json
-所有读类命令输出 envelope JSON（schema v1）。\fBbench --json\fR 是 NDJSON 流式 + 末尾 summary。
+读类命令输出 envelope JSON (schema v2)。\fBbench --json\fR / \fBlog --json\fR
+是 NDJSON 流式（log 含首行 meta header）。与 \fB--plain\fR 互斥。
+.TP
+.BR --plain
+\fBaudit\fR / \fBcheck\fR 输出 TSV（无 ANSI / 无 box / 无 emoji）。与 \fB--json\fR 互斥。
+.TP
+.BR --dry-run
+写命令预演：输出 \fIdata.plan = [PlanStep, ...]\fR（不真正执行）。
+PlanStep 字段：step / action / target / reversible / requires_sudo /
+side_effects / summary。
+适用：mode / engine / fix / audit apply / config set / daemon /
+dns-lock / dns-unlock。
 .TP
 .BR --no-color
 关闭 ANSI 颜色（默认按 isatty / NO_COLOR / TERM=dumb / PROXYCTL_NO_COLOR 自动判断）。
@@ -26,102 +43,136 @@ proxyctl \- Proxy configuration lifecycle management for macOS / Linux
 抑制非必要输出。
 .TP
 .BR --help ", " -h
-显示帮助。子命令也支持：\fBproxyctl <cmd> --help\fR。
+显示帮助。子命令也支持：\fBproxyctl <cmd> --help\fR 或 \fBproxyctl help <cmd>\fR。
 .TP
 .BR --version ", " -v
-显示版本。
+显示版本。\fB--version --json\fR 输出 envelope，含 \fIsupported_features\fR
+能力清单（agent 用以探测）。
+.PP
+所有 flag \fB位置无关\fR——可出现在命令前/后/中。
 .SH COMMANDS
 .SS 自描述（Agent 入口）
 .TP
 .B proxyctl agent-guide
-输出给 LLM 的入门 markdown（能力边界 / 退出码 / JSON envelope / 故障决策树）。
+输出给 LLM 的运行时入门 markdown（能力地图 / 引导路径 / 决策树 / envelope 字段表 / 锁文件位置 / footgun）。
 .TP
 \fBproxyctl explain\fR [\fITOPIC\fR]
-无参输出"想改 X 去哪？"速查表；带 topic 输出卡片。Topic 见下方。
+无参输出"想改 X 去哪？"速查表；带 topic 输出卡片。
+topic：rules, nodes, config, dns, engine, ports, extra-daemons, env,
+corp-dns, plugins, troubleshooting, exit-codes, agent, flags,
+subscription, agent-protocol, locks。
 .TP
-.B proxyctl commands [--json]
-输出所有命令的元数据：side_effects / needs_sudo / interactive / exit_codes / examples。
+.B proxyctl commands [--json] [--schema]
+列出全部命令的元数据：side_effects (list[enum]) / conditional_side_effects /
+supports_dry_run / needs_sudo / interactive / exit_codes / examples。
+\fB--schema\fR 输出该 data 的 JSON Schema (Draft 2020-12)。
 .TP
 \fBproxyctl config\fR \fIpath\fR | \fIget\fR <key> | \fIset\fR <key> <value>
-查询 / 修改 proxyctl 自身配置。支持 dot 路径（\fBcorp_dns.server\fR）。set 是原子写 + .bak 备份 + YAML 校验 + 失败回滚。
+查询 / 修改 proxyctl 自身配置。支持 dot 路径（\fBcorp_dns.server\fR）。
+\fBset\fR 是原子写 + .bak 备份 + YAML 校验 + 失败回滚；支持 \fB--dry-run\fR。
 .TP
 .B proxyctl doctor [--json]
-极简 5 项健康打分：engine_up / port_listen / dns_ok / system_proxy_ok / connectivity_ok。
+极简 5 项健康打分：engine_up / port_listen / dns_ok / system_proxy_ok /
+connectivity_ok。\fB--json\fR 额外含 informational 字段：
+engine / mode / port / config_path / engine_config_path / lock_held / lock_path。
+.TP
+.B proxyctl help [\fICOMMAND\fR]
+顶层帮助 / 单命令完整说明。等价 \fBproxyctl --help\fR / \fBproxyctl <cmd> --help\fR。
 .TP
 \fBproxyctl completion\fR \fIbash\fR | \fIzsh\fR | \fIfish\fR
 生成 shell 补全脚本。
 
-.SS 生命周期
+.SS 生命周期（写：sudo + process + system）
 .TP
 .B proxyctl start / stop / restart / restart-clean
-启停代理引擎（写系统 DNS / 代理 / launchd）。
+启停代理引擎（写系统 DNS / 代理 / launchd）。restart-clean 额外清缓存。
 .TP
-.B proxyctl fix
-修复 DNS / 代理 / 热重载。
-
-.SS 诊断
-.TP
-.B proxyctl status [--json]
-系统状态面板（引擎 / 端口 / TUN / DNS / 系统代理 / 网络环境 / 插件 sections）。
-.TP
-.B proxyctl check [--json]
-4 阶段健康检查（基础状态 / 代理组 / 连通性 / 出口 IP）。
-.TP
-\fBproxyctl trace\fR \fIDOMAIN\fR \fB[--json]\fR
-域名链路诊断（DNS / 规则预测 / 连通性 / 实际连接）。
-.TP
-.B proxyctl audit [DAYS|apply] [--json]
-扫描代理日志找疑似应直连的域名；\fBapply\fR 写入 rules 段。
-.TP
-.B proxyctl bench [GROUPS...] [--json]
-代理组测速；\fB--json\fR 是 NDJSON 流式（每节点一行）+ 末尾 envelope summary。
-
-.SS 配置
-.TP
-.B proxyctl mode [tun|proxy]
-切换流量入站方式（写 mihomo 配置）。
-.TP
-.B proxyctl engine [mihomo|singbox]
-切换后端实现。
-.TP
-.B proxyctl daemon <NAME> [start|stop|restart|status|log]
-管理 extra_daemons（如 claude-proxy）。
-
-.SS DNS / 工具
-.TP
-.B proxyctl dns-lock / dns-unlock
-启动 / 停止 DNS 看门狗。
-.TP
-.B proxyctl env [--unset]
-输出代理环境变量（可 \fBeval $(proxyctl env)\fR）。
-.TP
-.B proxyctl log [--tail N] [--no-follow] [--json]
-查看后端日志。默认 \fBtail -f\fR；\fB--no-follow\fR 立即返回。
-.TP
-.B proxyctl plugins [--json]
-列出已加载插件。
+.B proxyctl fix [--dry-run]
+修复 DNS / 代理 / 热重载（system + cache）。
 .TP
 .B proxyctl recover
-切网后软恢复（清 DNS 缓存 + 重测代理组，不重启进程）。
-.SH EXPLAIN TOPICS
-\fBrules\fR, \fBnodes\fR, \fBconfig\fR, \fBdns\fR, \fBengine\fR, \fBports\fR,
-\fBenv\fR, \fBcorp-dns\fR, \fBextra-daemons\fR, \fBplugins\fR,
-\fBtroubleshooting\fR, \fBexit-codes\fR, \fBagent\fR.
-.SH JSON ENVELOPE (schema v1)
+切网后软恢复：热重载 + 清 fakeip + 重测代理组（不重启进程）。
+
+.SS 模式 / 引擎（写：sudo + config-write）
+.TP
+\fBproxyctl mode\fR [\fItun\fR|\fIproxy\fR] [\fB--dry-run\fR]
+切换 tun / proxy 模式。无参输出当前 mode。
+.TP
+\fBproxyctl engine\fR [\fImihomo\fR|\fIsingbox\fR] [\fB--dry-run\fR]
+切换代理引擎后端。无参输出当前。需 sudo + process restart。
+
+.SS 诊断（只读 / network-io）
+.TP
+.B proxyctl status [--json]
+系统状态面板（引擎 / 端口 / TUN / DNS / 代理 / 网络 / Tailscale）。
+.TP
+.B proxyctl check [--json|--plain]
+4 阶段健康检查：basic / groups / connectivity / outbound-ip。
+\fB--plain\fR 输出 TSV（stage / ok / detail）。
+.TP
+\fBproxyctl trace\fR \fIDOMAIN\fR [\fB--json\fR]
+4 阶段域名链路诊断：DNS 解析 / 规则匹配预测 / 连通性 / 实际连接。
+.TP
+.B proxyctl audit [\fIDAYS\fR | apply [DAYS]] [--json|--plain] [--dry-run]
+扫描日志找疑似应直连域名。\fBapply\fR 写 rules 段（建议先 \fB--dry-run\fR）。
+\fB--plain\fR 输出 candidates TSV（host / count / ip / country）。
+.TP
+.B proxyctl bench [\fIGROUPS...\fR] [--json]
+代理组测速。\fB--json\fR 为 NDJSON 流式（每节点一行）+ 末尾 summary envelope。
+
+.SS Daemon / 看门狗（写：sudo + process）
+.TP
+\fBproxyctl daemon\fR [\fINAME\fR] [\fISUBCMD\fR] [\fB--dry-run\fR]
+管理 \fIconfig.extra_daemons\fR 中声明的辅助 daemon。SUBCMD: start/stop/restart/status/log。
+.TP
+\fBproxyctl claude-proxy\fR [\fISUBCMD\fR]
+\fBproxyctl daemon claude-proxy <subcmd>\fR 的别名。
+.TP
+.B proxyctl dns-lock [--reload] [--dry-run]
+启动 DNS 看门狗 daemon（对抗 DHCP / VPN DNS 覆盖）。
+.TP
+.B proxyctl dns-unlock [--dry-run]
+停止 DNS 看门狗。
+
+.SS 工具
+.TP
+.B proxyctl env [--unset]
+输出 / 清除 HTTP_PROXY / HTTPS_PROXY / NO_PROXY 环境变量（可 \fIeval\fR）。
+.TP
+.B proxyctl log [--tail \fIN\fR] [--no-follow] [--json]
+查看后端日志。默认 \fItail -f\fR；\fB--json\fR 为 NDJSON（首行 meta header + 数据行）。
+.TP
+.B proxyctl plugins [--json]
+显示已加载插件。
+
+.SH JSON ENVELOPE (schema v2)
+读类命令在 \fB--json\fR 模式下输出统一 envelope：
+.PP
 .nf
+.RS 4
 {
-  "schema_version": 1,
-  "cmd": "status",
-  "ok": true,
-  "data": { ... },
-  "error": null,
-  "code": 0,
-  "hint": null,
-  "doc": null
+  "schema_version": 2,
+  "cmd":            "status",
+  "ok":             true,
+  "data":           { ... },
+  "error":          null,
+  "code":           0,
+  "hints":          [],
+  "warnings":       [],
+  "doc":            null,
+  "meta": {
+    "ts":               "2026-05-17T08:00:00Z",
+    "elapsed_ms":       12,
+    "proxyctl_version": "0.3.0",
+    "request_id":       "..."
+  }
 }
+.RE
 .fi
-失败时 \fIok=false / data=null / error/code/hint\fR 填充，envelope 仍写 stdout；
-人类可读错误同步写 stderr。
+.PP
+失败时 \fIok: false\fR / \fIerror\fR / \fIcode\fR / \fIhints\fR 填充；
+envelope 写 stdout，人类可读错误同时写 stderr。
+\fBlog --json\fR 与 \fBbench --json\fR 是 NDJSON 流式。
 .SH EXIT CODES
 .TP
 .B 0
@@ -131,85 +182,88 @@ proxyctl \- Proxy configuration lifecycle management for macOS / Linux
 通用失败（旧路径兼容）
 .TP
 .B 2
-用法错（未识别命令 / 参数错）
+USAGE — 未识别命令 / 参数错；常伴有 did-you-mean
 .TP
 .B 3
-未找到资源（如 daemon 未声明）
+NOT_FOUND — 资源不存在（daemon 未声明 / 配置文件缺失等）
 .TP
 .B 4
-权限不足（sudo / 写文件失败）
+PERMISSION — sudo / 写文件失败
 .TP
 .B 5
-引擎未运行
+ENGINE_DOWN — 引擎未运行
 .TP
 .B 6
-配置文件语法 / 字段错
+CONFIG_ERR — 配置文件语法 / 字段错
 .TP
 .B 7
-上游 API / 网络错
+NETWORK_ERR — 上游 API / 网络错
 .TP
 .B 8
-并发锁未拿到（另一个 proxyctl 写操作正在跑）
+LOCKED — 并发锁未拿到（hints 含锁文件路径）
 .TP
-.B 130
-SIGINT（Ctrl-C）
+.B 9
+TIMEOUT — 命令超时
+.TP
+.B 10
+DEPENDENCY_MISSING — 依赖二进制 / 脚本缺失
 .SH ENVIRONMENT
 .TP
-.B PROXYCTL_AGENT=1
-一键 Agent 模式：等价 \fB--json\fR + \fB--no-color\fR + 非交互。
+.B PROXYCTL_AGENT
+设为 \fI1\fR / \fItrue\fR / \fIyes\fR 等价 \fB--json\fR + \fB--no-color\fR + 非交互承诺。
 .TP
-.B PROXYCTL_NO_COLOR=1
-关闭 ANSI 颜色（同 \fB--no-color\fR）。
+.B PROXYCTL_NO_COLOR
+等价 \fB--no-color\fR。
+.TP
+.B PROXYCTL_DEBUG
+打印插件加载 / hook 调用日志到 stderr。
 .TP
 .B NO_COLOR
-关闭 ANSI 颜色（https://no-color.org/）。
-.TP
-.B TERM=dumb
-关闭 ANSI 颜色。
+遵循 https://no-color.org/。
 .SH FILES
 .TP
 .I ~/.config/proxyctl/config.yaml
-proxyctl 自身配置（backend / api_secret / proxy_port / corp_dns / extra_daemons / no_proxy_extra / plugins_disabled）。
+proxyctl 自身配置（API token / 端口 / 企业 DNS / extra_daemons / no_proxy_extra / plugins_disabled）。
 .TP
 .I ~/.config/mihomo/config.yaml
-mihomo 配置（rules / proxies / proxy-groups / proxy-providers / dns）。
+mihomo 引擎配置（rules / proxies / proxy-providers / dns / tun）。
 .TP
-.I ~/.config/sing-box/config.json
-sing-box 配置。
+.I ~/.config/proxyctl/.lock.{system,config,daemon}
+写操作 fcntl.flock 锁文件。LOCKED(8) 错误时 hints 会列出具体路径。
 .TP
 .I ~/.config/proxyctl/plugins/*.py
 用户插件目录。
-.TP
-.I ~/.config/proxyctl/.lock.*
-写操作并发文件锁（fcntl.flock）。
 .SH EXAMPLES
 .PP
-Agent 接入：
-.PP
+快速接入（agent）：
 .RS 4
 .nf
-PROXYCTL_AGENT=1 proxyctl doctor      # JSON 健康分
-proxyctl explain rules                # 想改规则去哪？
-proxyctl commands --json | jq .data.commands[].name
-proxyctl status --json | jq .data.engine.daemon_up
-proxyctl bench --json proxy | jq -c 'select(.node)'
+proxyctl agent-guide
+proxyctl --version --json | jq .data.supported_features
+proxyctl commands --json | jq '.data.commands[] | select(.side_effects == [])'
+proxyctl doctor --json
 .fi
 .RE
 .PP
-人类常用：
-.PP
+安全地试一个写命令：
 .RS 4
 .nf
-proxyctl status
-proxyctl check
-proxyctl trace github.com
-proxyctl fix
-proxyctl audit apply 7
+proxyctl mode tun --dry-run --json | jq .data.plan
+.fi
+.RE
+.PP
+故障排查决策树：
+.RS 4
+.nf
+proxyctl doctor --json   # 1. 看 score 与各项布尔
+proxyctl trace github.com --json
+proxyctl fix             # 自动修 DNS / 代理
 .fi
 .RE
 .SH SEE ALSO
-\fBmihomo\fR(1), \fBsing-box\fR(1), \fBlaunchctl\fR(1).
+\fBmihomo\fR(1), \fBsing-box\fR(1).
 .PP
-项目主页: \fIhttps://github.com/crhan/proxyctl\fR
-.SH AUTHORS
-crhan <crhan123@gmail.com>
+项目地址 https://github.com/crhan/proxyctl
+.PP
+仓库视角的开发约定：AGENTS.md。
+迁移指南（0.2.x → 0.3.0）：MIGRATION-0.3.md。

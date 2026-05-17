@@ -175,8 +175,8 @@ def test_cmd_commands_json_valid(backend, config, capsys):
     explain.set_global_flags({"json": True})
     explain.cmd_commands([], backend, config)
     obj = json.loads(capsys.readouterr().out)
-    assert obj["schema_version"] == 1
-    assert obj["data"]["schema_version"] == 1
+    assert obj["schema_version"] == 2
+    assert obj["data"]["schema_version"] == 2
     assert len(obj["data"]["commands"]) >= 20
 
 

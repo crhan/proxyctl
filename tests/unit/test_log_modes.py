@@ -35,16 +35,23 @@ def test_read_log_lines_missing_returns_empty():
     assert cli._read_log_lines("/no/such/file", 10) == []
 
 
-# ── cmd_log：--tail --json ────────────────────────────────────────────────
-def test_cmd_log_tail_json_yields_json_lines(tmp_path, capsys):
+# ── cmd_log：--tail --json (NDJSON v2: 首行 meta header + N 数据行) ──────
+def test_cmd_log_tail_json_yields_ndjson_with_header(tmp_path, capsys):
     p = tmp_path / "x.log"
     p.write_text("line1\nline2\nline3\n")
     cli.GLOBAL_FLAGS.update({"json": True})
     cli.cmd_log(_FakeBackend(str(p)), ["--tail", "2"])
     out = capsys.readouterr().out.splitlines()
-    assert len(out) == 2
-    assert json.loads(out[0])["line"] == "line2"
-    assert json.loads(out[-1])["line"] == "line3"
+    # 0.3.0：首行是 meta header；后续每行一个事件
+    assert len(out) == 3
+    header = json.loads(out[0])
+    assert header["schema_version"] == _io.SCHEMA_VERSION
+    assert header["cmd"] == "log"
+    assert header["stream"] == "log"
+    assert header["path"] == str(p)
+    # 数据行
+    assert json.loads(out[1])["line"] == "line2"
+    assert json.loads(out[2])["line"] == "line3"
 
 
 # ── 文件不存在 → NOT_FOUND ───────────────────────────────────────────────

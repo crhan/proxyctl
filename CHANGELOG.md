@@ -5,6 +5,97 @@
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-17
+
+> Agent-friendliness + clig.dev 全面合规。这是一个有意 breaking 的版本——
+> 完整迁移见 [MIGRATION-0.3.md](MIGRATION-0.3.md)，agent 协议见 AGENTS.md
+> 与 `proxyctl agent-guide`。
+
+### Breaking
+- **JSON envelope schema_version：1 → 2**。新结构：
+  - 移除字段 `hint: string|null`，引入 `hints: string[]`（可多条）。
+  - 引入 `warnings: string[]`（非致命警告，与 hints 区分）。
+  - 引入 `meta` 对象：`ts` / `elapsed_ms` / `proxyctl_version` / `request_id`。
+  - **无兼容窗口**：消费者必须一次性升级到 v2。
+- **`commands --json` 中 `side_effects` 由 string 改为 enum list**：
+  `["process", "system", "config-write", "cache", "network-io"]`。
+  条件性副作用拆到新字段 `conditional_side_effects: { trigger: list[enum] }`。
+- **`audit <not-a-number>` 不再静默 fallback 到 1**，改为 USAGE(2) + did-you-mean。
+- **explain topic 的 `next` 字段重命名为 `next_commands`**（schema 字段名稳定）。
+- **无参 `proxyctl`（JSON / PROXYCTL_AGENT 模式）输出 discovery envelope**，
+  不再吐完整 status 内容。人类模式不变（stderr banner + stdout status）。
+
+### Agent-facing — 新能力
+- **`proxyctl --version --json`** — 输出 envelope，含 `supported_features`
+  能力探测表（envelope_v2 / dry_run / plain / commands_schema / ... 等 18 项）。
+- **`--dry-run`**（全局 flag）— 适用 7 个写命令（mode / engine / fix /
+  audit apply / config set / daemon / dns-lock / dns-unlock），输出
+  `data.plan = [PlanStep, ...]`。PlanStep 字段：
+  `step / action / target / reversible / requires_sudo / side_effects / summary`。
+- **`--plain`**（全局 flag）— `audit` / `check` 命令输出 TSV
+  （无 ANSI / 无 box / 无 emoji）。与 `--json` 互斥。
+- **`proxyctl commands --schema`** — 输出 `commands --json` 的 JSON Schema
+  (Draft 2020-12)，agent 可用以 validate 解析的结构。
+- **`proxyctl help <command>`** — 顶层 `help` 子命令支持 `help <cmd>`
+  等价 `<cmd> --help`，统一从 COMMANDS_META 派生。
+- **`log --json` NDJSON 规范化** — 首行 meta header
+  `{schema_version, cmd, stream, path}`，后续每行事件 `{source, line}`。
+- **`doctor --json` 扩展 informational 字段** — 新增
+  `engine / mode / port / config_path / engine_config_path /
+   lock_held / lock_path`（不计分，但 agent 一次调用就拿到上下文）。
+- **新 explain topics**：`subscription`（订阅边界）、`agent-protocol`
+  （envelope/退出码/决策树 cheat sheet）、`locks`（锁文件位置 + 手动释放）、
+  `flags`（全局 flag 速查）。
+- **LOCKED(8) 错误透出锁路径** — `hints` 列出具体锁文件、`lsof` 排查命令、
+  手动 `rm` 步骤；`doc: locks` 指向新 explain topic。
+- **子选项级 did-you-mean** — `mode tunn` / `engine mihomoo` /
+  `daemon name stat` / `completion zsh-foo` 失败时给最接近的有效值建议。
+
+### Added — 新退出码
+- `9  TIMEOUT` — 命令超时（bench / curl 等长跑路径）。
+- `10 DEPENDENCY_MISSING` — 依赖二进制 / 脚本缺失（mihomo / dns-watchdog 等）。
+
+### Added — 仓库元数据
+- **`AGENTS.md`**（仓库根，~150 行）— 仓库视角的 agent 协作约定：
+  5 秒决策树、目录布局、build/test、写代码约定、commit/PR 风格。
+- **`LLMS.md`**（仓库根）— 4 行 stub 指向 AGENTS.md 与 `proxyctl agent-guide`。
+- **`MIGRATION-0.3.md`**（仓库根）— 0.2.x → 0.3.0 破坏点清单与迁移建议。
+
+### Changed
+- **顶层 `proxyctl --help` 完全元数据驱动** — 从 COMMANDS_META 派生命令分组与
+  badges；删除硬编码 box-drawing；新增"AGENT 接入"区块、全局 flag 段、
+  环境变量段。`proxyctl --help` ≡ `proxyctl help`。
+- **`proxyctl agent-guide` 重写** — 新增 4 段：Agent 第一次接入引导路径
+  (6 步)、读/写/系统三分类表、envelope 字段含义表、锁文件位置 + 手动释放；
+  重写 footgun（LOCKED / 订阅 / 多实例）。
+- **统一错误退出走 `_io.fail()`** — cli/check/audit/trace/explain 中
+  ~25 处 `sys.exit(1/2)` 收口到 `_io.fail(..., hint=, doc=, code=)`，
+  保证所有失败路径都带 hint + doc + 分语义退出码。
+  新增 `test_no_bare_sys_exit.py` 防退化（阈值 ≤ 13）。
+- **`_exec_with_lock` 抛 `LockedError(path)`** 替代 BlockingIOError，
+  错误消息含具体锁路径与 `lsof` / `rm` 步骤。
+- **全 flag 位置无关** — `--json` / `--plain` / `--dry-run` / `--no-color` /
+  `--quiet` 在任意位置都被识别；`cmd_log` 用新工具
+  `_io.extract_flags(args, known)` 重构子命令 flag 解析。
+
+### Added — 测试
+- `test_no_bare_sys_exit.py` — sys.exit 数量阈值检查（≤ 13）。
+- `test_help_output.py` — `help`/`--help`/`help <cmd>`/`<cmd> --help` 等价性。
+- `test_version_json.py` — `--version --json` envelope + supported_features 验证。
+- `test_side_effects_enum.py` — side_effects 枚举值集合 + 关键命令断言。
+- `test_dry_run.py` — 8 个写命令 dry-run + mock subprocess 防泄漏。
+- `test_plain_output.py` — emit_tsv / --plain 互斥 / topic 注册。
+- `test_flag_position_invariance.py` — `cmd --flag` ≡ `--flag cmd` ≡ `cmd --json --flag`。
+- `test_doctor_extended.py` — doctor 0.3.0 informational 字段验证。
+- `test_commands_schema.py` — `commands --schema` JSON Schema 自洽 + 用以验
+  `commands --json` 结构；新 topics 注册。
+- 总测试数 360 → 426。
+
+### Removed
+- 旧 envelope schema v1 完全替换（无双写兼容）。
+- `commands --json` 中 `side_effects: string` 形态。
+- `--help` 中硬编码 box-drawing 文本（60 行 → 元数据驱动）。
+
 ## [0.2.2] — 2026-05-17
 
 ### Added

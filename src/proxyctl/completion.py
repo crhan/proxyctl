@@ -204,8 +204,13 @@ def cmd_completion(args: list) -> None:
 
     shell = args[0]
     if shell not in SHELLS:
+        import difflib
+        suggest = difflib.get_close_matches(shell, list(SHELLS), n=1, cutoff=0.4)
+        hints = [f"支持: {', '.join(SHELLS)}"]
+        if suggest:
+            hints.insert(0, f"是否想要：{suggest[0]}？")
         _io.fail(f"未知 shell：{shell}",
-                 hint=f"支持: {', '.join(SHELLS)}",
+                 hints=hints, doc="agent",
                  code=_io.USAGE, cmd="completion",
                  as_json=as_json)
         return

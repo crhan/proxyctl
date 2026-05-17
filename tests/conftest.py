@@ -32,6 +32,57 @@ def _isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
+@pytest.fixture(autouse=True)
+def _reset_proxyctl_globals():
+    """每个测试前后重置 proxyctl 的进程级全局态。
+
+    包括：
+      - _io 的 _JSON_MODE / _T0_NS / _REQUEST_ID
+      - explain 的 _GLOBAL_FLAGS（被 cli.main → set_global_flags 共享）
+      - cli.GLOBAL_FLAGS 本身
+    这些状态在跨测试泄漏时会导致诡异 fail（例如 completion 突然吐 JSON envelope）。
+    """
+    # 测试前：reset 一次（避免上一个测试遗留）
+    try:
+        from proxyctl import _io as _pc_io
+        _pc_io._JSON_MODE = False  # type: ignore[attr-defined]
+        _pc_io._T0_NS = None       # type: ignore[attr-defined]
+        _pc_io._REQUEST_ID = None  # type: ignore[attr-defined]
+        _pc_io._FORCE_NO_COLOR = False  # type: ignore[attr-defined]
+    except ImportError:
+        pass
+    try:
+        from proxyctl import explain as _pc_explain
+        _pc_explain.set_global_flags(
+            {"json": False, "no_color": False, "quiet": False,
+             "dry_run": False, "plain": False})
+    except ImportError:
+        pass
+    try:
+        from proxyctl import cli as _pc_cli
+        _pc_cli.GLOBAL_FLAGS.update(
+            {"json": False, "no_color": False, "quiet": False,
+             "dry_run": False, "plain": False})
+    except ImportError:
+        pass
+    yield
+    # 测试后再 reset 一次（保险）
+    try:
+        from proxyctl import _io as _pc_io
+        _pc_io._JSON_MODE = False  # type: ignore[attr-defined]
+        _pc_io._T0_NS = None       # type: ignore[attr-defined]
+        _pc_io._REQUEST_ID = None  # type: ignore[attr-defined]
+    except ImportError:
+        pass
+    try:
+        from proxyctl import explain as _pc_explain
+        _pc_explain.set_global_flags(
+            {"json": False, "no_color": False, "quiet": False,
+             "dry_run": False, "plain": False})
+    except ImportError:
+        pass
+
+
 @pytest.fixture
 def fake_subprocess(monkeypatch: pytest.MonkeyPatch):
     """提供可编程的 subprocess.run mock。

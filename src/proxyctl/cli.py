@@ -299,8 +299,9 @@ def service_start(backend: Backend, config: dict) -> subprocess.CompletedProcess
             src = os.path.join(DEFAULT_CONFIG_DIR, "launchdaemons",
                                os.path.basename(backend.plist))
             if not os.path.isfile(src):
-                print(f"{RED}✗{NC} plist 源文件不存在：{src}")
-                sys.exit(1)
+                _io.fail(f"plist 源文件不存在：{src}",
+                         hint="重新跑 install.sh 或检查 launchdaemons/ 目录",
+                         doc="engine", code=_io.NOT_FOUND, cmd="start")
             run(["cp", src, backend.plist], sudo=True)
         return run(["launchctl", "bootstrap", "system", backend.plist],
                    sudo=True, capture=True)
@@ -558,9 +559,10 @@ def _apply_route_hooks(registry, ctx: dict, action: str) -> None:
 def cmd_start(backend: Backend, config: dict, registry=None):
     r = service_start(backend, config)
     if r.returncode != 0:
-        print(f"{RED}✗{NC} {backend.name} 启动失败")
-        print(r.stderr if r.stderr else "")
-        sys.exit(1)
+        _io.fail(f"{backend.name} 启动失败",
+                 hints=[r.stderr.strip()] if r.stderr else None,
+                 doc="troubleshooting",
+                 code=_io.ENGINE_DOWN, cmd="start")
 
     print(f"{backend.name} started")
     _wait_ready(backend)
@@ -723,9 +725,9 @@ def cmd_recover(backend: Backend, config: dict):
     api_secret = config.get("api_secret", "")
 
     if backend.name != "mihomo":
-        print(f"{YELLOW}recover 目前只支持 mihomo 后端；当前后端 {backend.name}{NC}")
-        print(f"请使用 {BOLD}proxyctl restart{NC}")
-        sys.exit(1)
+        _io.fail(f"recover 目前只支持 mihomo 后端；当前后端 {backend.name}",
+                 hint="proxyctl restart",
+                 doc="engine", code=_io.USAGE, cmd="recover")
 
     if not launchctl_running(backend.label):
         _io.fail(f"{backend.name} 未运行",
@@ -750,8 +752,10 @@ def cmd_recover(backend: Backend, config: dict):
     if r.stdout.strip() in ("200", "204"):
         print(f"  {GREEN}✓{NC} 配置已重载 (HTTP {r.stdout.strip()})")
     else:
-        print(f"  {RED}✗{NC} 重载失败 (HTTP {r.stdout.strip() or 'n/a'})，回退到 proxyctl restart")
-        sys.exit(2)
+        _io.fail(
+            f"重载失败 (HTTP {r.stdout.strip() or 'n/a'})",
+            hint="proxyctl restart",
+            doc="troubleshooting", code=_io.NETWORK_ERR, cmd="recover")
 
     # 步骤 2: flush fakeip cache
     print(f"{BOLD}[2/3]{NC} 清空 fakeip 缓存")
@@ -771,8 +775,10 @@ def cmd_recover(backend: Backend, config: dict):
     try:
         proxies = json.loads(r.stdout).get("proxies", {})
     except Exception:
-        print(f"  {YELLOW}—{NC} 无法拉取 proxies 列表")
-        sys.exit(2)
+        _io.fail("无法拉取 proxies 列表",
+                 hint="proxyctl status / proxyctl log --tail 50",
+                 doc="troubleshooting",
+                 code=_io.NETWORK_ERR, cmd="recover")
 
     import urllib.parse
     TEST_URL = "https://www.gstatic.com/generate_204"
@@ -838,10 +844,15 @@ def cmd_mode(backend: Backend, target: str):
         return
 
     if target not in ("tun", "proxy"):
-        print("用法：proxyctl mode [tun|proxy]")
-        print("  tun   — 全局接管 (auto_route + fakeip)")
-        print("  proxy — 仅代理端口 (7890 + real DNS)")
-        sys.exit(1)
+        import difflib
+        suggest = difflib.get_close_matches(target, ["tun", "proxy"], n=1, cutoff=0.4)
+        hints = ["proxyctl mode tun     — 全局接管 (auto_route + fakeip)",
+                 "proxyctl mode proxy   — 仅代理端口 + real DNS"]
+        if suggest:
+            hints.insert(0, f"是否想要：{suggest[0]}？")
+        _io.fail(f"未识别 mode 目标：{target}",
+                 hints=hints, doc="engine",
+                 code=_io.USAGE, cmd="mode")
 
     if backend.name == "mihomo":
         _mode_mihomo(backend.config_file, target)
@@ -978,14 +989,21 @@ def cmd_engine(backend: Backend, target: str, config: dict):
         return
 
     if target not in ("singbox", "mihomo"):
-        print("用法: proxyctl engine [singbox|mihomo]")
-        sys.exit(1)
+        import difflib
+        suggest = difflib.get_close_matches(target, ["singbox", "mihomo"],
+                                            n=1, cutoff=0.4)
+        hints = ["proxyctl engine singbox | proxyctl engine mihomo"]
+        if suggest:
+            hints.insert(0, f"是否想要：{suggest[0]}？")
+        _io.fail(f"未识别 engine 目标：{target}",
+                 hints=hints, doc="engine",
+                 code=_io.USAGE, cmd="engine")
     if target == backend.name:
         print(f"已经是 {target}，无需切换")
         return
     if not IS_MACOS:
-        print(f"{YELLOW}engine 切换暂仅支持 macOS launchd{NC}")
-        sys.exit(1)
+        _io.fail("engine 切换暂仅支持 macOS launchd",
+                 doc="engine", code=_io.USAGE, cmd="engine")
 
     new_backend_cfg = dict(config)
     new_backend_cfg["backend"] = target
@@ -995,11 +1013,13 @@ def cmd_engine(backend: Backend, target: str, config: dict):
                               os.path.basename(new_backend.plist))
     # 预检
     if not os.path.isfile(plist_src):
-        print(f"{RED}✗{NC} plist 源文件不存在: {plist_src}")
-        sys.exit(1)
+        _io.fail(f"plist 源文件不存在: {plist_src}",
+                 hint="重新跑 install.sh 或检查 launchdaemons/ 目录",
+                 doc="engine", code=_io.NOT_FOUND, cmd="engine")
     if not os.path.isfile(new_backend.config_file):
-        print(f"{RED}✗{NC} 配置文件不存在: {new_backend.config_file}")
-        sys.exit(1)
+        _io.fail(f"配置文件不存在: {new_backend.config_file}",
+                 hint="proxyctl explain config",
+                 doc="config", code=_io.NOT_FOUND, cmd="engine")
 
     print(f"停止 {backend.name} ...")
     dns_lock_stop(config)
@@ -1010,8 +1030,9 @@ def cmd_engine(backend: Backend, target: str, config: dict):
 
     r = run(["/bin/cp", plist_src, new_backend.plist], sudo=True, capture=True)
     if r.returncode != 0:
-        print(f"{RED}✗{NC} 部署 plist 失败")
-        sys.exit(1)
+        _io.fail("部署 plist 失败",
+                 hints=[r.stderr.strip()] if r.stderr else None,
+                 doc="engine", code=_io.PERMISSION, cmd="engine")
 
     # 持久化引擎选择
     os.makedirs(DEFAULT_CONFIG_DIR, exist_ok=True)
@@ -1022,8 +1043,10 @@ def cmd_engine(backend: Backend, target: str, config: dict):
     r = run(["launchctl", "bootstrap", "system", new_backend.plist],
             sudo=True, capture=True)
     if r.returncode != 0:
-        print(f"{RED}✗{NC} 启动失败")
-        sys.exit(1)
+        _io.fail("启动失败",
+                 hints=[r.stderr.strip()] if r.stderr else None,
+                 doc="troubleshooting",
+                 code=_io.ENGINE_DOWN, cmd="engine")
 
     _wait_ready(new_backend)
     dns_activate(config)
@@ -1080,27 +1103,42 @@ def cmd_daemon(name: str, subcmd: str, config: dict):
     log_path  = os.path.expanduser(d_cfg.get("log_path", ""))
     port      = d_cfg.get("port")
     if not label:
-        print(f"{RED}✗{NC} daemon {name} 缺少 label 字段")
-        sys.exit(1)
+        _io.fail(f"daemon {name} 缺少 label 字段",
+                 hint="检查 config.yaml 的 extra_daemons[<name>].label",
+                 doc="extra-daemons", code=_io.CONFIG_ERR, cmd="daemon")
 
     full_label = f"system/{label}"
     plist_dst = f"/Library/LaunchDaemons/{label}.plist"
 
     subcmd = subcmd or "status"
+    valid_subcmds = ("start", "stop", "restart", "log", "status")
+    if subcmd not in valid_subcmds:
+        import difflib
+        suggest = difflib.get_close_matches(subcmd, valid_subcmds, n=1, cutoff=0.4)
+        hints = [f"子命令: {', '.join(valid_subcmds)}"]
+        if suggest:
+            hints.insert(0, f"是否想要：{suggest[0]}？")
+        _io.fail(f"未识别 daemon 子命令：{subcmd}",
+                 hints=hints, doc="extra-daemons",
+                 code=_io.USAGE, cmd="daemon")
     if subcmd == "start":
         if launchctl_running(full_label, sudo=True):
             print(f"{name} 已在运行")
             return
         if not os.path.isfile(plist_dst):
             if not os.path.isfile(plist_src):
-                print(f"{RED}✗{NC} plist 源文件不存在: {plist_src}")
-                sys.exit(1)
+                _io.fail(f"plist 源文件不存在: {plist_src}",
+                         hint="检查 extra_daemons.plist_src 配置",
+                         doc="extra-daemons",
+                         code=_io.NOT_FOUND, cmd="daemon")
             run(["/bin/cp", plist_src, plist_dst], sudo=True)
         r = run(["launchctl", "bootstrap", "system", plist_dst],
                 sudo=True, capture=True)
         if r.returncode != 0:
-            print(f"{RED}✗{NC} {name} 启动失败")
-            sys.exit(1)
+            _io.fail(f"{name} 启动失败",
+                     hints=[r.stderr.strip()] if r.stderr else None,
+                     doc="extra-daemons",
+                     code=_io.PERMISSION, cmd="daemon")
         if port:
             wait_port(int(port), timeout=10)
             print(f"{GREEN}✓{NC} {name} started (127.0.0.1:{port})")
@@ -1120,8 +1158,10 @@ def cmd_daemon(name: str, subcmd: str, config: dict):
 
     elif subcmd == "log":
         if not log_path:
-            print(f"{RED}✗{NC} daemon {name} 未声明 log_path")
-            sys.exit(1)
+            _io.fail(f"daemon {name} 未声明 log_path",
+                     hint="在 config.yaml 的 extra_daemons[<name>] 加 log_path 字段",
+                     doc="extra-daemons",
+                     code=_io.CONFIG_ERR, cmd="daemon")
         os.execvp("tail", ["tail", "-f", log_path])
 
     else:  # status
@@ -1154,9 +1194,9 @@ def cmd_dns_lock(config: dict, backend: Backend, *, reload: bool = False):
         return
 
     if not os.access(dns_watchdog, os.X_OK):
-        print(f"错误：看门狗脚本不可执行 {dns_watchdog}")
-        print(f"  请先把 scripts/dns-watchdog 安装到该位置（或重新跑 install.sh）")
-        sys.exit(1)
+        _io.fail(f"看门狗脚本不可执行 {dns_watchdog}",
+                 hint="把 scripts/dns-watchdog 安装到该位置（或重新跑 install.sh）",
+                 doc="dns", code=_io.DEPENDENCY_MISSING, cmd="dns-lock")
 
     # reload 时先 bootout
     if already_registered:
@@ -1168,14 +1208,16 @@ def cmd_dns_lock(config: dict, backend: Backend, *, reload: bool = False):
     # 通过 sudo tee 写入（sudoers 允许 /usr/bin/tee <target.plist>）
     r = run(["tee", dns_lock_plist], sudo=True, stdin_text=rendered, capture=True)
     if r.returncode != 0:
-        print(f"{RED}✗{NC} 写入 plist 失败: {r.stderr or '权限不足，请检查 sudoers'}")
-        sys.exit(1)
+        _io.fail(
+            f"写入 plist 失败: {r.stderr or '权限不足，请检查 sudoers'}",
+            hint="确认 sudoers 允许 /usr/bin/tee 写 LaunchDaemons",
+            doc="dns", code=_io.PERMISSION, cmd="dns-lock")
 
     r2 = run(["launchctl", "bootstrap", "system", dns_lock_plist],
              sudo=True, capture=True)
     if r2.returncode != 0:
-        print(f"{RED}✗{NC} bootstrap 失败: {r2.stderr}")
-        sys.exit(1)
+        _io.fail(f"bootstrap 失败: {r2.stderr}",
+                 doc="dns", code=_io.PERMISSION, cmd="dns-lock")
 
     print(f"{GREEN}dns-lock daemon 已安装并启动{NC}")
     print(f"label: {dns_lock_label}")
@@ -1256,35 +1298,44 @@ def cmd_log(backend: "Backend", args: list) -> None:
                  as_json=GLOBAL_FLAGS.get("json", False))
         return
 
-    tail_n: int | None = None
+    # 用 _io.extract_flags 让 flag 位置无关（无论 --tail / --no-follow 出现在哪都识别）
+    _positional, flags = _io.extract_flags(
+        args, known={"--tail": "value", "--no-follow": "bool"})
     follow = True
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a == "--no-follow":
-            follow = False
-        elif a == "--tail":
-            if i + 1 >= len(args):
-                _io.fail("--tail 需要一个数字参数", code=_io.USAGE, cmd="log",
-                         as_json=GLOBAL_FLAGS.get("json", False))
-            try:
-                tail_n = int(args[i + 1])
-            except ValueError:
-                _io.fail(f"--tail 参数不是数字：{args[i + 1]}",
-                         code=_io.USAGE, cmd="log",
-                         as_json=GLOBAL_FLAGS.get("json", False))
-            i += 1
-            follow = False
-        i += 1
+    tail_n: int | None = None
+    if flags.get("no_follow"):
+        follow = False
+    if "tail" in flags:
+        tval = flags["tail"]
+        if tval is None:
+            _io.fail("--tail 需要一个数字参数",
+                     code=_io.USAGE, cmd="log",
+                     as_json=GLOBAL_FLAGS.get("json", False))
+        try:
+            tail_n = int(tval)
+        except ValueError:
+            _io.fail(f"--tail 参数不是数字：{tval}",
+                     code=_io.USAGE, cmd="log",
+                     as_json=GLOBAL_FLAGS.get("json", False))
+        follow = False
 
     as_json = GLOBAL_FLAGS.get("json", False)
 
     if as_json:
-        # JSON Lines：每行一个对象（非 envelope，便于流式消费）
+        # NDJSON v2 规范化（W19）：
+        #   首行：meta header { schema_version, cmd, stream, path }
+        #   每后续行：一条事件 { source, line }（line 已 strip 换行）
+        print(json.dumps({
+            "schema_version": _io.SCHEMA_VERSION,
+            "cmd": "log",
+            "stream": "log",
+            "path": log_file,
+        }, ensure_ascii=False))
         lines = _read_log_lines(log_file, tail_n)
         for line in lines:
-            print(json.dumps({"file": log_file, "line": line.rstrip()},
-                             ensure_ascii=False))
+            print(json.dumps(
+                {"source": log_file, "line": line.rstrip()},
+                ensure_ascii=False))
         return
 
     if follow:
@@ -1310,83 +1361,210 @@ def _read_log_lines(path: str, tail_n: int | None) -> list:
 
 # ── 帮助 ──────────────────────────────────────────────────────────────────────
 
-VERSION = "0.2.2"
+VERSION = "0.3.0"
 
-def cmd_help(verbose: bool = False):
-    """打印帮助信息
 
-    Args:
-        verbose: 是否显示详细帮助（包含所有命令的详细说明）
+# Help 输出按 group 分块的顺序（避免依赖 dict 插入顺序变化）
+_HELP_GROUP_ORDER = ["lifecycle", "diagnostic", "config", "maintenance",
+                     "daemon", "tool", "agent"]
+
+
+def _side_effects_badge(se) -> str:
+    """把 COMMANDS_META 的 side_effects 字段渲染为 badge 文本。
+
+    兼容 str（v0.2 旧值）与 list[str]（v0.3 枚举形态）。
     """
+    if not se or se == "none":
+        return ""
+    if isinstance(se, list):
+        return "+".join(se) if se else ""
+    return str(se)
+
+
+def cmd_help():
+    """proxyctl --help / help：元数据驱动的顶层帮助。
+
+    输出区块（按 clig.dev / Agent 友好原则）：
+      1. version + tagline
+      2. AGENT 接入小 box（4 条入口）
+      3. 用法行
+      4. 按 group 分组的命令清单（从 COMMANDS_META 派生）
+      5. 全局 flag
+      6. 环境变量
+      7. 配置文件 / 仓库地址 / 单命令说明
+    """
+    from proxyctl.explain import COMMANDS_META
+
     print(f"proxyctl v{VERSION}")
     print("Proxy configuration lifecycle management\n")
-    print(f"{CYAN}AI Agent?{NC} → proxyctl agent-guide   "
-          f"({DIM}快速入门：能力边界 / 退出码 / JSON / 故障决策树{NC})")
-    print(f"{CYAN}想改 ... 去哪？{NC} → proxyctl explain   "
-          f"({DIM}规则 / 节点 / 配置 / DNS / 端口{NC})\n")
-    print("用法：proxyctl <command> [options]\n")
 
-    print("┌─ 基础操作 ─────────────────────────────────────────────────────┐")
-    print("│  start              启动后端 (Mihomo/Sing-box)                 │")
-    print("│  stop               停止后端                                   │")
-    print("│  restart            重启后端                                   │")
-    print("│  restart-clean      重启并清除缓存                             │")
-    print("│  status             系统状态面板                               │")
-    print("│  log                查看后端日志 (tail -f)                     │")
-    print("│  fix                修复 DNS/代理/刷新缓存                     │")
-    print("│  recover            切网后软恢复（清 DNS 缓存 + 重测代理组）     │")
-    print("└────────────────────────────────────────────────────────────────┘")
+    # AGENT 接入小 box（醒目，agent 第一眼能看到）
+    print(f"{BOLD}AGENT 接入{NC}")
+    print(f"  {CYAN}proxyctl agent-guide{NC}          "
+          f"{DIM}Agent 入门 markdown（喂给 LLM）{NC}")
+    print(f"  {CYAN}proxyctl commands --json{NC}      "
+          f"{DIM}全部命令元数据（机读）{NC}")
+    print(f"  {CYAN}proxyctl explain{NC}              "
+          f"{DIM}我要改 X 去哪？速查表{NC}")
+    print(f"  {CYAN}PROXYCTL_AGENT=1 proxyctl ...{NC}  "
+          f"{DIM}一键 JSON + 关色 + 非交互{NC}")
+    print()
 
-    print("\n┌─ 诊断工具 ─────────────────────────────────────────────────────┐")
-    print("│  check              全面健康检查 (4 阶段)                        │")
-    print("│  bench [groups...]  代理组测速（默认测全部组）                  │")
-    print("│  trace <domain>     域名链路诊断                               │")
-    print("│  audit [days]       扫描日志，找疑似应直连的域名               │")
-    print("└────────────────────────────────────────────────────────────────┘")
+    print(f"{BOLD}用法{NC}  proxyctl <command> [args] "
+          f"[--json|--plain] [--dry-run] [--no-color] [--quiet]")
+    print()
 
-    print("\n┌─ 配置管理 ─────────────────────────────────────────────────────┐")
-    print("│  engine [singbox|mihomo]  切换代理引擎                          │")
-    print("│  mode [tun|proxy]         切换运行模式                          │")
-    print("│  dns-lock                 启动 DNS 看门狗 daemon                │")
-    print("│  dns-unlock               停止 DNS 看门狗                       │")
-    print("│  daemon [name] [subcmd]   管理 extra_daemons (claude-proxy 等)  │")
-    print("│  env                      输出代理环境变量                      │")
-    print("│  env --unset              清除代理环境变量                      │")
-    print("│  plugins                  显示已加载插件                        │")
-    print("└────────────────────────────────────────────────────────────────┘")
+    # 按 group 元数据驱动渲染
+    by_group: dict[str, list] = {}
+    for c in COMMANDS_META:
+        by_group.setdefault(c["group"], []).append(c)
+    for g in _HELP_GROUP_ORDER:
+        items = by_group.get(g)
+        if not items:
+            continue
+        print(f"{BOLD}{g}{NC}")
+        for c in items:
+            badges: list[str] = []
+            if c.get("needs_sudo"):
+                badges.append("sudo")
+            if c.get("supports_json"):
+                badges.append("--json")
+            if c.get("supports_dry_run"):
+                badges.append("--dry-run")
+            se = _side_effects_badge(c.get("side_effects"))
+            if se:
+                badges.append(se)
+            badge_str = f"  {DIM}[{' / '.join(badges)}]{NC}" if badges else ""
+            print(f"  {CYAN}{c['name']:<16}{NC} {c['summary']}{badge_str}")
+        print()
 
-    print("\n┌─ 其他 ─────────────────────────────────────────────────────────┐")
-    print("│  --help, -h         显示帮助信息                               │")
-    print("│  --version, -v      显示版本号                                 │")
-    print("└────────────────────────────────────────────────────────────────┘")
+    # 全局 flag
+    print(f"{BOLD}全局 flag{NC}")
+    print(f"  --json         输出 envelope JSON（schema v2）")
+    print(f"  --plain        输出纯 TSV（audit/check 等支持表格的命令）")
+    print(f"  --dry-run      预演写操作（输出 plan，不真正执行）")
+    print(f"  --no-color     关闭 ANSI（也读 NO_COLOR）")
+    print(f"  --quiet/-q     压制非关键 stderr")
+    print(f"  --help/-h      本帮助")
+    print(f"  --version/-v   版本号（可加 --json）")
+    print()
 
-    if verbose:
-        print("\n┌─ 命令详解 ───────────────────────────────────────────────────┐")
-        print("│                                                            │")
-        print("│  check   四阶段检查：                                       │")
-        print("│          1. 基础状态 (daemon/端口)                         │")
-        print("│          2. 代理组状态 (节点延迟/存活率)                   │")
-        print("│          3. 连通性测试 (Google/GitHub/国内网站)            │")
-        print("│          4. 出口 IP 验证 (分流是否正确)                     │")
-        print("│                                                            │")
-        print("│  trace   四阶段诊断：                                       │")
-        print("│          1. DNS 解析 (fakeip/realip)                        │")
-        print("│          2. 规则匹配预测                                    │")
-        print("│          3. 连通性测试                                      │")
-        print("│          4. 实际连接验证                                    │")
-        print("│                                                            │")
-        print("│  audit   配置审计：                                         │")
-        print("│          扫描代理日志，找出\"走代理但实际是国内 IP\"的域名    │")
-        print("│          建议添加到直连规则，可自动应用                    │")
-        print("│                                                            │")
-        print("│  recover 切网后软恢复（不重启进程）：                       │")
-        print("│          1. 热重载配置（清 DNS 缓存）                        │")
-        print("│          2. Flush fakeip cache                             │")
-        print("│          3. 触发所有代理组 healthcheck                     │")
-        print("└────────────────────────────────────────────────────────────┘")
+    # 环境变量
+    print(f"{BOLD}环境变量{NC}")
+    print(f"  PROXYCTL_AGENT=1     等价 --json + --no-color + 非交互承诺")
+    print(f"  PROXYCTL_DEBUG=1     打印插件加载日志到 stderr")
+    print(f"  PROXYCTL_NO_COLOR    等价 --no-color")
+    print(f"  NO_COLOR             遵循 no-color.org")
+    print()
 
-    print("\n配置文件：~/.config/proxyctl/config.yaml")
-    print("项目地址：https://github.com/crhan/proxyctl")
+    print(f"配置文件：~/.config/proxyctl/config.yaml")
+    print(f"仓库地址：https://github.com/crhan/proxyctl")
+    print(f"单命令说明：{CYAN}proxyctl help <command>{NC}  "
+          f"{DIM}（或 proxyctl <command> --help）{NC}")
+
+
+def cmd_discovery(backend, config) -> None:
+    """proxyctl 无参输出：JSON 模式 = discovery envelope；人类模式 = stderr banner（不退出，由 caller 决定后续 status 行为）。
+
+    设计意图：
+      - JSON / PROXYCTL_AGENT=1 → 输出 discovery envelope 并 sys.exit(0)，让
+        agent 一次 round-trip 拿到能力清单 + 引擎一行状态，避免吐 status 全量。
+      - 人类模式 → 仅把 banner 写 stderr（不污染 stdout），让 stdout 继续走
+        默认 status 命令（保留 0.2 体验）。
+    """
+    port = config.get("proxy_port", 7890)
+    try:
+        engine_up = launchctl_running(backend.label) if IS_MACOS else False
+    except Exception:
+        engine_up = False
+
+    if GLOBAL_FLAGS.get("json"):
+        data = {
+            "version": VERSION,
+            "schema_version": _io.SCHEMA_VERSION,
+            "engine": {
+                "name": backend.name,
+                "running": engine_up,
+                "port": port,
+            },
+            "entrypoints": {
+                "agent_guide":  "proxyctl agent-guide",
+                "commands":     "proxyctl commands --json",
+                "commands_schema": "proxyctl commands --schema",
+                "explain":      "proxyctl explain",
+                "doctor":       "proxyctl doctor --json",
+                "help":         "proxyctl --help",
+                "version":      "proxyctl --version --json",
+            },
+            "hints_for_agent": [
+                "Run 'proxyctl agent-guide' first if you are an LLM agent.",
+                "Set PROXYCTL_AGENT=1 to force --json + no-color + non-interactive.",
+                "All write commands accept --dry-run.",
+            ],
+        }
+        _io.emit_json(_io.envelope("", data=data, doc="agent"))
+        sys.exit(0)
+
+    # 人类：banner 到 stderr（不退出，交给 caller）
+    mark = f"{GREEN}✓{NC}" if engine_up else f"{RED}✗{NC}"
+    print(f"{BOLD}proxyctl v{VERSION}{NC}   "
+          f"{mark} engine={backend.name} port={port}",
+          file=sys.stderr)
+    print(file=sys.stderr)
+    print(f"{DIM}下一步：{NC}", file=sys.stderr)
+    print(f"  {CYAN}proxyctl agent-guide{NC}    "
+          f"{DIM}Agent 入门（LLM 必读）{NC}", file=sys.stderr)
+    print(f"  {CYAN}proxyctl explain{NC}        "
+          f"{DIM}我要改 X 去哪？{NC}", file=sys.stderr)
+    print(f"  {CYAN}proxyctl doctor{NC}         "
+          f"{DIM}5 项健康打分（最快）{NC}", file=sys.stderr)
+    print(f"  {CYAN}proxyctl help <cmd>{NC}     "
+          f"{DIM}单命令说明{NC}", file=sys.stderr)
+    print(file=sys.stderr)
+    print(f"{DIM}（设 PROXYCTL_AGENT=1 等价 --json + 关色 + 非交互；"
+          f"下面是默认 status 输出）{NC}", file=sys.stderr)
+
+
+def cmd_version_print() -> None:
+    """proxyctl --version：人类一行；--json 输出 envelope.data 含 supported_features。"""
+    if not GLOBAL_FLAGS.get("json"):
+        print(f"proxyctl v{VERSION}")
+    else:
+        import platform as _plat
+        try:
+            backend_name = "mihomo"  # default; 不加载 config，避免依赖磁盘
+        except Exception:
+            backend_name = "unknown"
+        # supported_features：每个 0.3.0 工作项落地时翻 true；agent 用它探测
+        # "该 release 是否支持某能力"。schema 字段名称稳定不删。
+        data = {
+            "version": VERSION,
+            "schema_version": _io.SCHEMA_VERSION,
+            "python": _plat.python_version(),
+            "platform": _plat.system().lower(),
+            "default_backend": backend_name,
+            "supported_features": {
+                "envelope_v2":             True,
+                "agent_guide":             True,
+                "commands_json":           True,
+                "explain":                 True,
+                "version_json":            True,
+                "discovery_envelope":      True,
+                "help_subcommand":         True,
+                "exit_codes_extended":     True,
+                "did_you_mean":            True,
+                "lock_path_in_error":      True,
+                "side_effects_enum":       True,
+                "dry_run":                 True,
+                "plain":                   True,
+                "flag_position_invariant": True,
+                "agents_md":               True,
+                "commands_schema":         True,
+                "doctor_extended":         True,
+                "log_ndjson_v2":           True,
+            },
+        }
+        _io.emit_json(_io.envelope("version", data=data))
     sys.exit(0)
 
 
@@ -1402,7 +1580,7 @@ def cmd_subcommand_help(name: str) -> None:
 
     if GLOBAL_FLAGS.get("json"):
         _io.emit_json(_io.envelope(name, data=meta))
-        sys.exit(0)
+        return
 
     print(f"{BOLD}proxyctl {meta['name']}{NC}  ({meta['group']})")
     print(f"  {meta['summary']}\n")
@@ -1435,29 +1613,45 @@ def cmd_subcommand_help(name: str) -> None:
     badges = []
     if meta.get("needs_sudo"):       badges.append("需要 sudo")
     if meta.get("interactive"):       badges.append("交互式")
-    if meta["side_effects"] != "none": badges.append(f"副作用={meta['side_effects']}")
-    if not meta.get("supports_json"): badges.append("无 --json")
+    se = meta.get("side_effects")
+    if se:
+        if isinstance(se, list):
+            badges.append(f"副作用={'+'.join(se)}")
+        elif se != "none":
+            badges.append(f"副作用={se}")
+    cse = meta.get("conditional_side_effects") or {}
+    for trigger, effects in cse.items():
+        badges.append(f"副作用[{trigger}]={'+'.join(effects)}")
+    if meta.get("supports_dry_run"):
+        badges.append("支持 --dry-run")
+    if not meta.get("supports_json"):
+        badges.append("无 --json")
     if badges:
         print(f"\n{DIM}({' / '.join(badges)}){NC}")
 
     if name in TOPICS:
         print(f"\n{DIM}详细说明：proxyctl explain {name}{NC}")
-    sys.exit(0)
 
 
 # ── 全局 flag 预解析 ──────────────────────────────────────────────────────
 
 # 入口运行期填充，子命令可读取（如 status 决定是否 --json）
-GLOBAL_FLAGS: dict = {"json": False, "no_color": False, "quiet": False}
+GLOBAL_FLAGS: dict = {
+    "json": False, "no_color": False, "quiet": False,
+    "dry_run": False, "plain": False,
+}
 
 
 def _extract_global_flags(argv: list) -> tuple:
     """从 argv 中剥离全局 flag，返回 (剩余 argv, flag dict)。
 
     clig.dev 原则：flag 位置无关 — 在任意位置出现的 --json / --no-color /
-    --quiet / -q 都会被识别并剥离，剩余位置参数顺序保持不变。
+    --quiet / -q / --dry-run / --plain 都会被识别并剥离，剩余位置参数顺序保持不变。
     """
-    flags = {"json": False, "no_color": False, "quiet": False}
+    flags = {
+        "json": False, "no_color": False, "quiet": False,
+        "dry_run": False, "plain": False,
+    }
     remaining = []
     for a in argv:
         if a == "--json":
@@ -1466,9 +1660,224 @@ def _extract_global_flags(argv: list) -> tuple:
             flags["no_color"] = True
         elif a in ("--quiet", "-q"):
             flags["quiet"] = True
+        elif a == "--dry-run":
+            flags["dry_run"] = True
+        elif a == "--plain":
+            flags["plain"] = True
         else:
             remaining.append(a)
     return remaining, flags
+
+
+def _maybe_dry_run(cmd_name: str, plan_fn) -> None:
+    """如果 --dry-run，调用 plan_fn() 拿 plan 列表，emit 并 sys.exit(0)。
+
+    plan_fn 是一个无参可调用，返回 list[PlanStep]，每个 step 含：
+        step / action / target / reversible / requires_sudo / side_effects / summary
+    """
+    if not GLOBAL_FLAGS.get("dry_run"):
+        return
+    plan = list(plan_fn())
+    # 兜底：补 step 序号、补默认字段
+    for i, s in enumerate(plan, start=1):
+        s.setdefault("step", i)
+        s.setdefault("reversible", False)
+        s.setdefault("requires_sudo", False)
+        s.setdefault("side_effects", [])
+    if GLOBAL_FLAGS.get("json"):
+        _io.emit_json(_io.envelope(
+            cmd_name,
+            data={"plan": plan, "dry_run": True},
+            hints=[
+                f"去掉 --dry-run 即可真正执行 {cmd_name}",
+                "plan schema 见 proxyctl explain agent-protocol",
+            ]))
+    else:
+        print(f"{BOLD}[--dry-run]{NC} 将执行以下步骤（不真正执行）：")
+        for s in plan:
+            tags = []
+            if s.get("requires_sudo"):
+                tags.append("sudo")
+            if s.get("side_effects"):
+                tags.append("+".join(s["side_effects"]))
+            tag = f"  {DIM}[{' / '.join(tags)}]{NC}" if tags else ""
+            print(f"  {CYAN}{s['step']}.{NC} {s['summary']}{tag}")
+        print(f"\n{DIM}去掉 --dry-run 即可真正执行 {cmd_name}{NC}")
+    sys.exit(0)
+
+
+def _plan_mode(backend, target: str) -> list[dict]:
+    return [
+        {"action": "edit_yaml",
+         "target": backend.config_file,
+         "summary": f"修改 {backend.config_file}：切换 mode 为 {target}",
+         "reversible": True,
+         "side_effects": ["config-write"]},
+        {"action": "subprocess",
+         "target": f"launchctl kickstart -k system/{backend.label}",
+         "summary": f"重启 launchd 服务以读取新 mode",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["process"]},
+    ]
+
+
+def _plan_engine(backend, target: str) -> list[dict]:
+    from proxyctl.cli import get_backend, DEFAULT_CONFIG_DIR
+    new_cfg = {"backend": target}
+    try:
+        new_backend = get_backend(new_cfg)
+        new_plist = new_backend.plist
+    except Exception:
+        new_plist = f"/Library/LaunchDaemons/<{target}>.plist"
+    return [
+        {"action": "subprocess",
+         "target": f"launchctl bootout system/{backend.label}",
+         "summary": f"停止当前引擎 {backend.name}",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["process"]},
+        {"action": "fs_write",
+         "target": new_plist,
+         "summary": f"部署新引擎 plist 到 {new_plist}",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["config-write"]},
+        {"action": "fs_write",
+         "target": f"{DEFAULT_CONFIG_DIR}/engine",
+         "summary": f"持久化引擎选择到 {DEFAULT_CONFIG_DIR}/engine = {target}",
+         "reversible": True,
+         "side_effects": ["config-write"]},
+        {"action": "subprocess",
+         "target": f"launchctl bootstrap system {new_plist}",
+         "summary": f"启动新引擎 {target}",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["process"]},
+    ]
+
+
+def _plan_fix(backend, config) -> list[dict]:
+    return [
+        {"action": "subprocess",
+         "target": "networksetup -setdnsservers <svc> 127.0.0.1",
+         "summary": "重置系统 DNS 指向 127.0.0.1（对抗 DHCP 续租）",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["system"]},
+        {"action": "subprocess",
+         "target": "scutil + dscacheutil",
+         "summary": "清 macOS DNS 缓存（含 fakeip 表）",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["cache"]},
+        {"action": "http_put",
+         "target": f"{config.get('api_base', 'http://127.0.0.1:9090')}/configs?force=true",
+         "summary": "向 Clash API 发热重载请求（不重启进程）",
+         "reversible": True,
+         "side_effects": ["network-io"]},
+    ]
+
+
+def _plan_audit_apply(days: int) -> list[dict]:
+    return [
+        {"action": "scan_log",
+         "target": "<engine log>",
+         "summary": f"扫描最近 {days} 天后端日志，找疑似应直连的域名",
+         "reversible": True,
+         "side_effects": []},
+        {"action": "edit_yaml",
+         "target": "<engine config>.yaml [rules: 段]",
+         "summary": "把候选域名作为 DOMAIN-SUFFIX,...,DIRECT 加到 rules 段顶部",
+         "reversible": True,
+         "side_effects": ["config-write"]},
+        {"action": "http_put",
+         "target": "Clash API /configs?force=true",
+         "summary": "热重载配置使新规则生效",
+         "reversible": True,
+         "side_effects": ["network-io"]},
+    ]
+
+
+def _plan_config_set(path: str, key: str, value_repr: str) -> list[dict]:
+    return [
+        {"action": "fs_copy",
+         "target": f"{path} → {path}.bak",
+         "summary": "拷贝当前配置到 .bak 备份",
+         "reversible": True,
+         "side_effects": ["config-write"]},
+        {"action": "fs_write_atomic",
+         "target": path,
+         "summary": f"原子写入：{key} = {value_repr}（tmp + rename + YAML 校验）",
+         "reversible": True,
+         "side_effects": ["config-write"]},
+    ]
+
+
+def _plan_daemon(name: str, subcmd: str, plist_dst: str) -> list[dict]:
+    if subcmd == "start":
+        return [
+            {"action": "fs_write",
+             "target": plist_dst,
+             "summary": f"如缺失则部署 plist 到 {plist_dst}",
+             "reversible": True, "requires_sudo": True,
+             "side_effects": ["config-write"]},
+            {"action": "subprocess",
+             "target": f"launchctl bootstrap system {plist_dst}",
+             "summary": f"启动 daemon {name}",
+             "reversible": True, "requires_sudo": True,
+             "side_effects": ["process"]},
+        ]
+    if subcmd == "stop":
+        return [
+            {"action": "subprocess",
+             "target": f"launchctl bootout system/<{name}.label>",
+             "summary": f"停止 daemon {name}",
+             "reversible": True, "requires_sudo": True,
+             "side_effects": ["process"]},
+        ]
+    if subcmd == "restart":
+        return [
+            {"action": "subprocess",
+             "target": f"launchctl kickstart -k system/<{name}.label>",
+             "summary": f"重启 daemon {name}",
+             "reversible": True, "requires_sudo": True,
+             "side_effects": ["process"]},
+        ]
+    return []
+
+
+def _plan_dns_lock(reload: bool) -> list[dict]:
+    plan: list[dict] = []
+    if reload:
+        plan.append({
+            "action": "subprocess",
+            "target": "launchctl bootout system/<dns-lock.label>",
+            "summary": "如已注册，先 bootout 重装",
+            "reversible": True, "requires_sudo": True,
+            "side_effects": ["process"]})
+    plan += [
+        {"action": "fs_write",
+         "target": "/Library/LaunchDaemons/<dns-lock>.plist",
+         "summary": "渲染并写入 dns-lock launchd plist",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["config-write"]},
+        {"action": "subprocess",
+         "target": "launchctl bootstrap system <plist>",
+         "summary": "启动 DNS 看门狗 daemon",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["process"]},
+    ]
+    return plan
+
+
+def _plan_dns_unlock() -> list[dict]:
+    return [
+        {"action": "subprocess",
+         "target": "launchctl bootout system/<dns-lock.label>",
+         "summary": "停止 DNS 看门狗",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["process"]},
+        {"action": "fs_remove",
+         "target": "/Library/LaunchDaemons/<dns-lock>.plist",
+         "summary": "删除 launchd plist（可选；保留下次 dns-lock 直接启动）",
+         "reversible": False, "requires_sudo": True,
+         "side_effects": ["config-write"]},
+    ]
 
 
 # ── 主入口 ────────────────────────────────────────────────────────────────────
@@ -1476,6 +1885,10 @@ def _extract_global_flags(argv: list) -> tuple:
 def main():
     # 信号：避免 `proxyctl ... | head` 的 BrokenPipeError；Ctrl-C → exit 130
     _io.install_signal_handlers()
+
+    # 记录本次调用的 t0（envelope.meta.elapsed_ms 用）和 request_id
+    _io.set_invocation_t0()
+    _io.new_request_id()
 
     # 全局 flag：从 sys.argv 中剥离（位置无关），子命令分发不变
     new_argv, gflags = _extract_global_flags(sys.argv)
@@ -1487,6 +1900,9 @@ def main():
         GLOBAL_FLAGS["json"] = True
         GLOBAL_FLAGS["no_color"] = True
 
+    # 把 json 模式同步到 _io 全局（让 _io.fail 等子模块无需手工传 as_json）
+    _io.set_json_mode(GLOBAL_FLAGS["json"])
+
     # 关色决策：显式 --no-color / --json / PROXYCTL_AGENT 强制；否则按 TTY+env 自动
     if GLOBAL_FLAGS["no_color"] or GLOBAL_FLAGS["json"]:
         _io.set_no_color(True)
@@ -1495,12 +1911,20 @@ def main():
 
     # 处理全局帮助 / 版本（位置仍要求是第一个非全局参数）
     if len(sys.argv) > 1:
-        if sys.argv[1] in ("--help", "-h", "help"):
-            cmd_help(verbose=True)
+        if sys.argv[1] in ("--help", "-h"):
+            cmd_help()
+            return
+        elif sys.argv[1] == "help":
+            # `proxyctl help`        → 顶层 --help
+            # `proxyctl help <cmd>`  → 单命令 help（与 `<cmd> --help` 同源）
+            if len(sys.argv) >= 3:
+                cmd_subcommand_help(sys.argv[2])
+                return
+            cmd_help()
             return
         elif sys.argv[1] in ("--version", "-v"):
-            print(f"proxyctl v{VERSION}")
-            sys.exit(0)
+            cmd_version_print()
+            return
 
     # 子命令 --help / -h（位置：sys.argv[2:] 中任一处出现）
     if len(sys.argv) > 2 and any(a in ("--help", "-h") for a in sys.argv[2:]):
@@ -1526,11 +1950,12 @@ def main():
     from proxyctl import explain as _ex_share
     _ex_share.set_global_flags(GLOBAL_FLAGS)
 
-    # 裸 proxyctl → 默认 status，但补一条"Agent 入口"提示到 stderr（不污染 stdout）
-    if len(sys.argv) == 1 and not GLOBAL_FLAGS.get("json"):
-        print(f"{DIM}提示：proxyctl agent-guide 给 Agent / "
-              f"proxyctl explain 看'想改 X 去哪'  ({CYAN}--help{NC}{DIM} 看完整命令){NC}",
-              file=sys.stderr)
+    # 裸 proxyctl → 输出 discovery 信号：
+    #   - JSON 模式：discovery envelope（sys.exit(0)，不再走 status）
+    #   - 人类模式：stderr banner + 继续走默认 status
+    if len(sys.argv) == 1:
+        cmd_discovery(backend, config)
+        # 人类模式下 cmd_discovery 不退出，继续走 status
 
     ctx = {
         "backend": backend, "config": config, "registry": registry,
@@ -1552,6 +1977,7 @@ def _h_restart_clean(ctx):
     cmd_restart(ctx["backend"], ctx["config"], clean=True, registry=ctx["registry"])
 def _h_recover(ctx):  cmd_recover(ctx["backend"], ctx["config"])
 def _h_dns_unlock(ctx):
+    _maybe_dry_run("dns-unlock", lambda: _plan_dns_unlock())
     _exec_with_lock("daemon", "dns-unlock", cmd_dns_unlock, ctx["config"])
 def _h_plugins(ctx):  cmd_plugins(ctx["registry"])
 
@@ -1578,11 +2004,13 @@ def _h_bench(ctx):
               default_groups=default_groups)
 
 def _h_fix(ctx):
+    _maybe_dry_run("fix", lambda: _plan_fix(ctx["backend"], ctx["config"]))
     _exec_with_lock("system", "fix", cmd_fix,
                     ctx["backend"], ctx["config"], registry=ctx["registry"])
 
 def _h_dns_lock(ctx):
     reload = "--reload" in ctx["args"]
+    _maybe_dry_run("dns-lock", lambda: _plan_dns_lock(reload))
     _exec_with_lock("daemon", "dns-lock", cmd_dns_lock,
                     ctx["config"], ctx["backend"], reload=reload)
 
@@ -1593,6 +2021,7 @@ def _h_env(ctx):
 def _h_engine(ctx):
     target = ctx["args"][0] if ctx["args"] else ""
     if target:
+        _maybe_dry_run("engine", lambda: _plan_engine(ctx["backend"], target))
         _exec_with_lock("config", "engine",
                         cmd_engine, ctx["backend"], target, ctx["config"])
     else:
@@ -1602,6 +2031,8 @@ def _h_daemon(ctx):
     name = ctx["args"][0] if ctx["args"] else ""
     subcmd = ctx["args"][1] if len(ctx["args"]) > 1 else ""
     if subcmd in ("start", "stop", "restart"):
+        _maybe_dry_run("daemon",
+                       lambda: _plan_daemon(name, subcmd, "<plist_dst>"))
         _exec_with_lock("daemon", "daemon", cmd_daemon, name, subcmd, ctx["config"])
     else:
         cmd_daemon(name, subcmd, ctx["config"])
@@ -1610,6 +2041,8 @@ def _h_claude_proxy(ctx):
     """daemon claude-proxy <subcmd> 的别名，向后兼容。"""
     subcmd = ctx["args"][0] if ctx["args"] else "status"
     if subcmd in ("start", "stop", "restart"):
+        _maybe_dry_run("claude-proxy",
+                       lambda: _plan_daemon("claude-proxy", subcmd, "<plist_dst>"))
         _exec_with_lock("daemon", "claude-proxy",
                         cmd_daemon, "claude-proxy", subcmd, ctx["config"])
     else:
@@ -1620,12 +2053,24 @@ def _h_audit(ctx):
     apply_mode = (arg == "apply")
     days_str = (ctx["args"][1] if (apply_mode and len(ctx["args"]) > 1)
                 else (arg if not apply_mode else "1"))
+    # arg 既不是数字也不是 "apply" → did-you-mean
+    if not apply_mode and not days_str.lstrip("-").isdigit():
+        import difflib
+        suggest = difflib.get_close_matches(arg, ["apply"], n=1, cutoff=0.5)
+        hints = ["proxyctl audit [days]  # 扫描最近 N 天",
+                 "proxyctl audit apply [days]  # 自动应用建议"]
+        if suggest:
+            hints.insert(0, f"是否想要：{suggest[0]}？")
+        _io.fail(f"未识别 audit 参数：{arg}",
+                 hints=hints, doc="rules",
+                 code=_io.USAGE, cmd="audit")
     try:
         days = int(days_str)
     except ValueError:
         days = 1
     from proxyctl.audit import cmd_audit
     if apply_mode:
+        _maybe_dry_run("audit", lambda: _plan_audit_apply(days))
         _exec_with_lock("config", "audit", cmd_audit,
                         days, ctx["api_base"], ctx["api_secret"], apply_mode)
     else:
@@ -1634,6 +2079,7 @@ def _h_audit(ctx):
 def _h_mode(ctx):
     target = ctx["args"][0] if ctx["args"] else ""
     if target in ("tun", "proxy"):
+        _maybe_dry_run("mode", lambda: _plan_mode(ctx["backend"], target))
         _exec_with_lock("config", "mode", cmd_mode, ctx["backend"], target)
     else:
         cmd_mode(ctx["backend"], target)
@@ -1663,6 +2109,13 @@ def _h_commands(ctx):
 def _h_config(ctx):
     from proxyctl import explain as _ex
     if ctx["args"] and ctx["args"][0] == "set":
+        # config set <key> <value>
+        if len(ctx["args"]) >= 3:
+            _maybe_dry_run(
+                "config",
+                lambda: _plan_config_set(
+                    os.path.join(HOME, ".config", "proxyctl", "config.yaml"),
+                    ctx["args"][1], ctx["args"][2]))
         _exec_with_lock("config", "config",
                         _ex.cmd_config, ctx["args"], ctx["backend"], ctx["config"])
     else:
@@ -1675,6 +2128,14 @@ def _h_doctor(ctx):
 def _h_completion(ctx):
     from proxyctl import completion as _cmp
     _cmp.cmd_completion(ctx["args"])
+
+
+def _h_help(ctx):
+    """proxyctl help [<cmd>] — main() 已前置处理，但保留在 DISPATCH 用于元数据完备性。"""
+    if ctx["args"]:
+        cmd_subcommand_help(ctx["args"][0])
+    else:
+        cmd_help()
 
 
 DISPATCH: dict = {
@@ -1705,6 +2166,7 @@ DISPATCH: dict = {
     "config":          _h_config,
     "doctor":          _h_doctor,
     "completion":      _h_completion,
+    "help":            _h_help,
 }
 
 
@@ -1713,11 +2175,16 @@ def _exec_with_lock(lock_name: str, cmd_label: str, fn, *args, **kwargs):
     try:
         with _io.with_lock(lock_name):
             return fn(*args, **kwargs)
-    except BlockingIOError:
-        _io.fail(f"另一个 proxyctl 写操作正在进行（lock: {lock_name}）",
-                 hint="稍后重试；或排查是否有挂死的 proxyctl 进程",
-                 code=_io.LOCKED, cmd=cmd_label,
-                 as_json=GLOBAL_FLAGS.get("json", False))
+    except _io.LockedError as e:
+        _io.fail(
+            f"另一个 proxyctl 写操作正在进行（lock: {lock_name}）",
+            hints=[
+                f"锁文件: {e.lock_path}",
+                f"排查: lsof {e.lock_path}  # 看谁持有",
+                f"确认无 proxyctl 进程后可手动: rm {e.lock_path}",
+            ],
+            doc="locks",
+            code=_io.LOCKED, cmd=cmd_label)
 
 
 def _known_commands() -> list:

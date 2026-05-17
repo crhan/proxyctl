@@ -385,11 +385,11 @@ def cmd_bench(api: str, api_secret: str, groups: list = None,
     )
     if not r.stdout.strip():
         if as_json:
-            from proxyctl._io import emit_json, envelope, NETWORK_ERR
-            emit_json(envelope("bench", ok=False, data=None,
-                               error="Clash API unreachable",
-                               code=NETWORK_ERR, hint="proxyctl start"))
-            _sys.exit(NETWORK_ERR)
+            from proxyctl import _io
+            _io.fail("Clash API unreachable",
+                     hint="proxyctl start",
+                     doc="troubleshooting",
+                     code=_io.NETWORK_ERR, cmd="bench", as_json=True)
         print(f"  {YELLOW}—{NC} Clash API 不可达")
         return
 
@@ -397,11 +397,11 @@ def cmd_bench(api: str, api_secret: str, groups: list = None,
         proxies = json.loads(r.stdout).get("proxies", {})
     except Exception:
         if as_json:
-            from proxyctl._io import emit_json, envelope, NETWORK_ERR
-            emit_json(envelope("bench", ok=False, data=None,
-                               error="API response parse failed",
-                               code=NETWORK_ERR))
-            _sys.exit(NETWORK_ERR)
+            from proxyctl import _io
+            _io.fail("API response parse failed",
+                     hint="proxyctl log --tail 50 --no-follow",
+                     doc="troubleshooting",
+                     code=_io.NETWORK_ERR, cmd="bench", as_json=True)
         print(f"  {YELLOW}—{NC} API 响应解析失败")
         return
 
@@ -421,12 +421,11 @@ def cmd_bench(api: str, api_secret: str, groups: list = None,
 
     if not group_members:
         if as_json:
-            from proxyctl._io import emit_json, envelope, NOT_FOUND
-            emit_json(envelope("bench", ok=False, data=None,
-                               error="No testable group",
-                               hint=f"已知组 (--json) 取 proxyctl status",
-                               code=NOT_FOUND))
-            _sys.exit(NOT_FOUND)
+            from proxyctl import _io
+            _io.fail("No testable group",
+                     hint="proxyctl status --json  # 看已知组名",
+                     doc="nodes",
+                     code=_io.NOT_FOUND, cmd="bench", as_json=True)
         print(f"  {RED}✗{NC} 无可测组")
         return
 
@@ -543,9 +542,16 @@ def cmd_check(engine, api: str, api_secret: str,
     import sys as _sys
     try:
         from proxyctl.explain import GLOBAL_FLAGS_REF as _gf
-        as_json = bool(_gf().get("json"))
+        _flags = _gf()
+        as_json = bool(_flags.get("json"))
+        as_plain = bool(_flags.get("plain"))
     except Exception:
         as_json = False
+        as_plain = False
+    if as_json and as_plain:
+        from proxyctl import _io as _pc_io
+        _pc_io.fail("--json 与 --plain 互斥",
+                    hint="选择其一", code=_pc_io.USAGE, cmd="check")
     collector: dict = {
         "engine": engine.name,
         "mode": mode_str,
@@ -561,7 +567,7 @@ def cmd_check(engine, api: str, api_secret: str,
         },
     }
     _real_stdout = _sys.stdout
-    if as_json:
+    if as_json or as_plain:
         _sys.stdout = _io_mod.StringIO()
 
     dns_lock_label = config.get("dns_lock_label", "com.proxyctl.dns-lock")
@@ -633,12 +639,12 @@ def cmd_check(engine, api: str, api_secret: str,
         collector["stages"]["basic"]["daemon_up"] = False
         if as_json:
             _sys.stdout = _real_stdout
-            from proxyctl._io import emit_json, envelope, ENGINE_DOWN
-            emit_json(envelope("check", data=collector, ok=False,
-                               code=ENGINE_DOWN,
-                               error="daemon not running",
-                               hint="proxyctl start"))
-            _sys.exit(ENGINE_DOWN)
+            from proxyctl import _io
+            _io.fail("daemon not running",
+                     hint="proxyctl start",
+                     doc="troubleshooting",
+                     data=collector,
+                     code=_io.ENGINE_DOWN, cmd="check", as_json=True)
         return
 
     # 端口检测（proxy 模式不检查 53）— 端口来自 config + api_base
@@ -922,4 +928,28 @@ def cmd_check(engine, api: str, api_secret: str,
                            ok=(not fail),
                            code=OK if not fail else GENERIC,
                            hint=hint))
+        _sys.exit(0 if not fail else 1)
+    if as_plain:
+        _sys.stdout = _real_stdout
+        from proxyctl._io import emit_tsv
+        # 4 行 TSV：stage / ok / detail
+        stages = collector["stages"]
+        basic = stages.get("basic", {})
+        conn = stages.get("connectivity") or []
+        out_ip = stages.get("outbound_ip") or {}
+        rows = [
+            {"stage": "basic", "ok": bool(basic.get("daemon_up")),
+             "detail": f"pid={basic.get('pid','?')} uptime={basic.get('uptime','?')}"},
+            {"stage": "groups", "ok": True,  # groups 阶段在 --json/--plain 模式被跳过
+             "detail": "skipped_in_structured_modes"},
+            {"stage": "connectivity",
+             "ok": all(c.get("ok") for c in conn) if conn else False,
+             "detail": ";".join(f"{c.get('target')}={c.get('http_code') or 'X'}"
+                                 for c in conn)},
+            {"stage": "outbound_ip",
+             "ok": bool(out_ip),
+             "detail": ";".join(f"{k}={(v or {}).get('ip','?')}"
+                                  for k, v in out_ip.items())},
+        ]
+        emit_tsv(rows, cols=["stage", "ok", "detail"])
         _sys.exit(0 if not fail else 1)

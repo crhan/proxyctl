@@ -66,7 +66,7 @@ def _t_rules(backend, config) -> TopicCard:
             "  # sing-box: 在 route.rules[] 中插入对应规则对象"
         ),
         "verify": "proxyctl fix && proxyctl trace <domain>",
-        "next": ["explain config", "trace <domain>", "audit"],
+        "next_commands": ["explain config", "trace <domain>", "audit"],
     }
 
 
@@ -82,7 +82,7 @@ def _t_nodes(backend, config) -> TopicCard:
             "  # proxyctl 不管订阅更新；用 mihomo 的 'proxy-providers' 热更新机制"
         ),
         "verify": "proxyctl bench <group>   # 测节点延迟",
-        "next": ["bench", "explain engine"],
+        "next_commands": ["bench", "explain engine"],
     }
 
 
@@ -94,7 +94,7 @@ def _t_config(backend, config) -> TopicCard:
         "file": _io_proxyctl_config_path(),
         "edit": f"$EDITOR {_io_proxyctl_config_path()}",
         "verify": "proxyctl config get <key>",
-        "next": ["explain ports", "explain corp-dns", "explain extra-daemons"],
+        "next_commands": ["explain ports", "explain corp-dns", "explain extra-daemons"],
     }
 
 
@@ -108,7 +108,7 @@ def _t_dns(backend, config) -> TopicCard:
         "file": f"{backend.config_file}  [dns: 段]",
         "edit": "  # 修改 fake-ip-range / nameserver 等：编辑 mihomo dns: 段",
         "verify": "proxyctl status   # 看 'DNS 解析' 行；proxyctl trace example.com",
-        "next": ["explain troubleshooting", "explain corp-dns", "fix"],
+        "next_commands": ["explain troubleshooting", "explain corp-dns", "fix"],
     }
 
 
@@ -128,7 +128,7 @@ def _t_engine(backend, config) -> TopicCard:
             "  proxyctl mode proxy              # HTTP/SOCKS proxy 模式"
         ),
         "verify": "proxyctl status",
-        "next": ["status", "explain mode", "explain ports"],
+        "next_commands": ["status", "explain mode", "explain ports"],
     }
 
 
@@ -144,7 +144,7 @@ def _t_ports(backend, config) -> TopicCard:
         "file": _io_proxyctl_config_path() + "  [proxy_port: 字段]",
         "edit": "  # 同步改 mihomo config.yaml 的 mixed-port / port",
         "verify": "proxyctl config get proxy_port",
-        "next": ["explain config", "config get proxy_port"],
+        "next_commands": ["explain config", "config get proxy_port"],
     }
 
 
@@ -163,7 +163,7 @@ def _t_extra_daemons(backend, config) -> TopicCard:
             "  # 然后 proxyctl daemon <name> start"
         ),
         "verify": "proxyctl daemon <name> status",
-        "next": ["explain config"],
+        "next_commands": ["explain config"],
     }
 
 
@@ -179,7 +179,7 @@ def _t_env(backend, config) -> TopicCard:
         "file": _io_proxyctl_config_path() + "  [no_proxy_extra: 字段]",
         "edit": "  # no_proxy_extra: 追加内网域名 / Tailscale 段 / 企业 host",
         "verify": "eval \"$(proxyctl env)\" && env | grep -i proxy",
-        "next": ["env", "env --unset"],
+        "next_commands": ["env", "env --unset"],
     }
 
 
@@ -196,7 +196,7 @@ def _t_corp_dns(backend, config) -> TopicCard:
         "file": _io_proxyctl_config_path() + "  [corp_dns: 段]",
         "edit": "  # 填 server / domain / test_domain / ip_prefix / check_targets",
         "verify": "proxyctl status   # 看 '企业内网' 段（若有 plugin 注入）",
-        "next": ["explain plugins", "explain dns"],
+        "next_commands": ["explain plugins", "explain dns"],
     }
 
 
@@ -217,7 +217,7 @@ def _t_plugins(backend, config) -> TopicCard:
             "  # 禁用某个插件：config.yaml 中 plugins_disabled: [name1, name2]"
         ),
         "verify": "proxyctl plugins",
-        "next": ["plugins"],
+        "next_commands": ["plugins"],
     }
 
 
@@ -238,7 +238,7 @@ def _t_trbl(backend, config) -> TopicCard:
             "  proxyctl recover             # 切网后软恢复（不重启进程）"
         ),
         "verify": "proxyctl doctor --json",
-        "next": ["doctor", "status", "check", "trace", "fix", "recover"],
+        "next_commands": ["doctor", "status", "check", "trace", "fix", "recover"],
     }
 
 
@@ -253,7 +253,7 @@ def _t_exit_codes(backend, config) -> TopicCard:
         "file": "(no file)",
         "edit": "\n".join(lines),
         "verify": "proxyctl statuss   # 拼写错应返回 2 (USAGE) 并给 did-you-mean",
-        "next": ["agent-guide", "commands"],
+        "next_commands": ["agent-guide", "commands"],
     }
 
 
@@ -272,7 +272,116 @@ def _t_agent(backend, config) -> TopicCard:
             "  PROXYCTL_AGENT=1 proxyctl status      # 自动 JSON + 关色 + 非交互"
         ),
         "verify": "PROXYCTL_AGENT=1 proxyctl status",
-        "next": ["agent-guide", "commands", "explain exit-codes"],
+        "next_commands": ["agent-guide", "commands", "explain exit-codes"],
+    }
+
+
+@topic("subscription")
+def _t_subscription(backend, config) -> TopicCard:
+    return {
+        "topic": "subscription",
+        "summary": (
+            "节点订阅更新边界：proxyctl 不更新订阅。"
+            "订阅由 mihomo / sing-box 自身的 proxy-providers 管，"
+            "或用户用 Clash API 主动 PUT 触发。"
+        ),
+        "file": f"{backend.config_file}  [proxy-providers: 段]",
+        "edit": (
+            "  # mihomo / sing-box 内置：\n"
+            "  #   proxy-providers:\n"
+            "  #     myprovider:\n"
+            "  #       type: http\n"
+            "  #       url: https://...\n"
+            "  #       interval: 86400          # 自动每 24h 更新\n"
+            "  #\n"
+            "  # 手动触发：\n"
+            "  #   curl -X PUT \\\n"
+            "  #        -H 'Authorization: Bearer <api_secret>' \\\n"
+            "  #        http://127.0.0.1:9090/providers/proxies/myprovider"
+        ),
+        "verify": "proxyctl bench  # 看新节点是否参与测速",
+        "next_commands": ["bench", "explain nodes", "log --tail 50 --no-follow"],
+    }
+
+
+@topic("agent-protocol")
+def _t_agent_protocol(backend, config) -> TopicCard:
+    return {
+        "topic": "agent-protocol",
+        "summary": (
+            "envelope v2 + 退出码 + 决策树。Agent 应该读 AGENTS.md "
+            "（仓库视角）与 proxyctl agent-guide（运行时视角）。"
+            "本卡片是 cheat sheet。"
+        ),
+        "file": "(no file — AGENTS.md / agent-guide / commands --schema)",
+        "edit": (
+            "  envelope v2 字段：schema_version / cmd / ok / data / error /\n"
+            "                   code / hints[] / warnings[] / doc / meta{}\n"
+            "  meta：           ts / elapsed_ms / proxyctl_version / request_id\n"
+            "  退出码：         0 OK / 2 USAGE / 3 NOT_FOUND / 4 PERMISSION /\n"
+            "                   5 ENGINE_DOWN / 6 CONFIG_ERR / 7 NETWORK_ERR /\n"
+            "                   8 LOCKED / 9 TIMEOUT / 10 DEPENDENCY_MISSING\n"
+            "  能力探测：       proxyctl --version --json | jq .data.supported_features\n"
+            "  全量元数据：     proxyctl commands --json\n"
+            "  元数据 schema：  proxyctl commands --schema"
+        ),
+        "verify": "proxyctl agent-guide  # 完整接入文档",
+        "next_commands": ["agent-guide", "commands --json",
+                          "commands --schema", "explain locks"],
+    }
+
+
+@topic("locks")
+def _t_locks(backend, config) -> TopicCard:
+    lock_dir = os.path.join(os.path.expanduser("~"), ".config", "proxyctl")
+    return {
+        "topic": "locks",
+        "summary": (
+            "写操作互斥锁。LOCKED(8) 退出码触发时，错误 hints 已列出锁路径。"
+            "极端情况（挂死进程）可手动 rm。"
+        ),
+        "file": f"{lock_dir}/.lock.{{system,config,daemon}}",
+        "edit": (
+            "  # 三类锁（按写操作类型分）：\n"
+            "  #   .lock.system   start/stop/restart/fix\n"
+            "  #   .lock.config   mode/engine/audit apply/config set\n"
+            "  #   .lock.daemon   daemon/dns-lock/dns-unlock\n"
+            "  #\n"
+            "  # 排查：\n"
+            "  #   lsof <lock_path>            # 看谁持有\n"
+            "  #   ps -p <pid>                 # 验证是 proxyctl\n"
+            "  #\n"
+            "  # 手动释放（仅当 lsof 显示无持有者）：\n"
+            "  #   rm <lock_path>"
+        ),
+        "verify": (
+            "proxyctl doctor --json | jq .data.lock_held"
+            "  # 当前持锁的锁名"
+        ),
+        "next_commands": ["doctor --json", "explain exit-codes"],
+    }
+
+
+@topic("flags")
+def _t_flags(backend, config) -> TopicCard:
+    return {
+        "topic": "flags",
+        "summary": (
+            "全局 flag 速查：--json / --plain / --dry-run / --no-color / --quiet。"
+            "全部位置无关；--json 与 --plain 互斥；--dry-run 仅对写命令有效。"
+        ),
+        "file": "(no file)",
+        "edit": (
+            "  --json       envelope schema v2（含 meta.ts/elapsed_ms/request_id）\n"
+            "  --plain      纯 TSV 输出（audit / check 等表格命令）\n"
+            "  --dry-run    预演写命令的 plan（list[PlanStep]），不真正执行\n"
+            "  --no-color   关闭 ANSI（也读 NO_COLOR / PROXYCTL_NO_COLOR）\n"
+            "  --quiet/-q   压制非关键 stderr\n"
+            "  --help/-h    单命令或全局帮助\n"
+            "  --version/-v 版本号（加 --json 输出 supported_features）"
+        ),
+        "verify": "proxyctl mode tun --dry-run --json | jq .data.plan",
+        "next_commands": ["agent-protocol", "agent-guide", "commands"],
     }
 
 
@@ -352,8 +461,9 @@ def _print_card(card: TopicCard) -> None:
     for line in card["edit"].splitlines():
         print(f"  {line}" if not line.startswith("  ") else line)
     print(f"{BOLD}VERIFY{NC}   {card['verify']}")
-    if card.get("next"):
-        nxt = ", ".join(f"proxyctl {n}" for n in card["next"])
+    nxt_list = card.get("next_commands") or card.get("next")
+    if nxt_list:
+        nxt = ", ".join(f"proxyctl {n}" for n in nxt_list)
         print(f"{BOLD}NEXT{NC}     {nxt}")
 
 
@@ -402,30 +512,51 @@ def _build_agent_guide(backend, config) -> str:
         f"  {code}  {_io.EXIT_CODE_HELP[code]}"
         for code in sorted(_io.EXIT_CODE_HELP)
     )
-    return f"""# proxyctl — Agent 接入指南
+    topics_list = ", ".join(sorted(TOPICS.keys()))
+    lock_dir = os.path.join(os.path.expanduser("~"), ".config", "proxyctl")
+    return f"""# proxyctl — Agent 接入指南（runtime / v0.3）
 
 > 一句话：proxyctl 是 macOS（含 Linux 部分支持）的代理 *生命周期管理* CLI。
-> 它管「启停 / 状态 / 健康检查 / DNS 防护 / 配置切换」，**它不装 mihomo、
-> 不改具体规则、不改订阅** —— 这些去 mihomo 配置文件里改。
+> 它管「启停 / 状态 / 健康检查 / DNS 防护 / 配置切换」，**不装 mihomo、
+> 不改规则、不改订阅** —— 这些去引擎自己的配置文件里改。
+>
+> 本文档由 `proxyctl agent-guide` 在运行时输出，含当前 backend/路径/端口。
+> 仓库视角（开发/贡献协议）见仓库根 `AGENTS.md`。
 
-## 能做什么
+## Agent 第一次接入：6 步引导路径
 
-- `start / stop / restart / restart-clean`：启停代理引擎（mihomo / sing-box）
-- `status / check / trace / bench / audit`：诊断（status/check/trace 已读，audit 可写）
-- `fix / recover`：修复 DNS / 代理；切网后软恢复
-- `mode tun|proxy`：切换流量入站方式（写 mihomo 配置）
-- `engine mihomo|singbox`：切换后端实现
-- `daemon <name> <subcmd>`：管理额外 daemon（如 claude-proxy）
-- `dns-lock / dns-unlock`：DNS 看门狗（对抗 DHCP / VPN 覆盖）
-- `env`：输出代理环境变量
-- `plugins`：列已加载插件
+```
+Step 1  proxyctl agent-guide              # 你正在看
+Step 2  proxyctl --version --json         # 检查 schema_version=2 + supported_features
+Step 3  proxyctl commands --json          # 全部命令元数据（机读）
+Step 3' proxyctl commands --schema        # 上面 JSON 的 JSON Schema（验证用）
+Step 4  PROXYCTL_AGENT=1 proxyctl ...     # 一键 JSON + 关色 + 非交互
+Step 5  proxyctl doctor --json            # 当前健康基线
+Step 6  proxyctl explain <topic>          # 深入概念（topic 见下）
+```
+
+调用任何写命令前先加 `--dry-run --json` 看 `data.plan`，确认无误再去掉。
+
+## 能做什么（按副作用三分类）
+
+| 类别 | sudo | 命令 |
+|---|---|---|
+| **只读** (side_effects=[]) | 否 | `status doctor check trace bench audit env log plugins explain agent-guide commands config path|get help version` |
+| **只读 + 网络 IO** (network-io) | 否 | `check trace bench recover`（curl/HTTP，不改本地状态） |
+| **写 proxyctl 自身配置** | 否 | `config set <key> <value>`（原子写 + .bak + YAML 校验） |
+| **写引擎配置** (config-write) | 是 | `mode tun|proxy` `audit apply` |
+| **写系统 + 进程** | 是 | `start stop restart restart-clean fix engine daemon dns-lock dns-unlock` |
+
+完整精确表见 `proxyctl commands --json` 的 `side_effects` 与 `conditional_side_effects` 字段。
 
 ## 不能做什么（去别处改）
 
 - 添加 / 修改 / 删除分流规则 → 编辑 `{mcfg}` 的 `rules:` 段
 - 添加节点 / 改订阅 → 编辑 `{mcfg}` 的 `proxies:` / `proxy-providers:` 段
-- 安装 mihomo / sing-box → 用 `brew install mihomo` 等
-- 改全局系统 DNS 之外的网络栈 → 不在范围
+- 触发订阅刷新 → mihomo `proxy-providers.interval` 自动 / Clash API 手动；
+  proxyctl **不管订阅更新**（见 `proxyctl explain subscription`）
+- 安装 mihomo / sing-box → `brew install mihomo` 等
+- 重启第三方应用 → 浏览器 / Slack / VSCode 需用户自己重启读 system proxy
 
 ## 概念地图（"想改 X 去哪"）
 
@@ -433,21 +564,22 @@ def _build_agent_guide(backend, config) -> str:
 |---|---|---|
 | 分流规则 | `{mcfg}` | `rules:` |
 | 节点 / 出口线路 | `{mcfg}` | `proxies:` / `proxy-providers:` / `proxy-groups:` |
-| 代理引擎自身的 DNS / fakeip | `{mcfg}` | `dns:` |
+| 引擎自身的 DNS / fakeip | `{mcfg}` | `dns:` |
 | proxyctl 自己（API token / 端口 / 企业 DNS） | `{pcfg}` | 顶层 |
-| 系统 DNS 行为 | (运行时由 proxyctl 管) | 用 `proxyctl fix` / `dns-lock` |
+| 系统 DNS 行为 | (运行时由 proxyctl 管) | `proxyctl fix` / `dns-lock` |
 
-更多：`proxyctl explain <topic>`，topic 有
-{', '.join(sorted(TOPICS.keys()))}。
+更多：`proxyctl explain <topic>`，topic：
+{topics_list}
 
-## 关键路径
+## 关键路径（当前 backend = {backend.name}）
 
 - proxyctl 配置: `{pcfg}`
-- mihomo / sing-box 配置: `{mcfg}`
+- 引擎配置: `{mcfg}`
 - 引擎缓存: `{cache}`
 - 引擎日志: `{log}`
 - 代理端口: HTTP/SOCKS = `{port}`，Clash API = `9090`
 - 用户插件目录: `~/.config/proxyctl/plugins/*.py`
+- 锁文件目录: `{lock_dir}/.lock.{{system|config|daemon}}`
 
 ## 退出码
 
@@ -455,142 +587,205 @@ def _build_agent_guide(backend, config) -> str:
 {exit_lines}
 ```
 
-旧路径仍返回 1。新增子命令与新错误路径使用分语义码。
+旧路径仍返回 1（GENERIC）。新错误路径使用分语义码。SIGINT → 130。
+
+## JSON envelope（schema v2）
+
+```json
+{{
+  "schema_version": 2,
+  "cmd":            "status",
+  "ok":             true,
+  "data":           {{ ... }},
+  "error":          null,
+  "code":           0,
+  "hints":          [],
+  "warnings":       [],
+  "doc":            null,
+  "meta": {{
+    "ts":               "2026-05-17T08:00:00Z",
+    "elapsed_ms":       12,
+    "proxyctl_version": "0.3.0",
+    "request_id":       "abc..."
+  }}
+}}
+```
+
+### envelope 字段含义表
+
+| 字段 | 类型 | 何时填 | Agent 应如何处理 |
+|---|---|---|---|
+| `schema_version` | int | 总是 | `== 2` 才信任后续字段；不等就让用户升级 |
+| `cmd` | str | 总是（discovery 时为空串） | 用于日志关联 |
+| `ok` | bool | 总是 | 主判定 |
+| `data` | obj/null | 通常 ok=true 时 | 命令载荷；schema 见 `commands --schema` |
+| `error` | str/null | ok=false 时 | 人类可读错误（i18n by locale） |
+| `code` | int | 总是 | 分语义退出码，见上表 |
+| `hints` | list[str] | 失败/discovery 时 | **可执行的下一步命令**（不是描述） |
+| `warnings` | list[str] | 任意 | 非致命警告 |
+| `doc` | str/null | 失败时常填 | explain topic 名；`proxyctl explain <doc>` |
+| `meta.ts` | ISO8601 str | 总是 | 用于日志/审计时间戳 |
+| `meta.elapsed_ms` | int/null | 总是 | 端到端耗时（不含 fork） |
+| `meta.proxyctl_version` | str | 总是 | 服务端版本（agent 兼容性判断） |
+| `meta.request_id` | uuid hex str | 总是 | 一次调用内多条 envelope/NDJSON 共享 |
+
+NDJSON 流式：`bench --json` 每节点一行 JSON + 末尾 envelope summary；
+`log --json` 每行一个 `{{file, line}}` 对象（非 envelope）。
 
 ## 故障决策树（给 Agent 自动化）
 
-1. `proxyctl doctor --json`  ← 最快，5 项布尔 + score
+1. `proxyctl doctor --json`  ← 最快，5 项布尔 + score（+ engine/mode/lock_path 信息字段）
 2. 如果 `engine_up=false` → `proxyctl start`
 3. 如果 `port_listen=false`（引擎已启动但没监听）→ `proxyctl restart`
 4. 如果 `dns_ok=false` → `proxyctl fix`
 5. 如果 `system_proxy_ok=false` 且当前 mode=proxy → `proxyctl fix`
 6. 如果 `connectivity_ok=false` 而前 4 项都 OK → `proxyctl trace google.com`
 7. 切网后 → `proxyctl recover`（不重启进程）
+8. 拿不到锁（exit=8 LOCKED）→ 见下方"锁文件位置 + 手动释放"
 
 ## non-interactive 承诺
 
 proxyctl 在 stdin 非 TTY 时**不会**调用 `input()` 等阻塞读取。
-你可以放心从 Agent 沙箱里调用，不会被任何 prompt 卡住。
+设置 `PROXYCTL_AGENT=1` 等价同时打开 `--json + --no-color + 非交互`，
+所有命令默认输出 envelope v2，写操作摘要打到 stderr。
 
-设置 `PROXYCTL_AGENT=1` 等价同时打开：
+## 锁文件位置 + 手动释放
 
-- `--json`：所有命令默认输出 envelope JSON（schema_version=1）
-- `--no-color`：关闭 ANSI
-- 写操作摘要打到 stderr 便于追踪
+写操作（mode/engine/fix/audit apply/config set/daemon/dns-lock 等）通过
+`fcntl.flock` 保护，并发冲突返回 `LOCKED(8)`。
 
-## JSON envelope（schema v1）
-
-```json
-{{
-  "schema_version": 1,
-  "cmd": "status",
-  "ok": true,
-  "data": {{ ... }},
-  "error": null,
-  "code": 0,
-  "hint": null,
-  "doc": null
-}}
+```
+锁文件位置：{lock_dir}/.lock.{{system,config,daemon}}
+诊断：lsof <锁文件>                # 看谁持有
+     ps -p <PID>                  # 验证是否为活的 proxyctl
+释放：（极端情况）rm <锁文件>      # 仅当 lsof 显示无持有者
 ```
 
-失败时 `ok:false / data:null / error/code/hint 填充`，envelope 写 stdout。
-人类可读错误同步写 stderr。
-
-## 支持 --json 的命令（schema v1）
-
-`status`, `doctor`, `explain`, `agent-guide`, `commands`, `config`, `plugins`,
-`log`（JSON Lines）。
-
-`check / trace / audit / bench` 在 v0.2 仍是人类输出，--json 计划在后续版本接入。
+LOCKED 错误的 `hints` 列表已包含具体锁路径。
 
 ## footgun（提醒）
 
-- `mode tun`：开启 TUN 模式需要 sudo（macOS launchd 已自动处理）
-- `audit apply`：会写入 mihomo 配置的 rules 段，建议先 `proxyctl audit` 看建议
-- `engine <other>`：切换后端会切换 launchd plist，需 sudo
-- 写操作会获取 `~/.config/proxyctl/.lock.*` 文件锁；并发调用另一个会立刻失败（exit 8）
+- `mode tun` 需要 sudo；macOS launchd 已自动 sudo prompt
+- `audit apply` 会写引擎 `rules:` 段；建议先 `proxyctl audit apply --dry-run`
+- `engine <other>` 切换会替换 launchd plist 并重启 daemon，sudo 必需
+- 多实例：默认 `proxy_port=7890` 冲突；第二实例改 `~/.config/proxyctl/config.yaml` 的 `proxy_port`
+- 节点订阅由 mihomo `proxy-providers` 自管；proxyctl 不会刷新订阅
+- `--quiet` 仅压制非关键 stderr；envelope / error 仍输出
 
 ## 自发现
 
-- `proxyctl commands --json`：所有命令的元数据（`side_effects` / `needs_sudo` / `interactive` / `supports_json` / `exit_codes` / `examples`）
-- `proxyctl explain <topic>`：每个概念的详细卡片
-- `proxyctl --help`：人类速查
+- `proxyctl --version --json` — schema_version + supported_features 探测
+- `proxyctl commands --json` — 全部命令元数据
+- `proxyctl commands --schema` — 上面 JSON 的 JSON Schema
+- `proxyctl explain` 速查 / `proxyctl explain <topic>` 卡片
+- `proxyctl help <cmd>` — 单命令完整说明
+- `proxyctl doctor --json` — 健康基线
+
+## 仓库视角
+
+如果你正在编辑 proxyctl 源码（而非调用安装好的 CLI），仓库根的
+`AGENTS.md` 含开发约定（DISPATCH 注册 / 错误路径 / 锁 / 提交规范）。
 """
 
 
 # ── 主入口 3: commands ────────────────────────────────────────────────────
 
-# 命令元数据表（与 cli.main() 的 if-elif 分发一一对应）
+# side_effects 枚举（与 PR-5 引入；agent 用以稳定解析"这条命令会改什么"）
+# 字段语义：
+#   process       启停 daemon / 引擎
+#   system        改系统 DNS / proxy / 路由表（macOS networksetup / scutil 等）
+#   config-write  写 proxyctl 或引擎配置文件（含 launchd plist）
+#   cache         清 DNS / fakeip 缓存
+#   network-io    主动向上游 API / 互联网发起非只读 HTTP 请求
+SIDE_EFFECT_ENUM: tuple[str, ...] = (
+    "process", "system", "config-write", "cache", "network-io",
+)
+
+
+# 命令元数据表（与 cli.DISPATCH 一一对应）
 COMMANDS_META: list[dict] = [
     # lifecycle
     {"name": "start", "group": "lifecycle", "summary": "启动引擎 + 注入 DNS/代理",
-     "args": [], "supports_json": False, "side_effects": "process+system",
+     "args": [], "supports_json": False,
+     "side_effects": ["process", "system"],
      "needs_sudo": True, "interactive": False,
-     "exit_codes": [0, 1], "examples": ["proxyctl start"]},
+     "exit_codes": [0, 1, 5], "examples": ["proxyctl start"]},
     {"name": "stop", "group": "lifecycle", "summary": "停止引擎 + 还原系统配置",
-     "args": [], "supports_json": False, "side_effects": "process+system",
+     "args": [], "supports_json": False,
+     "side_effects": ["process", "system"],
      "needs_sudo": True, "interactive": False,
      "exit_codes": [0, 1], "examples": ["proxyctl stop"]},
     {"name": "restart", "group": "lifecycle", "summary": "重启引擎",
-     "args": [], "supports_json": False, "side_effects": "process+system",
+     "args": [], "supports_json": False,
+     "side_effects": ["process", "system"],
      "needs_sudo": True, "interactive": False, "exit_codes": [0, 1],
      "examples": ["proxyctl restart"]},
     {"name": "restart-clean", "group": "lifecycle", "summary": "重启并清除缓存",
-     "args": [], "supports_json": False, "side_effects": "process+system+cache",
+     "args": [], "supports_json": False,
+     "side_effects": ["process", "system", "cache"],
      "needs_sudo": True, "interactive": False, "exit_codes": [0, 1],
      "examples": ["proxyctl restart-clean"]},
     # diagnostic
     {"name": "status", "group": "diagnostic", "summary": "系统状态面板",
-     "args": [], "supports_json": True, "side_effects": "none",
+     "args": [], "supports_json": True, "side_effects": [],
      "needs_sudo": False, "interactive": False, "exit_codes": [0, 5],
      "examples": ["proxyctl status", "proxyctl status --json"]},
     {"name": "doctor", "group": "diagnostic", "summary": "极简 5 项健康打分（最快）",
-     "args": [], "supports_json": True, "side_effects": "none",
+     "args": [], "supports_json": True, "side_effects": [],
      "needs_sudo": False, "interactive": False, "exit_codes": [0, 5],
      "examples": ["proxyctl doctor", "proxyctl doctor --json"]},
     {"name": "check", "group": "diagnostic", "summary": "全面健康检查（4 阶段）",
-     "args": [], "supports_json": True, "side_effects": "none",
-     "needs_sudo": False, "interactive": False, "exit_codes": [0, 1, 5],
+     "args": [], "supports_json": True, "side_effects": ["network-io"],
+     "needs_sudo": False, "interactive": False, "exit_codes": [0, 1, 5, 7],
      "examples": ["proxyctl check", "proxyctl check --json"]},
     {"name": "trace", "group": "diagnostic", "summary": "域名链路诊断",
      "args": [{"name": "domain", "required": True}],
-     "supports_json": True, "side_effects": "none",
+     "supports_json": True, "side_effects": ["network-io"],
      "needs_sudo": False, "interactive": False, "exit_codes": [0, 1, 2],
      "examples": ["proxyctl trace github.com",
                   "proxyctl trace github.com --json"]},
     {"name": "audit", "group": "diagnostic",
      "summary": "扫描日志找疑似应直连域名；apply 子命令会写 rules 段",
      "args": [{"name": "days_or_apply", "required": False}],
-     "supports_json": True, "side_effects": "config-write (only with apply)",
-     "needs_sudo": False, "interactive": False, "exit_codes": [0, 1],
+     "supports_json": True,
+     "side_effects": [],
+     "conditional_side_effects": {"apply": ["config-write"]},
+     "supports_dry_run": True,
+     "needs_sudo": False, "interactive": False, "exit_codes": [0, 1, 2, 8],
      "examples": ["proxyctl audit 7", "proxyctl audit apply 7",
+                  "proxyctl audit apply --dry-run",
                   "proxyctl audit --json 7"]},
     {"name": "bench", "group": "diagnostic",
      "summary": "代理组测速（--json 为 NDJSON 流式 + summary envelope）",
      "args": [{"name": "groups", "required": False, "variadic": True}],
-     "supports_json": True, "side_effects": "none",
+     "supports_json": True, "side_effects": ["network-io"],
      "needs_sudo": False, "interactive": False, "exit_codes": [0, 1, 3, 7],
      "examples": ["proxyctl bench", "proxyctl bench proxy",
                   "proxyctl bench --json proxy"]},
     # config & mode
     {"name": "mode", "group": "config", "summary": "切换 tun / proxy 模式",
      "args": [{"name": "target", "choices": ["tun", "proxy"], "required": False}],
-     "supports_json": False, "side_effects": "config-write",
+     "supports_json": False, "side_effects": ["config-write"],
+     "supports_dry_run": True,
      "needs_sudo": True, "interactive": False,
-     "exit_codes": [0, 1, 2, 4, 6, 8], "examples": ["proxyctl mode tun"]},
+     "exit_codes": [0, 1, 2, 4, 6, 8],
+     "examples": ["proxyctl mode tun", "proxyctl mode tun --dry-run"]},
     {"name": "engine", "group": "config", "summary": "切换代理引擎后端",
      "args": [{"name": "target", "choices": ["mihomo", "singbox"], "required": False}],
-     "supports_json": False, "side_effects": "config-write+process",
+     "supports_json": False, "side_effects": ["config-write", "process"],
+     "supports_dry_run": True,
      "needs_sudo": True, "interactive": False,
-     "exit_codes": [0, 1, 2, 4, 8], "examples": ["proxyctl engine mihomo"]},
+     "exit_codes": [0, 1, 2, 3, 4, 5, 8],
+     "examples": ["proxyctl engine mihomo", "proxyctl engine singbox --dry-run"]},
     {"name": "fix", "group": "maintenance", "summary": "修复 DNS / 代理 / 热重载",
-     "args": [], "supports_json": False, "side_effects": "system",
+     "args": [], "supports_json": False, "side_effects": ["system", "cache"],
+     "supports_dry_run": True,
      "needs_sudo": True, "interactive": False, "exit_codes": [0, 1, 5, 8],
-     "examples": ["proxyctl fix"]},
+     "examples": ["proxyctl fix", "proxyctl fix --dry-run"]},
     {"name": "recover", "group": "maintenance",
      "summary": "切网后软恢复（清 DNS 缓存 + 重测代理组，不重启）",
-     "args": [], "supports_json": False, "side_effects": "none",
-     "needs_sudo": False, "interactive": False, "exit_codes": [0, 1, 2, 5],
+     "args": [], "supports_json": False, "side_effects": ["cache", "network-io"],
+     "needs_sudo": False, "interactive": False, "exit_codes": [0, 1, 2, 5, 7],
      "examples": ["proxyctl recover"]},
     # daemon / dns-lock
     {"name": "daemon", "group": "daemon",
@@ -598,37 +793,57 @@ COMMANDS_META: list[dict] = [
      "args": [{"name": "name", "required": False},
               {"name": "subcmd", "required": False,
                "choices": ["start", "stop", "restart", "status", "log"]}],
-     "supports_json": False, "side_effects": "process",
+     "supports_json": False,
+     "side_effects": [],
+     "conditional_side_effects": {
+         "start":   ["process"],
+         "stop":    ["process"],
+         "restart": ["process"],
+     },
+     "supports_dry_run": True,
      "needs_sudo": True, "interactive": False,
-     "exit_codes": [0, 1, 3, 4, 8],
-     "examples": ["proxyctl daemon", "proxyctl daemon claude-proxy status"]},
+     "exit_codes": [0, 1, 2, 3, 4, 6, 8],
+     "examples": ["proxyctl daemon", "proxyctl daemon claude-proxy status",
+                  "proxyctl daemon claude-proxy start --dry-run"]},
     {"name": "claude-proxy", "group": "daemon",
      "summary": "daemon claude-proxy 的别名（向后兼容）",
      "args": [{"name": "subcmd", "required": False}],
-     "supports_json": False, "side_effects": "process",
+     "supports_json": False,
+     "side_effects": [],
+     "conditional_side_effects": {
+         "start":   ["process"],
+         "stop":    ["process"],
+         "restart": ["process"],
+     },
+     "supports_dry_run": True,
      "needs_sudo": True, "interactive": False,
      "exit_codes": [0, 1, 3, 4, 8],
-     "examples": ["proxyctl claude-proxy status"]},
+     "examples": ["proxyctl claude-proxy status",
+                  "proxyctl claude-proxy start --dry-run"]},
     {"name": "dns-lock", "group": "daemon", "summary": "启动 DNS 看门狗",
-     "args": [], "supports_json": False, "side_effects": "process",
-     "needs_sudo": True, "interactive": False, "exit_codes": [0, 1, 4],
-     "examples": ["proxyctl dns-lock", "proxyctl dns-lock --reload"]},
+     "args": [], "supports_json": False,
+     "side_effects": ["process", "config-write"],
+     "supports_dry_run": True,
+     "needs_sudo": True, "interactive": False, "exit_codes": [0, 1, 4, 10],
+     "examples": ["proxyctl dns-lock", "proxyctl dns-lock --reload",
+                  "proxyctl dns-lock --dry-run"]},
     {"name": "dns-unlock", "group": "daemon", "summary": "停止 DNS 看门狗",
-     "args": [], "supports_json": False, "side_effects": "process",
+     "args": [], "supports_json": False, "side_effects": ["process"],
+     "supports_dry_run": True,
      "needs_sudo": True, "interactive": False, "exit_codes": [0, 1],
-     "examples": ["proxyctl dns-unlock"]},
+     "examples": ["proxyctl dns-unlock", "proxyctl dns-unlock --dry-run"]},
     # tools / agent
     {"name": "env", "group": "tool", "summary": "输出代理环境变量（可 eval）",
-     "args": [], "supports_json": False, "side_effects": "none",
+     "args": [], "supports_json": False, "side_effects": [],
      "needs_sudo": False, "interactive": False, "exit_codes": [0],
      "examples": ["proxyctl env", "proxyctl env --unset"]},
     {"name": "log", "group": "tool",
      "summary": "查看后端日志：默认 tail -f；支持 --tail N / --no-follow / --json",
-     "args": [], "supports_json": True, "side_effects": "none",
-     "needs_sudo": False, "interactive": False, "exit_codes": [0, 3],
+     "args": [], "supports_json": True, "side_effects": [],
+     "needs_sudo": False, "interactive": False, "exit_codes": [0, 2, 3],
      "examples": ["proxyctl log", "proxyctl log --tail 50 --no-follow"]},
     {"name": "plugins", "group": "tool", "summary": "显示已加载插件",
-     "args": [], "supports_json": True, "side_effects": "none",
+     "args": [], "supports_json": True, "side_effects": [],
      "needs_sudo": False, "interactive": False, "exit_codes": [0],
      "examples": ["proxyctl plugins", "proxyctl plugins --json"]},
     # agent-only
@@ -636,24 +851,26 @@ COMMANDS_META: list[dict] = [
      "summary": "解释 topic：rules / nodes / config / dns / engine / 等",
      "args": [{"name": "topic", "required": False,
                "choices": sorted(TOPICS.keys())}],
-     "supports_json": True, "side_effects": "none",
+     "supports_json": True, "side_effects": [],
      "needs_sudo": False, "interactive": False, "exit_codes": [0, 2],
      "examples": ["proxyctl explain", "proxyctl explain rules --json"]},
     {"name": "agent-guide", "group": "agent",
      "summary": "给 LLM Agent 的入门 markdown（含能力边界、退出码、决策树）",
-     "args": [], "supports_json": True, "side_effects": "none",
+     "args": [], "supports_json": True, "side_effects": [],
      "needs_sudo": False, "interactive": False, "exit_codes": [0],
      "examples": ["proxyctl agent-guide", "proxyctl agent-guide --json"]},
     {"name": "commands", "group": "agent",
-     "summary": "所有命令的元数据（含 side_effects / needs_sudo / exit_codes）",
-     "args": [], "supports_json": True, "side_effects": "none",
+     "summary": "所有命令的元数据（含 side_effects / needs_sudo / exit_codes）；"
+                "--schema 输出 JSON Schema",
+     "args": [], "supports_json": True, "side_effects": [],
      "needs_sudo": False, "interactive": False, "exit_codes": [0],
-     "examples": ["proxyctl commands --json"]},
+     "examples": ["proxyctl commands --json",
+                  "proxyctl commands --schema"]},
     {"name": "completion", "group": "agent",
      "summary": "生成 shell 补全脚本（bash / zsh / fish）",
      "args": [{"name": "shell", "choices": ["bash", "zsh", "fish"],
                "required": True}],
-     "supports_json": True, "side_effects": "none",
+     "supports_json": True, "side_effects": [],
      "needs_sudo": False, "interactive": False, "exit_codes": [0, 2],
      "examples": ['eval "$(proxyctl completion zsh)"',
                   "proxyctl completion bash > ~/.proxyctl.bash"]},
@@ -663,19 +880,90 @@ COMMANDS_META: list[dict] = [
               {"name": "key", "required": False},
               {"name": "value", "required": False}],
      "supports_json": True,
-     "side_effects": "config-write (set only; 原子写 + .bak 备份 + YAML 校验)",
+     "side_effects": [],
+     "conditional_side_effects": {"set": ["config-write"]},
+     "supports_dry_run": True,
      "needs_sudo": False, "interactive": False, "exit_codes": [0, 2, 3, 4, 6],
      "examples": ["proxyctl config path",
                   "proxyctl config get proxy_port",
                   "proxyctl config set proxy_port 7891",
+                  "proxyctl config set proxy_port 7891 --dry-run",
                   "proxyctl config set no_proxy_extra '[\"corp.example.com\"]'"]},
+    {"name": "help", "group": "agent",
+     "summary": "顶层帮助 / 单命令帮助（等价 --help / <cmd> --help）",
+     "args": [{"name": "command", "required": False}],
+     "supports_json": False, "side_effects": [],
+     "needs_sudo": False, "interactive": False, "exit_codes": [0, 2],
+     "examples": ["proxyctl help", "proxyctl help mode",
+                  "proxyctl mode --help"]},
 ]
 
 
+_COMMANDS_DATA_SCHEMA: dict = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "proxyctl commands --json data schema (v0.3.0)",
+    "type": "object",
+    "required": ["schema_version", "version", "commands"],
+    "properties": {
+        "schema_version": {"const": _io.SCHEMA_VERSION},
+        "version": {"type": "string"},
+        "commands": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["name", "group", "summary", "supports_json",
+                             "side_effects", "needs_sudo", "interactive",
+                             "exit_codes", "examples"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "group": {"enum": ["lifecycle", "diagnostic", "config",
+                                       "maintenance", "daemon", "tool",
+                                       "agent"]},
+                    "summary": {"type": "string"},
+                    "supports_json": {"type": "boolean"},
+                    "supports_dry_run": {"type": "boolean"},
+                    "needs_sudo": {"type": "boolean"},
+                    "interactive": {"type": "boolean"},
+                    "side_effects": {
+                        "type": "array",
+                        "items": {"enum": list(SIDE_EFFECT_ENUM)},
+                    },
+                    "conditional_side_effects": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "array",
+                            "items": {"enum": list(SIDE_EFFECT_ENUM)},
+                        },
+                    },
+                    "exit_codes": {"type": "array",
+                                    "items": {"type": "integer", "minimum": 0}},
+                    "args": {"type": "array"},
+                    "examples": {"type": "array",
+                                  "items": {"type": "string"}},
+                },
+            },
+        },
+    },
+}
+
+
 def cmd_commands(args: list, backend, config) -> None:
-    """proxyctl commands [--json]"""
+    """proxyctl commands [--json] [--schema]
+
+    --schema 输出 commands --json 的 JSON Schema (Draft 2020-12)。
+    """
     from proxyctl.cli import VERSION
     as_json = GLOBAL_FLAGS_REF().get("json", False)
+
+    # --schema 子模式：输出 data 的 schema 而不是 data 本身
+    if args and args[0] == "--schema":
+        if as_json:
+            emit_json(envelope("commands", data=_COMMANDS_DATA_SCHEMA))
+            return
+        print(json.dumps(_COMMANDS_DATA_SCHEMA,
+                         ensure_ascii=False, indent=2))
+        return
+
     payload = {
         "schema_version": _io.SCHEMA_VERSION,
         "version": VERSION,
@@ -694,7 +982,14 @@ def cmd_commands(args: list, backend, config) -> None:
             flags = []
             if c["supports_json"]: flags.append("--json")
             if c["needs_sudo"]:    flags.append("sudo")
-            if c["side_effects"] != "none": flags.append(c["side_effects"])
+            se = c.get("side_effects")
+            if isinstance(se, list) and se:
+                flags.append("+".join(se))
+            elif isinstance(se, str) and se and se != "none":
+                flags.append(se)
+            cse = c.get("conditional_side_effects") or {}
+            for trigger, effects in cse.items():
+                flags.append(f"[{trigger}]={'+'.join(effects)}")
             tag = f"  [{', '.join(flags)}]" if flags else ""
             print(f"  {CYAN}{c['name']:<14}{NC} {c['summary']}{DIM}{tag}{NC}")
         print()
@@ -899,11 +1194,15 @@ def _resolve_dot_key(d: dict, key: str):
 # ── 主入口 5: doctor ──────────────────────────────────────────────────────
 
 def cmd_doctor(args: list, backend, config) -> None:
-    """proxyctl doctor [--json] — 极简健康打分。"""
+    """proxyctl doctor [--json] — 极简健康打分。
+
+    v0.3.0：score 仍只数核心 5 项布尔；新增 informational 字段（不计分）：
+      engine, mode, config_path, lock_held, lock_path
+    """
     as_json = GLOBAL_FLAGS_REF().get("json", False)
 
     # 从 cli.py 复用 service_running，但为避免循环 import 在这里独立判断
-    from proxyctl.cli import service_running
+    from proxyctl.cli import service_running, get_mode
     port = config.get("proxy_port", 7890)
     api_base = config.get("api_base", "http://127.0.0.1:9090")
 
@@ -922,7 +1221,30 @@ def cmd_doctor(args: list, backend, config) -> None:
     }
     score = sum(1 for v in flags.values() if v)
     hint = _doctor_hint(flags)
-    data = {**flags, "score": score, "max": len(flags), "hint": hint}
+
+    # informational extra（不计分）
+    try:
+        mode_str = get_mode(backend)
+    except Exception:
+        mode_str = "unknown"
+    try:
+        held = _io.held_lock_names()
+    except Exception:
+        held = []
+    lock_path_map = _io.lock_paths()
+
+    data = {
+        **flags,
+        "score": score, "max": len(flags), "hint": hint,
+        # informational fields (W15 in 0.3.0):
+        "engine": backend.name,
+        "mode": mode_str,
+        "port": port,
+        "config_path": _io_proxyctl_config_path(),
+        "engine_config_path": backend.config_file,
+        "lock_held": held,
+        "lock_path": lock_path_map,
+    }
     healthy = (score == len(flags))
     code = OK if healthy else ENGINE_DOWN
 
@@ -932,12 +1254,15 @@ def cmd_doctor(args: list, backend, config) -> None:
         sys.exit(code)
 
     icon = lambda b: f"{GREEN}✓{NC}" if b else f"{RED}✗{NC}"
-    print(f"{BOLD}proxyctl doctor{NC}  ({score}/{len(flags)})")
+    print(f"{BOLD}proxyctl doctor{NC}  ({score}/{len(flags)})  "
+          f"{DIM}engine={backend.name} mode={mode_str} port={port}{NC}")
     print(f"  {icon(engine_up)}  engine_up        ({backend.name} 服务运行中)")
     print(f"  {icon(port_listen)}  port_listen      (127.0.0.1:{port})")
     print(f"  {icon(dns_ok)}  dns_ok           (系统 DNS 含 127.0.0.1)")
     print(f"  {icon(system_proxy_ok)}  system_proxy_ok  (macOS HTTP/HTTPS proxy)")
     print(f"  {icon(connectivity_ok)}  connectivity_ok  (https://www.google.com via proxy)")
+    if held:
+        print(f"  {DIM}lock_held: {', '.join(held)}{NC}")
     if hint:
         print(f"{CYAN}next:{NC} {hint}")
     sys.exit(code)

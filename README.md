@@ -19,28 +19,25 @@ proxyctl 是一套 macOS 代理管理工具，核心价值在于提供**配置�
 
 ## For AI Agents
 
-proxyctl 对 AI Agent（Claude Code 等自动化调用方）做了一等公民支持：
+proxyctl 把 agent 友好度做成一等公民。完整接入协议见
+[AGENTS.md](AGENTS.md)（仓库视角）与 `proxyctl agent-guide`（运行时视角）。
 
 ```bash
-proxyctl agent-guide          # 给 LLM 的入门 markdown（能力边界 / 退出码 / 故障决策树）
-proxyctl explain              # "我想改 X 去哪？" 一屏速查（rules / nodes / config / ...）
-proxyctl commands --json      # 所有命令元数据：side_effects / needs_sudo / exit_codes
-proxyctl doctor --json        # 5 项极简健康打分，自动化决策入口
-
-PROXYCTL_AGENT=1 proxyctl <cmd>  # 一键开启 --json + 关色 + 非交互
-
-proxyctl completion zsh > ~/.proxyctl.zsh   # shell 补全（bash / zsh / fish）
-man proxyctl                                # man page（install.sh 已装到 user-local）
+proxyctl agent-guide                 # Agent 入门 markdown（动态注入路径/端口）
+proxyctl --version --json            # schema_version + supported_features 探测
+proxyctl commands --json             # 全部命令元数据（机读）
+proxyctl commands --schema           # 上面 JSON 的 JSON Schema
+proxyctl explain                     # "我想改 X 去哪？" 速查
+proxyctl doctor --json               # 5 项健康打分
+PROXYCTL_AGENT=1 proxyctl <cmd>      # 一键 --json + 关色 + 非交互
 ```
 
-- 所有读类命令支持 `--json`（envelope schema v1：`schema_version / cmd / ok / data / error / code / hint / doc`）
-  - `status / doctor / check / trace / audit / commands / explain / agent-guide / plugins / config / log`
-  - `bench --json` 是 NDJSON 流式（每节点一行）+ 末尾 envelope summary
-- 子命令独立 `--help`（每个 `proxyctl <cmd> --help` 都派生自命令元数据）
-- 错误信息一律带 `hint` + `doc`（指向 `proxyctl explain <topic>`）
-- 退出码分语义（`0 OK / 2 USAGE / 3 NOT_FOUND / 4 PERMISSION / 5 ENGINE_DOWN / 6 CONFIG_ERR / 7 NETWORK_ERR / 8 LOCKED`）
-- `proxyctl config set` 原子写：tmp + rename + `.bak` 备份 + YAML 校验，失败回滚
-- 写操作有文件锁；非 TTY 时自动 `NO_COLOR`；不读 stdin / 不 prompt
+- envelope schema v2：`schema_version / cmd / ok / data / error / code / hints[] / warnings[] / doc / meta{{ts,elapsed_ms,proxyctl_version,request_id}}`
+- 退出码分语义：`0 OK / 2 USAGE / 3 NOT_FOUND / 4 PERMISSION / 5 ENGINE_DOWN / 6 CONFIG_ERR / 7 NETWORK_ERR / 8 LOCKED / 9 TIMEOUT / 10 DEPENDENCY_MISSING`
+- 写命令支持 `--dry-run` 输出结构化 plan；`audit/check` 支持 `--plain` TSV
+- `proxyctl help <cmd>` 与 `<cmd> --help` 同源；错误带可执行 hints + explain topic
+- 非 TTY 自动关色；不读 stdin / 不 prompt；写操作 fcntl.flock 互斥
+- 从 0.2.x 升级见 [MIGRATION-0.3.md](MIGRATION-0.3.md)
 
 ## 核心功能
 

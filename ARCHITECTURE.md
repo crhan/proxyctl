@@ -132,6 +132,9 @@ proxyctl/
 ├── install.sh                # 安装脚本
 ├── uninstall.sh              # 卸载脚本
 ├── README.md                 # 使用文档
+├── AGENTS.md                 # 仓库视角的 Agent 协作约定（编辑源码时读）
+├── LLMS.md                   # 指向 AGENTS.md 与 proxyctl agent-guide 的 stub
+├── MIGRATION-0.3.md          # 0.2.x → 0.3.0 破坏点清单与迁移指南
 └── ARCHITECTURE.md           # 本文件
 ```
 
