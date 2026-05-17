@@ -45,6 +45,9 @@ DEFAULTS = {
     "dns_lock_label": "com.proxyctl.dns-lock",
     # 引擎对外暴露的 HTTP/SOCKS mixed-port（应与 mihomo config 的 port/mixed-port 一致）
     "proxy_port": 7890,
+    # 个人附加的 NO_PROXY 项（追加到默认 localhost/私网集合之后）
+    # 例: ["corp.example.com", "intranet.local"] 或 "corp.example.com,intranet.local"
+    "no_proxy_extra": [],
 }
 
 SCRIPTS_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -1207,6 +1210,12 @@ def cmd_env(config: dict, unset: bool = False):
     proxy_http = f"http://127.0.0.1:{port}"
     proxy_socks = f"socks5://127.0.0.1:{port}"
     no_proxy = "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    # 用户附加的 NO_PROXY 项（个人域名等）；接受 list[str] 或逗号分隔 str
+    extra = config.get("no_proxy_extra") or []
+    if isinstance(extra, str):
+        extra = [s.strip() for s in extra.split(",") if s.strip()]
+    if extra:
+        no_proxy = no_proxy + "," + ",".join(extra)
 
     for var in ("http_proxy", "HTTP_PROXY"):
         print(f"export {var}={proxy_http};")
@@ -1220,7 +1229,7 @@ def cmd_env(config: dict, unset: bool = False):
 
 # ── 帮助 ──────────────────────────────────────────────────────────────────────
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 
 def cmd_help(verbose: bool = False):
     """打印帮助信息

@@ -5,6 +5,23 @@
 
 ## [Unreleased]
 
+## [0.1.5] — 2026-05-17
+
+### Added
+- `no_proxy_extra` 配置项（默认 `[]`），让用户在 `proxyctl env` 输出的
+  `NO_PROXY` 末尾追加个人项（公司域名、Tailscale CGNAT 段 `100.64.0.0/10`
+  和 MagicDNS `.ts.net` 后缀、本地服务等）。接受 `list[str]` 或逗号分隔
+  字符串两种写法。
+- `config.yaml.example` 补 `proxy_port` 与 `no_proxy_extra` 注释样例。
+
+### Notes
+- 之前 `cmd_env` 写死 `localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,
+  192.168.0.0/16`，用户没法在不分叉源码的情况下加自己的 NO_PROXY 项；
+  本次保留默认集合，仅新增"追加"语义，向后完全兼容。
+- 推荐 shell rc 中 `proxy()` 改成 `eval "$(proxyctl env)"`，端口与
+  NO_PROXY 一并跟着 `~/.config/proxyctl/config.yaml` 走，rc 自身不再
+  硬编码端口或域名（保持仓库公开 / 个性化留本地的原则）。
+
 ## [0.1.4] — 2026-05-17
 
 ### Added
@@ -106,7 +123,8 @@
 - `cli.main()` 处理 `--help/-h/help` 后未 return，导致继续落入默认 else 分支
   二次调用 `cmd_help()`，help 输出重复两次。
 
-[Unreleased]: https://github.com/crhan/proxyctl/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/crhan/proxyctl/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/crhan/proxyctl/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/crhan/proxyctl/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/crhan/proxyctl/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/crhan/proxyctl/compare/v0.1.1...v0.1.2
