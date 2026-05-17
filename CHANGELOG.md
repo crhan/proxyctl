@@ -5,6 +5,32 @@
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-05-17
+
+### Added
+- `proxy_port` 配置项（默认 `7890`），让引擎对外的 HTTP/SOCKS mixed-port
+  在 status/check/env/wait 等所有命令中可配置；之前的 `7890` / `9090` 硬编码
+  在 `cli.py` `status.py` `check.py` 多处散落，导致同机起第二个 mihomo 实例
+  （例如 Docker 已占 7890，本地用 proxyctl 起到 7892）时，所有命令仍按
+  老端口读 / 测，对新实例完全 "看不见"。
+
+### Changed
+- `cmd_status` 的端口列表改为 `(config.proxy_port, "proxy")` +
+  `urlparse(api_base).port`，不再写死。
+- `cmd_check` 第 1/4 阶段端口检测同上；第 3/4 阶段
+  （连通性 / 出口 IP）的 `socks5h://127.0.0.1:7890` 改用 `proxy_port`，
+  通过 `_test_url` / `_ipgeo` / `_fetch_probe` 的新 `proxy_port` 参数透传。
+- `cmd_env` / `_wait_ready` 的 7890 改用 `config.proxy_port`。
+- `_gather_ports(claude_proxy_label, port_list=None)` 加可选参数，
+  `None` 时回退到 `[(7890,"proxy"),(9090,"api")]` 保持旧调用兼容。
+
+### Notes
+- 默认值仍为 7890 / 9090，所有现有用户行为完全不变；只在
+  `~/.config/proxyctl/config.yaml` 加 `proxy_port:` 字段后才切换。
+- 代理组名（中文 / 自定义）依然由用户插件 `check_groups()` 声明，
+  与 `core/plugin.py` 顶部 "core 不感知任何具体业务" 原则一致——
+  本次特意没有在 core 加 "自动取所有顶层组" 的 fallback。
+
 ## [0.1.3] — 2026-05-15
 
 ### Fixed
@@ -80,7 +106,8 @@
 - `cli.main()` 处理 `--help/-h/help` 后未 return，导致继续落入默认 else 分支
   二次调用 `cmd_help()`，help 输出重复两次。
 
-[Unreleased]: https://github.com/crhan/proxyctl/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/crhan/proxyctl/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/crhan/proxyctl/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/crhan/proxyctl/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/crhan/proxyctl/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/crhan/proxyctl/compare/v0.1.0...v0.1.1
