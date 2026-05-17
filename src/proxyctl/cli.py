@@ -1108,7 +1108,9 @@ def cmd_daemon(name: str, subcmd: str, config: dict):
                  doc="extra-daemons", code=_io.CONFIG_ERR, cmd="daemon")
 
     # plist 路径与 launchctl label 由共享 helper 派生，与 _plan_daemon 同源
-    plist_src, plist_dst, full_label = _resolve_daemon_paths(name, config)
+    paths = _resolve_daemon_paths(name, config)
+    assert paths is not None  # 上面 d_cfg/label 检查已确保
+    plist_src, plist_dst, full_label = paths
 
     subcmd = subcmd or "status"
     valid_subcmds = ("start", "stop", "restart", "log", "status")
@@ -1730,7 +1732,9 @@ def _maybe_dry_run(cmd_name: str, plan_fn) -> None:
 # 同一份逻辑，CI 层 contract test 进一步断言 plan 与实际 subprocess.run 调用
 # 完全一致，杜绝 0.3.2 那种 system/system/ 双前缀类漂移。
 
-def _resolve_daemon_paths(name: str, config: dict):
+def _resolve_daemon_paths(
+    name: str, config: dict
+) -> tuple[str, str, str] | None:
     """从 config.extra_daemons[name] 解析 (plist_src, plist_dst, full_label)。
 
     用于消除 _h_daemon lambda 中的 <plist_dst> 占位符，并保证 cmd_daemon /
@@ -1751,7 +1755,7 @@ def _resolve_daemon_paths(name: str, config: dict):
     return (plist_src, plist_dst, full_label)
 
 
-def _engine_subprocess_argvs(backend_old, plist_src: str,
+def _engine_subprocess_argvs(backend_old: Backend, plist_src: str,
                               new_plist: str, new_label: str) -> list[list[str]]:
     """返回 cmd_engine 切换引擎时 4 个 subprocess 的 argv list（不含 sudo）。
 

@@ -31,9 +31,12 @@
 - **`_plan_mode` 不再含 launchctl kickstart 步骤**：与 cmd_mode 实际行为对齐
   （cmd_mode 只改 config，由用户手动 restart 引擎生效）。**agent 原本复读
   kickstart 会误操作 → 此版本修复**。
-- **`_plan_daemon` / `_plan_audit_apply` / `_plan_dns_lock` / `_plan_dns_unlock`
-  签名扩展**：新接收 plist_src/plist_dst/full_label / backend / config 等
-  参数让 target 可派生为真实路径。仅影响私有 helper，公开 CLI 行为不变。
+- **⚠️ Breaking (private helpers only)**: `_plan_daemon` / `_plan_audit_apply` /
+  `_plan_dns_lock` / `_plan_dns_unlock` 函数签名扩展。新接收
+  plist_src/plist_dst/full_label / backend / config 等参数让 target 可派生为
+  真实路径。下划线前缀的私有 API 无稳定性承诺；公开 CLI（命令名 / envelope /
+  exit codes / schema）行为完全不变，0.3.x 终端用户可无感升级。仅影响仓库外
+  直接 `from proxyctl.cli import _plan_*` 的代码——T5 文档已声明这次绑定。
 
 ### Added — CI 防漂移
 

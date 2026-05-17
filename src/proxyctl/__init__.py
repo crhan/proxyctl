@@ -1,3 +1,8 @@
 """proxyctl — Proxy configuration lifecycle management."""
 
-__version__ = "0.3.2"
+from importlib.metadata import PackageNotFoundError, version as _v
+
+try:
+    __version__ = _v("proxyctl")
+except PackageNotFoundError:  # editable / source tree without metadata
+    __version__ = "unknown"
