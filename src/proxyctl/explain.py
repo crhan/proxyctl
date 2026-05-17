@@ -760,6 +760,28 @@ Step 6  proxyctl explain <topic>          # 深入概念（topic 见下）
 NDJSON 流式：`bench --json` 每节点一行 JSON + 末尾 envelope summary；
 `log --json` 每行一个 `{{file, line}}` 对象（非 envelope）。
 
+## Plan — `data.plan[].action` 类型枚举（dry-run 输出）
+
+写命令的 `--dry-run` 在 `data.plan` 输出 step 列表。从 v0.4.0a1 起，所有
+step.target 字符串都不再含 `<...>` 占位符，agent 可原样使用。
+
+| action | target 是什么 | agent 可怎么用 |
+|---|---|---|
+| `subprocess` | 可执行 shell 命令字符串（`target.split()` 即得 argv） | 复读 / 加 sudo 后直接跑 |
+| `system_op`  | 迭代型系统操作的描述（如 networksetup 遍历所有 service） | **不可**直接复读；理解副作用 |
+| `fs_write` / `fs_copy` / `fs_write_atomic` | 绝对路径（fs_copy 形如 `src → dst`） | 文件写入意图 |
+| `fs_remove` | 绝对路径 | 文件删除意图 |
+| `edit_yaml` | `path [section:]` | 配置就地编辑意图 |
+| `scan_log` | 日志文件绝对路径 | 日志扫描意图 |
+| `http_put` | 完整 HTTP URL | Clash API 热重载等 |
+
+`subprocess` step 的 `target` 是 dry-run 上界 —— cmd 实际执行可能跳过某些
+conditional 步骤（如 daemon-start 的 cp 在 plist 已存在时跳过）。所有 step
+也有 `requires_sudo` / `reversible` / `side_effects` / `summary` 等元信息。
+
+CI 层 contract test（`tests/integration/test_plan_exec_contract.py`）保证
+`_plan_<cmd>` 与 `cmd_<cmd>` 的 subprocess argv 永不漂移。
+
 ## Decision Tree — 故障决策树（给 Agent 自动化）
 
 1. `proxyctl doctor --json`  ← 最快，5 项布尔 + score（+ engine/mode/lock_path 信息字段）

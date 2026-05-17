@@ -5,6 +5,53 @@
 
 ## [Unreleased]
 
+## [0.4.0a1] — 2026-05-17
+
+> Plan ↔ Exec 一致性（T5）：8 个写命令的 `_plan_*` 与 `cmd_*` 共享单一 argv 事实
+> 来源，dry-run plan.target 全部真实化（无 `<...>` 占位符），agent 可原样复读
+> 当 shell 命令。CI 层引入 contract test 套件永防漂移。**首个 0.4.0 pre-release，
+> PEP 440 alpha；schema/envelope 不变，0.3.x 消费者无感升级**。
+
+### Added — Agent-facing
+
+- **plan.target 真实化**：8 个写命令的 dry-run `data.plan[].target`
+  从占位符（`<plist_dst>`、`<svc>`、`system/<dns-lock.label>` 等）替换为真实
+  绝对路径 / 完整 argv 字符串。agent 可直接 `target.split()` 当 argv 跑。
+- **新 plan action 类型 `system_op`**：用于迭代型系统操作（如 networksetup
+  遍历所有网络服务），target 为描述性字符串。`fix` / `mode` 用之。
+- **`agent-guide` 加 Plan action types 段**：枚举 `subprocess` / `system_op` /
+  `fs_write` / `fs_copy` / `fs_remove` / `edit_yaml` / `scan_log` / `http_put`
+  7 种 action 及 agent 用法。
+
+### Changed — 结构性
+
+- **`_plan_*` 与 `cmd_*` 共享 helper**：新增 5 个 `_<cmd>_subprocess_argvs` /
+  `_resolve_daemon_paths` 共享函数（`cli.py`），plan 派生与实际执行从同一份
+  argv 生成，0.3.2 那种"plan 是手写、cmd 是另一份代码"的漂移结构性消除。
+- **`_plan_mode` 不再含 launchctl kickstart 步骤**：与 cmd_mode 实际行为对齐
+  （cmd_mode 只改 config，由用户手动 restart 引擎生效）。**agent 原本复读
+  kickstart 会误操作 → 此版本修复**。
+- **`_plan_daemon` / `_plan_audit_apply` / `_plan_dns_lock` / `_plan_dns_unlock`
+  签名扩展**：新接收 plist_src/plist_dst/full_label / backend / config 等
+  参数让 target 可派生为真实路径。仅影响私有 helper，公开 CLI 行为不变。
+
+### Added — CI 防漂移
+
+- **`tests/integration/test_plan_exec_contract.py`** 11 个 contract test：
+  - 5 个白盒：真跑 `cmd_dns_unlock` / `cmd_daemon start|stop|restart` /
+    `cmd_dns_lock`（reload + first install）/ `cmd_engine`，mock subprocess
+    后断言 `actual_argvs ⊆ helper(_<cmd>_subprocess_argvs)`。
+  - 4 个静态：`_plan_*` subprocess.target 与 helper 输出严格相等 / 8 个 plan
+    target 无 `<...>` 占位符 / `_plan_audit_apply` 用 `audit.MH_LOG/SB_LOG` /
+    `_plan_mode` 不含 subprocess action。
+  - **故意漂移注入**：把 `_plan_engine` 一个 step.target 改为 wrong 字符串 →
+    `test_contract_plan_subprocess_argvs_align_with_helper` 立即 fail，错误
+    信息含 actual / expected 完整 argv 对比，定位精准。
+
+### Test stats
+
+- 总测试数 466 → 477（+11：contract test 套件）。
+
 ## [0.3.3] — 2026-05-17
 
 > 4 项 agent 体感改进 + 1 组端到端回归测试。零 breaking、零 schema 变化，

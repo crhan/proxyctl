@@ -1025,10 +1025,12 @@ def cmd_engine(backend: Backend, target: str, config: dict):
     dns_lock_stop(config)
     dns_deactivate(config)
     proxy_deactivate()
-    run(["launchctl", "bootout", backend.label], sudo=True)
-    run(["/bin/rm", "-f", backend.plist], sudo=True)
+    argvs = _engine_subprocess_argvs(backend, plist_src,
+                                     new_backend.plist, new_backend.label)
+    run(argvs[0], sudo=True)  # launchctl bootout old
+    run(argvs[1], sudo=True)  # /bin/rm -f old.plist
 
-    r = run(["/bin/cp", plist_src, new_backend.plist], sudo=True, capture=True)
+    r = run(argvs[2], sudo=True, capture=True)  # /bin/cp src new.plist
     if r.returncode != 0:
         _io.fail("部署 plist 失败",
                  hints=[r.stderr.strip()] if r.stderr else None,
@@ -1040,8 +1042,7 @@ def cmd_engine(backend: Backend, target: str, config: dict):
         f.write(target)
 
     print(f"启动 {new_backend.name} ...")
-    r = run(["launchctl", "bootstrap", "system", new_backend.plist],
-            sudo=True, capture=True)
+    r = run(argvs[3], sudo=True, capture=True)  # launchctl bootstrap new.plist
     if r.returncode != 0:
         _io.fail("启动失败",
                  hints=[r.stderr.strip()] if r.stderr else None,
@@ -1099,16 +1100,15 @@ def cmd_daemon(name: str, subcmd: str, config: dict):
                  as_json=GLOBAL_FLAGS.get("json", False))
 
     label    = d_cfg.get("label", "")
-    plist_src = os.path.expanduser(d_cfg.get("plist_src", ""))
-    log_path  = os.path.expanduser(d_cfg.get("log_path", ""))
-    port      = d_cfg.get("port")
+    log_path = os.path.expanduser(d_cfg.get("log_path", ""))
+    port     = d_cfg.get("port")
     if not label:
         _io.fail(f"daemon {name} 缺少 label 字段",
                  hint="检查 config.yaml 的 extra_daemons[<name>].label",
                  doc="extra-daemons", code=_io.CONFIG_ERR, cmd="daemon")
 
-    full_label = f"system/{label}"
-    plist_dst = f"/Library/LaunchDaemons/{label}.plist"
+    # plist 路径与 launchctl label 由共享 helper 派生，与 _plan_daemon 同源
+    plist_src, plist_dst, full_label = _resolve_daemon_paths(name, config)
 
     subcmd = subcmd or "status"
     valid_subcmds = ("start", "stop", "restart", "log", "status")
@@ -1125,15 +1125,15 @@ def cmd_daemon(name: str, subcmd: str, config: dict):
         if launchctl_running(full_label, sudo=True):
             print(f"{name} 已在运行")
             return
+        argvs = _daemon_subprocess_argvs("start", plist_src, plist_dst, full_label)
         if not os.path.isfile(plist_dst):
             if not os.path.isfile(plist_src):
                 _io.fail(f"plist 源文件不存在: {plist_src}",
                          hint="检查 extra_daemons.plist_src 配置",
                          doc="extra-daemons",
                          code=_io.NOT_FOUND, cmd="daemon")
-            run(["/bin/cp", plist_src, plist_dst], sudo=True)
-        r = run(["launchctl", "bootstrap", "system", plist_dst],
-                sudo=True, capture=True)
+            run(argvs[0], sudo=True)  # /bin/cp src dst
+        r = run(argvs[1], sudo=True, capture=True)  # launchctl bootstrap
         if r.returncode != 0:
             _io.fail(f"{name} 启动失败",
                      hints=[r.stderr.strip()] if r.stderr else None,
@@ -1147,13 +1147,15 @@ def cmd_daemon(name: str, subcmd: str, config: dict):
 
     elif subcmd == "stop":
         if launchctl_running(full_label, sudo=True):
-            run(["launchctl", "bootout", full_label], sudo=True)
+            argvs = _daemon_subprocess_argvs("stop", plist_src, plist_dst, full_label)
+            run(argvs[0], sudo=True)  # launchctl bootout
             print(f"{name} stopped")
         else:
             print(f"{name} 未在运行")
 
     elif subcmd == "restart":
-        run(["launchctl", "kickstart", "-k", full_label], sudo=True)
+        argvs = _daemon_subprocess_argvs("restart", plist_src, plist_dst, full_label)
+        run(argvs[0], sudo=True)  # launchctl kickstart -k
         print(f"{name} restarted")
 
     elif subcmd == "log":
@@ -1198,23 +1200,24 @@ def cmd_dns_lock(config: dict, backend: Backend, *, reload: bool = False):
                  hint="把 scripts/dns-watchdog 安装到该位置（或重新跑 install.sh）",
                  doc="dns", code=_io.DEPENDENCY_MISSING, cmd="dns-lock")
 
+    argvs = _dns_lock_subprocess_argvs(dns_lock_plist, full_label)
+
     # reload 时先 bootout
     if already_registered:
-        r0 = run(["launchctl", "bootout", full_label], sudo=True, capture=True)
+        r0 = run(argvs[0], sudo=True, capture=True)  # launchctl bootout
         if r0.returncode != 0:
             print(f"{YELLOW}⚠{NC} bootout 失败（继续尝试 bootstrap）: {r0.stderr.strip()}")
 
     rendered = _render_dns_lock_plist(backend, config)
     # 通过 sudo tee 写入（sudoers 允许 /usr/bin/tee <target.plist>）
-    r = run(["tee", dns_lock_plist], sudo=True, stdin_text=rendered, capture=True)
+    r = run(argvs[1], sudo=True, stdin_text=rendered, capture=True)  # tee plist
     if r.returncode != 0:
         _io.fail(
             f"写入 plist 失败: {r.stderr or '权限不足，请检查 sudoers'}",
             hint="确认 sudoers 允许 /usr/bin/tee 写 LaunchDaemons",
             doc="dns", code=_io.PERMISSION, cmd="dns-lock")
 
-    r2 = run(["launchctl", "bootstrap", "system", dns_lock_plist],
-             sudo=True, capture=True)
+    r2 = run(argvs[2], sudo=True, capture=True)  # launchctl bootstrap
     if r2.returncode != 0:
         _io.fail(f"bootstrap 失败: {r2.stderr}",
                  doc="dns", code=_io.PERMISSION, cmd="dns-lock")
@@ -1231,13 +1234,15 @@ def cmd_dns_unlock(config: dict):
         return
     dns_lock_label = config.get("dns_lock_label", DEFAULTS["dns_lock_label"])
     dns_lock_plist = f"/Library/LaunchDaemons/{dns_lock_label}.plist"
+    full_label = f"system/{dns_lock_label}"
+    argvs = _dns_unlock_subprocess_argvs(dns_lock_plist, full_label)
 
-    r = run(["launchctl", "bootout", f"system/{dns_lock_label}"], sudo=True, capture=True)
+    r = run(argvs[0], sudo=True, capture=True)  # launchctl bootout
     if r.returncode == 0:
         print(f"{GREEN}dns-lock daemon 已停止{NC}")
     else:
         print("dns-lock daemon 未在运行")
-    run(["rm", "-f", dns_lock_plist], sudo=True)
+    run(argvs[1], sudo=True)  # rm -f plist
     print(f"已删除 {dns_lock_plist} (源文件保留在 {DEFAULT_CONFIG_DIR}/launchdaemons/)")
 
 
@@ -1718,38 +1723,143 @@ def _maybe_dry_run(cmd_name: str, plan_fn) -> None:
     sys.exit(0)
 
 
+# ── plan/exec 共享 helper（plan 与 cmd 的单一事实来源）─────────────────────────
+#
+# 这些 helper 返回**不含 sudo 前缀**的 argv list。plan_fn 把它们 split 成
+# PlanStep.target 字符串；cmd_* 把它们传给 run(..., sudo=True) 执行。两边共享
+# 同一份逻辑，CI 层 contract test 进一步断言 plan 与实际 subprocess.run 调用
+# 完全一致，杜绝 0.3.2 那种 system/system/ 双前缀类漂移。
+
+def _resolve_daemon_paths(name: str, config: dict):
+    """从 config.extra_daemons[name] 解析 (plist_src, plist_dst, full_label)。
+
+    用于消除 _h_daemon lambda 中的 <plist_dst> 占位符，并保证 cmd_daemon /
+    _plan_daemon / _h_daemon 三处口径一致。
+
+    name 未声明或 label 缺失时返回 None；调用方决定是 fail 还是降级。
+    """
+    daemons = (config.get("extra_daemons") or {})
+    d_cfg = daemons.get(name)
+    if not d_cfg:
+        return None
+    label = d_cfg.get("label", "")
+    if not label:
+        return None
+    plist_src = os.path.expanduser(d_cfg.get("plist_src", ""))
+    plist_dst = f"/Library/LaunchDaemons/{label}.plist"
+    full_label = f"system/{label}"
+    return (plist_src, plist_dst, full_label)
+
+
+def _engine_subprocess_argvs(backend_old, plist_src: str,
+                              new_plist: str, new_label: str) -> list[list[str]]:
+    """返回 cmd_engine 切换引擎时 4 个 subprocess 的 argv list（不含 sudo）。
+
+    顺序对应 cmd_engine cli.py 中的 launchctl bootout → /bin/rm 旧 plist →
+    /bin/cp 新 plist → launchctl bootstrap。run() 会自动加 sudo 前缀。
+    """
+    return [
+        ["launchctl", "bootout", backend_old.label],
+        ["/bin/rm", "-f", backend_old.plist],
+        ["/bin/cp", plist_src, new_plist],
+        ["launchctl", "bootstrap", "system", new_plist],
+    ]
+
+
+def _daemon_subprocess_argvs(subcmd: str, plist_src: str,
+                              plist_dst: str, full_label: str) -> list[list[str]]:
+    """返回 cmd_daemon <subcmd> 的 argv list（不含 sudo）。
+
+    start: 始终列 [/bin/cp, launchctl bootstrap]；cp 是 conditional
+    （cmd_daemon 在 plist_dst 已存在时跳过），但 plan 作为上界总展示，
+    contract test 走 actual ⊆ plan 方向天然容纳。
+    """
+    if subcmd == "start":
+        return [
+            ["/bin/cp", plist_src, plist_dst],
+            ["launchctl", "bootstrap", "system", plist_dst],
+        ]
+    if subcmd == "stop":
+        return [["launchctl", "bootout", full_label]]
+    if subcmd == "restart":
+        return [["launchctl", "kickstart", "-k", full_label]]
+    return []
+
+
+def _dns_lock_subprocess_argvs(plist_path: str,
+                                full_label: str) -> list[list[str]]:
+    """返回 cmd_dns_lock 的 argv list（不含 sudo）。
+
+    plan 始终展示完整 reload 路径：[bootout, tee, bootstrap]。default 模式
+    （already_registered=True 且 reload=False）实际只跑 0 步，但 plan 作为
+    dry-run 上界依然完整展示。contract test 用 actual ⊆ plan 方向。
+    """
+    return [
+        ["launchctl", "bootout", full_label],
+        ["tee", plist_path],
+        ["launchctl", "bootstrap", "system", plist_path],
+    ]
+
+
+def _dns_unlock_subprocess_argvs(plist_path: str,
+                                  full_label: str) -> list[list[str]]:
+    """返回 cmd_dns_unlock 的 argv list（不含 sudo）：[bootout, rm -f plist]。"""
+    return [
+        ["launchctl", "bootout", full_label],
+        ["rm", "-f", plist_path],
+    ]
+
+
 def _plan_mode(backend, target: str) -> list[dict]:
+    """mode tun / mode proxy 的 plan。
+
+    cmd_mode 实际不调 launchctl —— 仅改 config 文件 + 切换系统代理；
+    需手动 restart 引擎才生效（cmd_mode 末尾会提示）。plan 同源展示。
+    """
+    proxy_action = "开启系统代理 127.0.0.1:7890" if target == "proxy" \
+        else "关闭系统代理"
     return [
         {"action": "edit_yaml",
          "target": backend.config_file,
          "summary": f"修改 {backend.config_file}：切换 mode 为 {target}",
          "reversible": True,
          "side_effects": ["config-write"]},
-        {"action": "subprocess",
-         "target": f"launchctl kickstart -k {backend.label}",
-         "summary": f"重启 launchd 服务以读取新 mode",
-         "reversible": True, "requires_sudo": True,
-         "side_effects": ["process"]},
+        {"action": "system_op",
+         "target": f"networksetup -setwebproxy* / -setsecurewebproxy* "
+                   f"(per service)",
+         "summary": proxy_action,
+         "reversible": True, "requires_sudo": False,
+         "side_effects": ["system"]},
     ]
 
 
 def _plan_engine(backend, target: str) -> list[dict]:
-    from proxyctl.cli import get_backend, DEFAULT_CONFIG_DIR
     new_cfg = {"backend": target}
     try:
         new_backend = get_backend(new_cfg)
         new_plist = new_backend.plist
     except Exception:
-        new_plist = f"/Library/LaunchDaemons/<{target}>.plist"
+        new_backend = None
+        new_plist = f"/Library/LaunchDaemons/com.{target}.tun.plist"
+    plist_src = os.path.join(DEFAULT_CONFIG_DIR, "launchdaemons",
+                              os.path.basename(new_plist))
+    argvs = _engine_subprocess_argvs(backend, plist_src, new_plist,
+                                      new_backend.label if new_backend
+                                      else f"system/com.{target}.tun")
     return [
         {"action": "subprocess",
-         "target": f"launchctl bootout {backend.label}",
+         "target": " ".join(argvs[0]),
          "summary": f"停止当前引擎 {backend.name}",
          "reversible": True, "requires_sudo": True,
          "side_effects": ["process"]},
-        {"action": "fs_write",
-         "target": new_plist,
-         "summary": f"部署新引擎 plist 到 {new_plist}",
+        {"action": "subprocess",
+         "target": " ".join(argvs[1]),
+         "summary": f"删除旧 plist {backend.plist}",
+         "reversible": False, "requires_sudo": True,
+         "side_effects": ["config-write"]},
+        {"action": "subprocess",
+         "target": " ".join(argvs[2]),
+         "summary": f"部署新 plist 到 {new_plist}",
          "reversible": True, "requires_sudo": True,
          "side_effects": ["config-write"]},
         {"action": "fs_write",
@@ -1758,7 +1868,7 @@ def _plan_engine(backend, target: str) -> list[dict]:
          "reversible": True,
          "side_effects": ["config-write"]},
         {"action": "subprocess",
-         "target": f"launchctl bootstrap system {new_plist}",
+         "target": " ".join(argvs[3]),
          "summary": f"启动新引擎 {target}",
          "reversible": True, "requires_sudo": True,
          "side_effects": ["process"]},
@@ -1766,39 +1876,56 @@ def _plan_engine(backend, target: str) -> list[dict]:
 
 
 def _plan_fix(backend, config) -> list[dict]:
+    """fix 的 plan。
+
+    networksetup / scutil 迭代型操作不可逐条 argv 化（每个网络服务调一次），
+    标 action=system_op + 描述性 target。http_put 是单次精确请求，target
+    为完整 URL。cmd_fix 实际还会调插件 route_hooks + 第二次 curl 清 fakeip，
+    contract test 不做 subprocess 子集校验（plugin 可注入），只校验
+    placeholder 已消除（< / > 字符不出现）。
+    """
+    api_base = config.get('api_base', 'http://127.0.0.1:9090')
     return [
-        {"action": "subprocess",
-         "target": "networksetup -setdnsservers <svc> 127.0.0.1",
+        {"action": "system_op",
+         "target": "networksetup -setdnsservers (per service) 127.0.0.1",
          "summary": "重置系统 DNS 指向 127.0.0.1（对抗 DHCP 续租）",
          "reversible": True, "requires_sudo": True,
          "side_effects": ["system"]},
-        {"action": "subprocess",
-         "target": "scutil + dscacheutil",
+        {"action": "system_op",
+         "target": "scutil DNS reset + dscacheutil -flushcache",
          "summary": "清 macOS DNS 缓存（含 fakeip 表）",
          "reversible": True, "requires_sudo": True,
          "side_effects": ["cache"]},
         {"action": "http_put",
-         "target": f"{config.get('api_base', 'http://127.0.0.1:9090')}/configs?force=true",
+         "target": f"{api_base}/configs?force=true",
          "summary": "向 Clash API 发热重载请求（不重启进程）",
          "reversible": True,
          "side_effects": ["network-io"]},
     ]
 
 
-def _plan_audit_apply(days: int) -> list[dict]:
+def _plan_audit_apply(days: int, backend, config: dict) -> list[dict]:
+    """audit apply 的 plan。
+
+    scan_log target 等于 audit 模块实际扫描的路径（audit.MH_LOG / SB_LOG），
+    不是 backend.log_file —— sing-box 这两者不同（review Q2）。
+    """
+    from proxyctl import audit
+    log_path = audit.MH_LOG if backend.name == "mihomo" else audit.SB_LOG
+    api_base = config.get('api_base', 'http://127.0.0.1:9090')
     return [
         {"action": "scan_log",
-         "target": "<engine log>",
+         "target": log_path,
          "summary": f"扫描最近 {days} 天后端日志，找疑似应直连的域名",
          "reversible": True,
          "side_effects": []},
         {"action": "edit_yaml",
-         "target": "<engine config>.yaml [rules: 段]",
+         "target": f"{backend.config_file} [rules:]",
          "summary": "把候选域名作为 DOMAIN-SUFFIX,...,DIRECT 加到 rules 段顶部",
          "reversible": True,
          "side_effects": ["config-write"]},
         {"action": "http_put",
-         "target": "Clash API /configs?force=true",
+         "target": f"{api_base}/configs?force=true",
          "summary": "热重载配置使新规则生效",
          "reversible": True,
          "side_effects": ["network-io"]},
@@ -1820,32 +1947,46 @@ def _plan_config_set(path: str, key: str, value_repr: str) -> list[dict]:
     ]
 
 
-def _plan_daemon(name: str, subcmd: str, plist_dst: str) -> list[dict]:
+def _plan_daemon(name: str, subcmd: str, plist_src: str,
+                 plist_dst: str, full_label: str) -> list[dict]:
+    """daemon <name> start/stop/restart 的 plan。
+
+    所有 subprocess.target 由 _daemon_subprocess_argvs 派生，与 cmd_daemon
+    实际跑的 argv 共享单一事实来源。start 步骤总是展示 cp + bootstrap，
+    cp 是 conditional（plist_dst 已存在时跳过）但 plan 作为 dry-run 上界
+    总是列出，contract test 走 actual ⊆ plan 方向。
+    """
     if subcmd == "start":
+        argvs = _daemon_subprocess_argvs("start", plist_src, plist_dst,
+                                          full_label)
         return [
-            {"action": "fs_write",
-             "target": plist_dst,
-             "summary": f"如缺失则部署 plist 到 {plist_dst}",
+            {"action": "subprocess",
+             "target": " ".join(argvs[0]),
+             "summary": f"如 {plist_dst} 不存在则从 {plist_src} 拷贝",
              "reversible": True, "requires_sudo": True,
              "side_effects": ["config-write"]},
             {"action": "subprocess",
-             "target": f"launchctl bootstrap system {plist_dst}",
+             "target": " ".join(argvs[1]),
              "summary": f"启动 daemon {name}",
              "reversible": True, "requires_sudo": True,
              "side_effects": ["process"]},
         ]
     if subcmd == "stop":
+        argvs = _daemon_subprocess_argvs("stop", plist_src, plist_dst,
+                                          full_label)
         return [
             {"action": "subprocess",
-             "target": f"launchctl bootout system/<{name}.label>",
+             "target": " ".join(argvs[0]),
              "summary": f"停止 daemon {name}",
              "reversible": True, "requires_sudo": True,
              "side_effects": ["process"]},
         ]
     if subcmd == "restart":
+        argvs = _daemon_subprocess_argvs("restart", plist_src, plist_dst,
+                                          full_label)
         return [
             {"action": "subprocess",
-             "target": f"launchctl kickstart -k system/<{name}.label>",
+             "target": " ".join(argvs[0]),
              "summary": f"重启 daemon {name}",
              "reversible": True, "requires_sudo": True,
              "side_effects": ["process"]},
@@ -1853,40 +1994,51 @@ def _plan_daemon(name: str, subcmd: str, plist_dst: str) -> list[dict]:
     return []
 
 
-def _plan_dns_lock(reload: bool) -> list[dict]:
-    plan: list[dict] = []
-    if reload:
-        plan.append({
-            "action": "subprocess",
-            "target": "launchctl bootout system/<dns-lock.label>",
-            "summary": "如已注册，先 bootout 重装",
-            "reversible": True, "requires_sudo": True,
-            "side_effects": ["process"]})
-    plan += [
-        {"action": "fs_write",
-         "target": "/Library/LaunchDaemons/<dns-lock>.plist",
-         "summary": "渲染并写入 dns-lock launchd plist",
+def _plan_dns_lock(config: dict, *, reload: bool = False) -> list[dict]:
+    """dns-lock 的 plan。
+
+    plan 始终展示完整 reload 路径 [bootout, tee, bootstrap]；reload=False
+    且 already_registered=True 时 cmd_dns_lock 实际跑 0 步——这是 dry-run
+    上界，contract test 用 actual ⊆ plan 方向天然容纳。
+    """
+    dns_lock_label = config.get("dns_lock_label", DEFAULTS["dns_lock_label"])
+    plist = f"/Library/LaunchDaemons/{dns_lock_label}.plist"
+    full_label = f"system/{dns_lock_label}"
+    argvs = _dns_lock_subprocess_argvs(plist, full_label)
+    reload_hint = "（reload 时 / 已注册时）" if not reload else ""
+    return [
+        {"action": "subprocess",
+         "target": " ".join(argvs[0]),
+         "summary": f"如已注册，先 bootout 重装{reload_hint}",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["process"]},
+        {"action": "subprocess",
+         "target": " ".join(argvs[1]),
+         "summary": f"通过 sudo tee 写入渲染好的 plist 到 {plist}",
          "reversible": True, "requires_sudo": True,
          "side_effects": ["config-write"]},
         {"action": "subprocess",
-         "target": "launchctl bootstrap system <plist>",
+         "target": " ".join(argvs[2]),
          "summary": "启动 DNS 看门狗 daemon",
          "reversible": True, "requires_sudo": True,
          "side_effects": ["process"]},
     ]
-    return plan
 
 
-def _plan_dns_unlock() -> list[dict]:
+def _plan_dns_unlock(config: dict) -> list[dict]:
+    dns_lock_label = config.get("dns_lock_label", DEFAULTS["dns_lock_label"])
+    plist = f"/Library/LaunchDaemons/{dns_lock_label}.plist"
+    full_label = f"system/{dns_lock_label}"
+    argvs = _dns_unlock_subprocess_argvs(plist, full_label)
     return [
         {"action": "subprocess",
-         "target": "launchctl bootout system/<dns-lock.label>",
+         "target": " ".join(argvs[0]),
          "summary": "停止 DNS 看门狗",
          "reversible": True, "requires_sudo": True,
          "side_effects": ["process"]},
-        {"action": "fs_remove",
-         "target": "/Library/LaunchDaemons/<dns-lock>.plist",
-         "summary": "删除 launchd plist（可选；保留下次 dns-lock 直接启动）",
+        {"action": "subprocess",
+         "target": " ".join(argvs[1]),
+         "summary": f"删除 launchd plist {plist}（源文件保留）",
          "reversible": False, "requires_sudo": True,
          "side_effects": ["config-write"]},
     ]
@@ -1989,7 +2141,7 @@ def _h_restart_clean(ctx):
     cmd_restart(ctx["backend"], ctx["config"], clean=True, registry=ctx["registry"])
 def _h_recover(ctx):  cmd_recover(ctx["backend"], ctx["config"])
 def _h_dns_unlock(ctx):
-    _maybe_dry_run("dns-unlock", lambda: _plan_dns_unlock())
+    _maybe_dry_run("dns-unlock", lambda: _plan_dns_unlock(ctx["config"]))
     _exec_with_lock("daemon", "dns-unlock", cmd_dns_unlock, ctx["config"])
 def _h_plugins(ctx):  cmd_plugins(ctx["registry"])
 
@@ -2022,7 +2174,8 @@ def _h_fix(ctx):
 
 def _h_dns_lock(ctx):
     reload = "--reload" in ctx["args"]
-    _maybe_dry_run("dns-lock", lambda: _plan_dns_lock(reload))
+    _maybe_dry_run("dns-lock",
+                   lambda: _plan_dns_lock(ctx["config"], reload=reload))
     _exec_with_lock("daemon", "dns-lock", cmd_dns_lock,
                     ctx["config"], ctx["backend"], reload=reload)
 
@@ -2043,8 +2196,13 @@ def _h_daemon(ctx):
     name = ctx["args"][0] if ctx["args"] else ""
     subcmd = ctx["args"][1] if len(ctx["args"]) > 1 else ""
     if subcmd in ("start", "stop", "restart"):
+        paths = _resolve_daemon_paths(name, ctx["config"])
+        # name 未声明或 label 缺失：plan 用空字符串占位（cmd_daemon 会 fail
+        # 出友好 hint，所以 dry-run 报 plan 也无害）。
+        plist_src, plist_dst, full_label = paths or ("", "", "")
         _maybe_dry_run("daemon",
-                       lambda: _plan_daemon(name, subcmd, "<plist_dst>"))
+                       lambda: _plan_daemon(name, subcmd, plist_src,
+                                            plist_dst, full_label))
         _exec_with_lock("daemon", "daemon", cmd_daemon, name, subcmd, ctx["config"])
     else:
         cmd_daemon(name, subcmd, ctx["config"])
@@ -2053,8 +2211,11 @@ def _h_claude_proxy(ctx):
     """daemon claude-proxy <subcmd> 的别名，向后兼容。"""
     subcmd = ctx["args"][0] if ctx["args"] else "status"
     if subcmd in ("start", "stop", "restart"):
+        paths = _resolve_daemon_paths("claude-proxy", ctx["config"])
+        plist_src, plist_dst, full_label = paths or ("", "", "")
         _maybe_dry_run("claude-proxy",
-                       lambda: _plan_daemon("claude-proxy", subcmd, "<plist_dst>"))
+                       lambda: _plan_daemon("claude-proxy", subcmd, plist_src,
+                                            plist_dst, full_label))
         _exec_with_lock("daemon", "claude-proxy",
                         cmd_daemon, "claude-proxy", subcmd, ctx["config"])
     else:
@@ -2082,7 +2243,9 @@ def _h_audit(ctx):
         days = 1
     from proxyctl.audit import cmd_audit
     if apply_mode:
-        _maybe_dry_run("audit", lambda: _plan_audit_apply(days))
+        _maybe_dry_run("audit",
+                       lambda: _plan_audit_apply(days, ctx["backend"],
+                                                  ctx["config"]))
         _exec_with_lock("config", "audit", cmd_audit,
                         days, ctx["api_base"], ctx["api_secret"], apply_mode)
     else:

@@ -82,16 +82,19 @@ def test_all_plan_funcs_no_system_double_prefix():
     """通用契约：所有 _plan_* 函数的 PlanStep.target 都不应含 system/system/。
     新增写命令的 _plan_* 漂移到双前缀也会被这个测试抓住。"""
     backend = cli.MihomoBackend({"config_dir": "/tmp/test", "proxy_port": 7890})
-    config = {"api_base": "http://127.0.0.1:9090"}
+    config = {"api_base": "http://127.0.0.1:9090",
+              "dns_lock_label": "com.test.dns-lock"}
     plan_calls = [
-        ("mode",   cli._plan_mode,       (backend, "tun")),
-        ("engine", cli._plan_engine,     (backend, "singbox")),
-        ("fix",    cli._plan_fix,        (backend, config)),
-        ("audit",  cli._plan_audit_apply, (7,)),
+        ("mode",   cli._plan_mode,        (backend, "tun")),
+        ("engine", cli._plan_engine,      (backend, "singbox")),
+        ("fix",    cli._plan_fix,         (backend, config)),
+        ("audit",  cli._plan_audit_apply, (7, backend, config)),
         ("config", cli._plan_config_set,  ("/tmp/c.yaml", "k", "v")),
-        ("daemon", cli._plan_daemon,      ("foo", "start", "/tmp/p.plist")),
-        ("dns-lock",   cli._plan_dns_lock,   (False,)),
-        ("dns-unlock", cli._plan_dns_unlock, ()),
+        ("daemon", cli._plan_daemon,      ("foo", "start", "/tmp/src.plist",
+                                          "/Library/LaunchDaemons/com.test.foo.plist",
+                                          "system/com.test.foo")),
+        ("dns-lock",   cli._plan_dns_lock,   (config,)),
+        ("dns-unlock", cli._plan_dns_unlock, (config,)),
     ]
     for name, fn, args in plan_calls:
         plan = fn(*args)
@@ -164,21 +167,33 @@ def test_cmd_trace_json_envelope_ok_is_true_when_remote_ip_present(monkeypatch,
 
 # ── 通用契约：写命令 --dry-run + --json 输出 plan target 不能含 < > 占位符
 def test_dry_run_plan_target_no_placeholder_for_resolved_backend(monkeypatch):
-    """plan target 应是真实路径 / 命令，不应是 '<plist_dst>' 这种占位符。
-    （0.3.0 daemon 写命令的 plan 故意留了占位符 ——
-    但 0.4.0 T5 plan/exec 绑定后会消除；本测试目前只断言 mode/engine/fix。）"""
+    """plan target 应是真实路径 / 命令，不应含 '<...>' 占位符。
+
+    0.4.0a1 T5 把所有写命令的 _plan_* 占位符消除，contract test 接管。
+    本测试用 substring 检查（任何 target 内含 `<...>` 都 fail），覆盖所有
+    8 个 _plan_* 函数。
+    """
     backend = cli.MihomoBackend({"config_dir": "/tmp/test", "proxy_port": 7890})
-    config = {"api_base": "http://127.0.0.1:9090"}
+    config = {"api_base": "http://127.0.0.1:9090",
+              "dns_lock_label": "com.test.dns-lock"}
+    placeholder_re = re.compile(r"<[^>]+>")
     for name, fn, args in [
-        ("mode", cli._plan_mode, (backend, "tun")),
-        ("engine", cli._plan_engine, (backend, "singbox")),
-        ("fix", cli._plan_fix, (backend, config)),
+        ("mode",   cli._plan_mode,        (backend, "tun")),
+        ("engine", cli._plan_engine,      (backend, "singbox")),
+        ("fix",    cli._plan_fix,         (backend, config)),
+        ("audit",  cli._plan_audit_apply, (7, backend, config)),
+        ("config", cli._plan_config_set,  ("/tmp/c.yaml", "k", "v")),
+        ("daemon", cli._plan_daemon,      ("foo", "start", "/tmp/src.plist",
+                                          "/Library/LaunchDaemons/com.test.foo.plist",
+                                          "system/com.test.foo")),
+        ("dns-lock",   cli._plan_dns_lock,   (config,)),
+        ("dns-unlock", cli._plan_dns_unlock, (config,)),
     ]:
         plan = fn(*args)
         for s in plan:
             t = s.get("target", "")
-            assert not re.match(r"^<.*>$", t), \
-                f"plan {name!r} target 是占位符 {t!r}（应为真实路径）"
+            assert not placeholder_re.search(t), \
+                f"plan {name!r} target 含 <...> 占位符: {t!r}"
 
 
 # ── pyproject / cli VERSION 单一事实来源回归（0.3.1 引入）────────────────
