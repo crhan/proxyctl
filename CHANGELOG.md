@@ -5,6 +5,45 @@
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-05-17
+
+### Added — 第二批 Agent 友好打磨
+- **`proxyctl <cmd> --help` / `-h`** — 子命令独立帮助，从 COMMANDS_META 派生
+  （summary / 用法 / examples / exit_codes / badges：sudo / side_effects /
+  json 支持）。`--json` 模式输出 envelope 含该命令的完整元数据。
+- **`proxyctl check --json`** — 把 4 阶段事实收进 collector：
+  `engine / mode / stages.{basic, groups, connectivity, outbound_ip,
+  split_routing}`；引擎未运行直接输出 ENGINE_DOWN(5)+ envelope。
+- **`proxyctl trace <domain> --json`** — 4 阶段
+  `input / parsed / mode / stages.{dns, rules, connectivity, connections}`。
+- **`proxyctl audit [days] --json` / `proxyctl audit apply --json`** — collector
+  含 `scanned / candidates / proxy_ok / unknown / new_suffixes / applied`。
+- **`proxyctl bench [groups...] --json`** — NDJSON 流式：每节点完成立即输出
+  `{node, rtt_ms, ok, error}` 一行；末尾再输出 envelope summary 含
+  `total / ok_count / fail_count / avg_rtt_ms / min/max / results[]`。
+- **`proxyctl config set <dot.key> <value>`** — 原子写（tmp + rename）
+  + `.bak` 备份 + 写后 YAML 校验 + 失败回滚；值类型自动推断
+  （int / float / bool / null / JSON list/dict / str）。dot-key 支持
+  （`corp_dns.server`）。受 `with_lock("config")` 保护。
+
+### Added — 防退化与契约测试
+- **`tests/unit/test_json_schemas.py`** — 用 `jsonschema` 锁定 v1 envelope /
+  commands / doctor / explain / config get/set 的字段契约（13 个测试）；
+  防止意外破坏 schema v1 兼容性。
+- **`tests/unit/test_no_bare_ansi.py`** — 21 个端到端测试，断言
+  `NO_COLOR=1` / `--json` 模式下 stdout/stderr 均不含任何 ANSI 转义。
+
+### Changed
+- 命令元数据：`check / trace / audit / bench / config` 的
+  `supports_json` 字段从 `False` 改为 `True`。
+- 退出码语义补全：`bench` 增加 `[3, 7]`（无可测组 / API 不可达）；
+  `config` 增加 `[4]`（写文件失败）。
+
+### Notes
+- 完整向后兼容：`check / trace / audit / bench` 的人类输出 0 改动。
+- `bench --json` 进度条静默（用 NDJSON 替代）；人类模式进度条不变。
+- 332 passed（v0.2.0 基础 298 + 新增 34）。
+
 ## [0.2.0] — 2026-05-17
 
 ### Added — Agent 接入一等公民

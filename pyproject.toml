@@ -1,6 +1,6 @@
 [project]
 name = "proxyctl"
-version = "0.2.0"
+version = "0.2.1"
 description = "Proxy configuration lifecycle management for macOS and Linux"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -37,6 +37,7 @@ proxyctl = "proxyctl.cli:main"
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
+    "jsonschema>=4.0",
 ]
 
 [build-system]

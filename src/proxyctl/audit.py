@@ -266,7 +266,34 @@ def _apply_to_configs(new_suffixes: list) -> list:
 
 
 def cmd_audit(audit_days: int, api_base: str, api_secret: str, do_apply: bool):
-    """proxyctl audit — 扫描日志，找走代理但实际是国内 IP 的域名。"""
+    """proxyctl audit — 扫描日志，找走代理但实际是国内 IP 的域名。
+
+    --json 模式：human print 静默；最终 envelope 包含 candidates / proxy_ok /
+    unknown / new_suffixes / applied 等结构化字段。
+    """
+    import io as _io_mod
+    import sys as _sys
+    try:
+        from proxyctl.explain import GLOBAL_FLAGS_REF as _gf
+        as_json = bool(_gf().get("json"))
+    except Exception:
+        as_json = False
+    _real_stdout = _sys.stdout
+    if as_json:
+        _sys.stdout = _io_mod.StringIO()
+
+    collector: dict = {
+        "days": audit_days,
+        "apply": do_apply,
+        "scanned": [],
+        "uncovered_count": 0,
+        "candidates": [],
+        "proxy_ok": [],
+        "unknown": [],
+        "new_suffixes": [],
+        "applied": [],
+    }
+
     print(f"{BOLD}代理链路审计{NC} (最近 {audit_days} 天，双引擎扫描)\n")
 
     # 步骤 1: 扫描双引擎日志
@@ -282,6 +309,10 @@ def cmd_audit(audit_days: int, api_base: str, api_secret: str, do_apply: bool):
                 proxy_domains[host] += count
             sz = os.path.getsize(log_path)
             scanned.append(f"{label}({sz // 1024 // 1024}MB, {len(d)} 域名)")
+            collector["scanned"].append(
+                {"backend": etype, "path": log_path,
+                 "size_mb": sz // 1024 // 1024, "domains": len(d)}
+            )
     print(f"日志扫描：{', '.join(scanned) or '无日志文件'}")
 
     # 步骤 2: 合并当前活跃连接
@@ -305,6 +336,7 @@ def cmd_audit(audit_days: int, api_base: str, api_secret: str, do_apply: bool):
 
     if not proxy_domains:
         print("  没有发现走代理的域名流量。")
+        _audit_emit(as_json, _sys, _real_stdout, collector)
         return
 
     # 步骤 3: 读双 config 规则，过滤已有明确规则的域名
@@ -316,7 +348,9 @@ def cmd_audit(audit_days: int, api_base: str, api_secret: str, do_apply: bool):
 
     if not uncovered:
         print("  所有走代理的域名都已被显式规则覆盖，无遗漏。")
+        _audit_emit(as_json, _sys, _real_stdout, collector)
         return
+    collector["uncovered_count"] = len(uncovered)
 
     # 步骤 4 & 5: 快速分类 + DoH 反查
     print(f"未覆盖域名：{len(uncovered)} 个，DoH 反查中...\n")
@@ -327,16 +361,24 @@ def cmd_audit(audit_days: int, api_base: str, api_secret: str, do_apply: bool):
     for host, count in sorted(uncovered.items(), key=lambda x: -x[1]):
         if any(kw in host for kw in KNOWN_PROXY_KW):
             proxy_ok.append((host, count, "", "known"))
+            collector["proxy_ok"].append({"host": host, "count": count,
+                                          "ip": "", "country": "known"})
             continue
         real_ip = _resolve_direct(host)
         if not real_ip:
             unknown.append((host, count, "", "no-A"))
+            collector["unknown"].append({"host": host, "count": count,
+                                         "reason": "no-A"})
             continue
         country = _ip_country(real_ip)
         if country == "CN":
             candidates.append((host, count, real_ip, "cn"))
+            collector["candidates"].append({"host": host, "count": count,
+                                            "ip": real_ip, "country": "CN"})
         else:
             proxy_ok.append((host, count, real_ip, country or "?"))
+            collector["proxy_ok"].append({"host": host, "count": count,
+                                          "ip": real_ip, "country": country or "?"})
 
     # 输出
     if candidates:
@@ -355,8 +397,10 @@ def cmd_audit(audit_days: int, api_base: str, api_secret: str, do_apply: bool):
             print(f"    .{s}")
         print()
 
+        collector["new_suffixes"] = new_suffixes
         if do_apply and new_suffixes:
             applied = _apply_to_configs(new_suffixes)
+            collector["applied"] = list(applied) if applied else []
             if applied:
                 print(f"{GREEN}■ 已写入：{', '.join(applied)}{NC}")
                 print("执行 proxyctl restart 生效\n")
@@ -386,3 +430,16 @@ def cmd_audit(audit_days: int, api_base: str, api_secret: str, do_apply: bool):
           f"{len(unknown)} 待定")
     if candidates and not do_apply:
         print(f"\n执行 {BOLD}proxyctl audit apply{NC} 自动写入双 config")
+
+    _audit_emit(as_json, _sys, _real_stdout, collector)
+
+
+def _audit_emit(as_json: bool, _sys, _real_stdout, collector: dict) -> None:
+    """audit --json：恢复 stdout，输出 envelope，退出。
+    人类模式：no-op。"""
+    if not as_json:
+        return
+    _sys.stdout = _real_stdout
+    from proxyctl._io import emit_json, envelope
+    emit_json(envelope("audit", data=collector, ok=True))
+    _sys.exit(0)

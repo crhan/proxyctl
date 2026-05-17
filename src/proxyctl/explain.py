@@ -549,25 +549,29 @@ COMMANDS_META: list[dict] = [
      "needs_sudo": False, "interactive": False, "exit_codes": [0, 5],
      "examples": ["proxyctl doctor", "proxyctl doctor --json"]},
     {"name": "check", "group": "diagnostic", "summary": "全面健康检查（4 阶段）",
-     "args": [], "supports_json": False, "side_effects": "none",
+     "args": [], "supports_json": True, "side_effects": "none",
      "needs_sudo": False, "interactive": False, "exit_codes": [0, 1, 5],
-     "examples": ["proxyctl check"]},
+     "examples": ["proxyctl check", "proxyctl check --json"]},
     {"name": "trace", "group": "diagnostic", "summary": "域名链路诊断",
      "args": [{"name": "domain", "required": True}],
-     "supports_json": False, "side_effects": "none",
+     "supports_json": True, "side_effects": "none",
      "needs_sudo": False, "interactive": False, "exit_codes": [0, 1, 2],
-     "examples": ["proxyctl trace github.com"]},
+     "examples": ["proxyctl trace github.com",
+                  "proxyctl trace github.com --json"]},
     {"name": "audit", "group": "diagnostic",
      "summary": "扫描日志找疑似应直连域名；apply 子命令会写 rules 段",
      "args": [{"name": "days_or_apply", "required": False}],
-     "supports_json": False, "side_effects": "config-write (only with apply)",
+     "supports_json": True, "side_effects": "config-write (only with apply)",
      "needs_sudo": False, "interactive": False, "exit_codes": [0, 1],
-     "examples": ["proxyctl audit 7", "proxyctl audit apply 7"]},
-    {"name": "bench", "group": "diagnostic", "summary": "代理组测速",
+     "examples": ["proxyctl audit 7", "proxyctl audit apply 7",
+                  "proxyctl audit --json 7"]},
+    {"name": "bench", "group": "diagnostic",
+     "summary": "代理组测速（--json 为 NDJSON 流式 + summary envelope）",
      "args": [{"name": "groups", "required": False, "variadic": True}],
-     "supports_json": False, "side_effects": "none",
-     "needs_sudo": False, "interactive": False, "exit_codes": [0, 1],
-     "examples": ["proxyctl bench", "proxyctl bench proxy"]},
+     "supports_json": True, "side_effects": "none",
+     "needs_sudo": False, "interactive": False, "exit_codes": [0, 1, 3, 7],
+     "examples": ["proxyctl bench", "proxyctl bench proxy",
+                  "proxyctl bench --json proxy"]},
     # config & mode
     {"name": "mode", "group": "config", "summary": "切换 tun / proxy 模式",
      "args": [{"name": "target", "choices": ["tun", "proxy"], "required": False}],
@@ -646,12 +650,17 @@ COMMANDS_META: list[dict] = [
      "needs_sudo": False, "interactive": False, "exit_codes": [0],
      "examples": ["proxyctl commands --json"]},
     {"name": "config", "group": "agent",
-     "summary": "proxyctl 自身配置：path | get <key>",
-     "args": [{"name": "subcmd", "choices": ["path", "get"], "required": True},
-              {"name": "key", "required": False}],
-     "supports_json": True, "side_effects": "none",
-     "needs_sudo": False, "interactive": False, "exit_codes": [0, 2, 3, 6],
-     "examples": ["proxyctl config path", "proxyctl config get proxy_port"]},
+     "summary": "proxyctl 自身配置：path | get <key> | set <key> <value>",
+     "args": [{"name": "subcmd", "choices": ["path", "get", "set"], "required": True},
+              {"name": "key", "required": False},
+              {"name": "value", "required": False}],
+     "supports_json": True,
+     "side_effects": "config-write (set only; 原子写 + .bak 备份 + YAML 校验)",
+     "needs_sudo": False, "interactive": False, "exit_codes": [0, 2, 3, 4, 6],
+     "examples": ["proxyctl config path",
+                  "proxyctl config get proxy_port",
+                  "proxyctl config set proxy_port 7891",
+                  "proxyctl config set no_proxy_extra '[\"corp.example.com\"]'"]},
 ]
 
 
@@ -687,10 +696,11 @@ def cmd_commands(args: list, backend, config) -> None:
 # ── 主入口 4: config ──────────────────────────────────────────────────────
 
 def cmd_config(args: list, backend, config) -> None:
-    """proxyctl config path | get <dot.key>"""
+    """proxyctl config path | get <dot.key> | set <dot.key> <value>"""
     as_json = GLOBAL_FLAGS_REF().get("json", False)
     if not args:
-        fail("缺少子命令", hint="用法：proxyctl config path | proxyctl config get <key>",
+        fail("缺少子命令",
+             hint="proxyctl config path | get <key> | set <key> <value>",
              code=USAGE, cmd="config", as_json=as_json)
 
     sub = args[0]
@@ -729,9 +739,143 @@ def cmd_config(args: list, backend, config) -> None:
             print(value)
         return
 
+    if sub == "set":
+        if len(args) < 3:
+            fail("config set 需要 key 和 value 两个参数",
+                 hint="例：proxyctl config set proxy_port 7891",
+                 code=USAGE, cmd="config", as_json=as_json)
+        key = args[1]
+        raw_value = args[2]
+        try:
+            _cmd_config_set(path, key, raw_value, as_json=as_json)
+        except _ConfigWriteError as e:
+            fail(str(e), hint=e.hint, doc=e.doc, code=e.code,
+                 cmd="config", as_json=as_json)
+        return
+
     fail(f"未知子命令：{sub}",
-         hint="用法：proxyctl config path | proxyctl config get <key>",
+         hint="proxyctl config path | get <key> | set <key> <value>",
          code=USAGE, cmd="config", as_json=as_json)
+
+
+# ── config set 实现 ──────────────────────────────────────────────────────
+
+class _ConfigWriteError(Exception):
+    def __init__(self, msg: str, *, hint: str | None = None,
+                 doc: str | None = None, code: int = 1):
+        super().__init__(msg)
+        self.hint = hint
+        self.doc = doc
+        self.code = code
+
+
+def _coerce_value(raw: str):
+    """字面值类型推断：int / float / bool / null / JSON list/dict / str。
+
+    优先级：null/true/false → int → float → JSON 解析（[]/{}/""）→ 原 str。
+    """
+    s = raw.strip()
+    if s in ("null", "None"):
+        return None
+    if s in ("true", "True"): return True
+    if s in ("false", "False"): return False
+    # int
+    try:
+        if s.lstrip("-").isdigit():
+            return int(s)
+    except ValueError:
+        pass
+    # float
+    try:
+        if "." in s and s.replace(".", "", 1).lstrip("-").isdigit():
+            return float(s)
+    except ValueError:
+        pass
+    # JSON 容器或带引号字符串
+    if s and s[0] in "[{\"":
+        try:
+            return json.loads(s)
+        except (ValueError, json.JSONDecodeError):
+            pass
+    return raw  # 原 str
+
+
+def _set_dot_key(d: dict, key: str, value) -> None:
+    parts = key.split(".")
+    cur = d
+    for p in parts[:-1]:
+        if p not in cur or not isinstance(cur[p], dict):
+            cur[p] = {}
+        cur = cur[p]
+    cur[parts[-1]] = value
+
+
+def _cmd_config_set(path: str, key: str, raw_value: str,
+                    *, as_json: bool) -> None:
+    """原子写：备份 → 写 .new → rename → yaml 校验，失败回滚。"""
+    import shutil
+    import tempfile
+    try:
+        import yaml
+    except ImportError:
+        raise _ConfigWriteError("缺少 pyyaml 依赖",
+                                hint="pip install pyyaml", code=6)
+
+    # 读旧值
+    if os.path.isfile(path):
+        with open(path) as f:
+            try:
+                doc = yaml.safe_load(f) or {}
+            except yaml.YAMLError as e:
+                raise _ConfigWriteError(f"现有配置文件 YAML 语法错: {e}",
+                                        hint="proxyctl config path",
+                                        doc="config", code=6)
+    else:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        doc = {}
+
+    new_value = _coerce_value(raw_value)
+    try:
+        old_value = _resolve_dot_key(doc, key)
+    except KeyError:
+        old_value = None
+    _set_dot_key(doc, key, new_value)
+
+    # 备份
+    bak_path: str | None = None
+    if os.path.isfile(path):
+        bak_path = path + ".bak"
+        shutil.copy2(path, bak_path)
+
+    # 原子写：临时文件 → rename
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix=".config.", suffix=".new",
+                                         dir=os.path.dirname(path))
+    try:
+        with os.fdopen(tmp_fd, "w") as f:
+            yaml.safe_dump(doc, f, allow_unicode=True, sort_keys=False)
+        # 校验：parse 一遍 tmp 文件
+        with open(tmp_path) as f:
+            yaml.safe_load(f)
+        os.replace(tmp_path, path)
+    except Exception as e:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        # 回滚（不动 path，因为还没替换；理论上 path 仍是旧内容）
+        raise _ConfigWriteError(f"写配置失败: {e}",
+                                hint=f"备份: {bak_path or '(none)'}",
+                                doc="config", code=4)
+
+    if as_json:
+        emit_json(envelope("config",
+                           data={"path": path, "key": key,
+                                 "old_value": old_value, "new_value": new_value,
+                                 "backup": bak_path}))
+        return
+    print(f"{GREEN}✓{NC} {key}: {old_value!r} → {new_value!r}")
+    if bak_path:
+        print(f"  {DIM}backup: {bak_path}{NC}")
 
 
 def _resolve_dot_key(d: dict, key: str):

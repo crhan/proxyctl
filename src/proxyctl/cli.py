@@ -1310,7 +1310,7 @@ def _read_log_lines(path: str, tail_n: int | None) -> list:
 
 # ── 帮助 ──────────────────────────────────────────────────────────────────────
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 def cmd_help(verbose: bool = False):
     """打印帮助信息
@@ -1390,6 +1390,61 @@ def cmd_help(verbose: bool = False):
     sys.exit(0)
 
 
+def cmd_subcommand_help(name: str) -> None:
+    """proxyctl <name> --help — 从 COMMANDS_META 派生子命令帮助文本。"""
+    from proxyctl.explain import COMMANDS_META, TOPICS
+    meta = next((c for c in COMMANDS_META if c["name"] == name), None)
+    if meta is None:
+        _io.fail(f"未识别子命令：{name}",
+                 hint="proxyctl commands  # 列出所有子命令",
+                 code=_io.USAGE, cmd=name,
+                 as_json=GLOBAL_FLAGS.get("json", False))
+
+    if GLOBAL_FLAGS.get("json"):
+        _io.emit_json(_io.envelope(name, data=meta))
+        sys.exit(0)
+
+    print(f"{BOLD}proxyctl {meta['name']}{NC}  ({meta['group']})")
+    print(f"  {meta['summary']}\n")
+
+    # 用法行
+    args_parts = []
+    for a in meta.get("args", []):
+        spec = a["name"]
+        if a.get("choices"):
+            spec = "|".join(a["choices"])
+        if a.get("variadic"):
+            spec = f"{spec}..."
+        args_parts.append(f"<{spec}>" if a.get("required") else f"[{spec}]")
+    flags_part = " [--json]" if meta.get("supports_json") else ""
+    print(f"{BOLD}用法{NC}     proxyctl {meta['name']}"
+          f"{' ' + ' '.join(args_parts) if args_parts else ''}{flags_part}")
+
+    if meta.get("examples"):
+        print(f"\n{BOLD}示例{NC}")
+        for ex in meta["examples"]:
+            print(f"  {CYAN}{ex}{NC}")
+
+    if meta.get("exit_codes"):
+        codes_str = ", ".join(
+            f"{c}({_io.EXIT_CODE_HELP.get(c, '?').split('（')[0].strip()})"
+            for c in meta["exit_codes"]
+        )
+        print(f"\n{BOLD}退出码{NC}   {codes_str}")
+
+    badges = []
+    if meta.get("needs_sudo"):       badges.append("需要 sudo")
+    if meta.get("interactive"):       badges.append("交互式")
+    if meta["side_effects"] != "none": badges.append(f"副作用={meta['side_effects']}")
+    if not meta.get("supports_json"): badges.append("无 --json")
+    if badges:
+        print(f"\n{DIM}({' / '.join(badges)}){NC}")
+
+    if name in TOPICS:
+        print(f"\n{DIM}详细说明：proxyctl explain {name}{NC}")
+    sys.exit(0)
+
+
 # ── 全局 flag 预解析 ──────────────────────────────────────────────────────
 
 # 入口运行期填充，子命令可读取（如 status 决定是否 --json）
@@ -1446,6 +1501,11 @@ def main():
         elif sys.argv[1] in ("--version", "-v"):
             print(f"proxyctl v{VERSION}")
             sys.exit(0)
+
+    # 子命令 --help / -h（位置：sys.argv[2:] 中任一处出现）
+    if len(sys.argv) > 2 and any(a in ("--help", "-h") for a in sys.argv[2:]):
+        cmd_subcommand_help(sys.argv[1])
+        return
 
     config = load_config()
     backend = get_backend(config)
@@ -1575,7 +1635,12 @@ def main():
     elif cmd == "config":
         from proxyctl import explain as _ex
         _ex.set_global_flags(GLOBAL_FLAGS)
-        _ex.cmd_config(sys.argv[2:], backend, config)
+        sub_args = sys.argv[2:]
+        if sub_args and sub_args[0] == "set":
+            _exec_with_lock("config", "config",
+                            _ex.cmd_config, sub_args, backend, config)
+        else:
+            _ex.cmd_config(sub_args, backend, config)
     elif cmd == "doctor":
         from proxyctl import explain as _ex
         _ex.set_global_flags(GLOBAL_FLAGS)

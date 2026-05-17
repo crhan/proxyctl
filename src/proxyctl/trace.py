@@ -518,44 +518,81 @@ def _section_connections(domain: str, resolved_ips: list,
 def cmd_trace(raw_input: str, api: str, secret: str, config: dict = None):
     """proxyctl trace — 诊断域名的完整访问链路。
 
-    Args:
-        raw_input: 用户输入的域名或 URL
-        api: Clash API 基础 URL
-        secret: Clash API Bearer token
-        config: 全局配置字典（可选，用于 corp_dns 探测）
+    --json 模式：丢弃人类打印；末尾输出 envelope。
     """
+    import io as _io_mod
+    import sys as _sys
     import threading
-    scheme, domain, port, path = _parse_input(raw_input)
+    try:
+        from proxyctl.explain import GLOBAL_FLAGS_REF as _gf
+        as_json = bool(_gf().get("json"))
+    except Exception:
+        as_json = False
 
-    # 读取当前代理模式，影响 DNS 标签和连通性测试的输出注释
+    _real_stdout = _sys.stdout
+    if as_json:
+        _sys.stdout = _io_mod.StringIO()
+
+    scheme, domain, port, path = _parse_input(raw_input)
     mode = _detect_mode()
     fakeip_active = mode["enhanced_mode"] == "fake-ip"
     tun_label = f"{GREEN}TUN on{NC}" if mode["tun_enabled"] else f"{DIM}TUN off{NC}"
     dns_label  = f"{CYAN}{mode['enhanced_mode']}{NC}"
     print(f"{DIM}模式: {tun_label}  DNS: {dns_label}  代理端口: {mode['mixed_port']}{NC}\n")
 
-    # [3/4] 连通性与 [1/4][2/4] 完全无依赖，提前并发发出
-    connectivity_result = [None]
+    collector: dict = {
+        "input": raw_input,
+        "parsed": {"scheme": scheme, "domain": domain, "port": port, "path": path},
+        "mode": mode,
+        "stages": {
+            "dns": {"resolved": [], "skipped": False},
+            "rules": {"predicted_rule": None, "predicted_proxy": None},
+            "connectivity": {"lines": []},
+            "connections": {"recent": []},
+        },
+    }
 
+    connectivity_result = [None]
     def _run_connectivity():
         connectivity_result[0] = _section_connectivity(scheme, domain, port, path, mode)
 
     t = threading.Thread(target=_run_connectivity)
     t.start()
 
-    # 输入直接是 IP 地址时跳过 DNS，直接进规则匹配
     if _is_ip(domain):
         print(f"{BOLD}[1/4] DNS 解析{NC}  {domain}  {DIM}(IP 地址，跳过){NC}")
         resolved_ips = [domain]
+        collector["stages"]["dns"] = {"resolved": [domain], "skipped": True}
     else:
         corp_dns = (config or {}).get("corp_dns", {}) or {}
         resolved_ips = _section_dns(domain, api, secret, fakeip_active, corp_dns)
-    predicted_rule, predicted_proxy = _section_rules(domain, resolved_ips, api, secret)
+        collector["stages"]["dns"] = {"resolved": list(resolved_ips), "skipped": False}
 
-    # 等连通性测试结束（此时大概率已完成），按顺序打印
+    predicted_rule, predicted_proxy = _section_rules(domain, resolved_ips, api, secret)
+    collector["stages"]["rules"] = {
+        "predicted_rule": predicted_rule,
+        "predicted_proxy": predicted_proxy,
+    }
+
     t.join()
-    lines, _ = connectivity_result[0]
+    lines, conn_ok = connectivity_result[0]
     for line in lines:
         print(line)
+    collector["stages"]["connectivity"] = {
+        "ok": bool(conn_ok),
+        "lines": [_strip_ansi(line) for line in lines],
+    }
 
     _section_connections(domain, resolved_ips, predicted_proxy, api, secret)
+
+    if as_json:
+        _sys.stdout = _real_stdout
+        from proxyctl._io import emit_json, envelope, OK
+        emit_json(envelope("trace", data=collector,
+                           ok=bool(conn_ok), code=OK))
+        _sys.exit(0)
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+def _strip_ansi(s: str) -> str:
+    return _ANSI_RE.sub("", s).strip()

@@ -31,8 +31,12 @@ PROXYCTL_AGENT=1 proxyctl <cmd>  # 一键开启 --json + 关色 + 非交互
 ```
 
 - 所有读类命令支持 `--json`（envelope schema v1：`schema_version / cmd / ok / data / error / code / hint / doc`）
+  - `status / doctor / check / trace / audit / commands / explain / agent-guide / plugins / config / log`
+  - `bench --json` 是 NDJSON 流式（每节点一行）+ 末尾 envelope summary
+- 子命令独立 `--help`（每个 `proxyctl <cmd> --help` 都派生自命令元数据）
 - 错误信息一律带 `hint` + `doc`（指向 `proxyctl explain <topic>`）
-- 退出码分语义（`0 OK / 2 USAGE / 3 NOT_FOUND / 5 ENGINE_DOWN / 6 CONFIG_ERR / 7 NETWORK_ERR / 8 LOCKED`）
+- 退出码分语义（`0 OK / 2 USAGE / 3 NOT_FOUND / 4 PERMISSION / 5 ENGINE_DOWN / 6 CONFIG_ERR / 7 NETWORK_ERR / 8 LOCKED`）
+- `proxyctl config set` 原子写：tmp + rename + `.bak` 备份 + YAML 校验，失败回滚
 - 写操作有文件锁；非 TTY 时自动 `NO_COLOR`；不读 stdin / 不 prompt
 
 ## 核心功能

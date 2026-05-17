@@ -30,6 +30,10 @@ _pc_maybe_disable(__name__)
 
 HOME = os.path.expanduser("~")
 
+_ANSI_RE = _re_mod.compile(r"\x1b\[[0-9;]*m")
+def _strip_ansi(s: str) -> str:
+    return _ANSI_RE.sub("", s).strip()
+
 
 def _port_listening(port: int) -> bool:
     try:
@@ -336,22 +340,26 @@ def _fmt_ip(ip: str, geo: str) -> str:
 def cmd_bench(api: str, api_secret: str, groups: list = None,
               default_groups: list[str] | None = None):
     """
-    proxyctl bench [group...] — 对指定代理组的全部节点发起测速，默认测全部组。
+    proxyctl bench [group...] — 对指定代理组的全部节点发起测速。
 
-    参数:
-        api            -- Clash API base URL (e.g. http://127.0.0.1:9090)
-        api_secret     -- Clash API Bearer token
-        groups         -- 命令行指定的组名列表；None 表示用 default_groups
-        default_groups -- 未指定 groups 时的默认组列表（由插件 check_groups 提供）
+    --json 模式：每节点完成立即输出一行 NDJSON
+        {"node": str, "rtt_ms": int|null, "ok": bool, "error": str|null}
+    末尾再输出一行 envelope（schema v1）汇总 summary。
     """
+    import sys as _sys
+    try:
+        from proxyctl.explain import GLOBAL_FLAGS_REF as _gf
+        as_json = bool(_gf().get("json"))
+    except Exception:
+        as_json = False
+
     DEFAULT_GROUPS = default_groups or ["proxy"]
     TEST_URL       = "https://www.gstatic.com/generate_204"
-    TIMEOUT_MS     = 5000   # 每个节点的测速超时（毫秒）
-    MAX_WORKERS    = 16     # 并发测速线程数
+    TIMEOUT_MS     = 5000
+    MAX_WORKERS    = 16
 
     target_groups = groups if groups else DEFAULT_GROUPS
 
-    # ── 拉取代理列表 ─────────────────────────────────────────────────────────
     r = subprocess.run(
         ["curl", "-s", "--noproxy", "*",
          "-H", f"Authorization: Bearer {api_secret}",
@@ -359,33 +367,52 @@ def cmd_bench(api: str, api_secret: str, groups: list = None,
         capture_output=True, text=True, timeout=5
     )
     if not r.stdout.strip():
+        if as_json:
+            from proxyctl._io import emit_json, envelope, NETWORK_ERR
+            emit_json(envelope("bench", ok=False, data=None,
+                               error="Clash API unreachable",
+                               code=NETWORK_ERR, hint="proxyctl start"))
+            _sys.exit(NETWORK_ERR)
         print(f"  {YELLOW}—{NC} Clash API 不可达")
         return
 
     try:
         proxies = json.loads(r.stdout).get("proxies", {})
     except Exception:
+        if as_json:
+            from proxyctl._io import emit_json, envelope, NETWORK_ERR
+            emit_json(envelope("bench", ok=False, data=None,
+                               error="API response parse failed",
+                               code=NETWORK_ERR))
+            _sys.exit(NETWORK_ERR)
         print(f"  {YELLOW}—{NC} API 响应解析失败")
         return
 
-    # ── 收集待测节点（多组间去重，保持顺序） ────────────────────────────────
     group_members: dict = {}
     for gname in target_groups:
         g = proxies.get(gname)
         if not g:
-            print(f"  {YELLOW}—{NC} 组 {BOLD}{gname}{NC} 不存在，跳过")
+            if not as_json:
+                print(f"  {YELLOW}—{NC} 组 {BOLD}{gname}{NC} 不存在，跳过")
             continue
         members = g.get("all", [])
         if not members:
-            print(f"  {YELLOW}—{NC} 组 {BOLD}{gname}{NC} 无成员")
+            if not as_json:
+                print(f"  {YELLOW}—{NC} 组 {BOLD}{gname}{NC} 无成员")
             continue
         group_members[gname] = members
 
     if not group_members:
+        if as_json:
+            from proxyctl._io import emit_json, envelope, NOT_FOUND
+            emit_json(envelope("bench", ok=False, data=None,
+                               error="No testable group",
+                               hint=f"已知组 (--json) 取 proxyctl status",
+                               code=NOT_FOUND))
+            _sys.exit(NOT_FOUND)
         print(f"  {RED}✗{NC} 无可测组")
         return
 
-    # 去重合并，保留首次出现顺序
     seen: set = set()
     all_nodes: list = []
     for members in group_members.values():
@@ -396,40 +423,75 @@ def cmd_bench(api: str, api_secret: str, groups: list = None,
 
     total = len(all_nodes)
     group_names = ", ".join(group_members.keys())
-    print(f"{BOLD}测速{NC}  组: {CYAN}{group_names}{NC}  节点: {BOLD}{total}{NC}")
+    if not as_json:
+        print(f"{BOLD}测速{NC}  组: {CYAN}{group_names}{NC}  节点: {BOLD}{total}{NC}")
 
-    # ── 并发测速，实时进度条 ──────────────────────────────────────────────────
     import threading
     done_count = [0]
     lock = threading.Lock()
+    results: list = []
 
     def _test_node(name: str):
-        """调用 Clash API 测单节点延迟，结果写回引擎 history。"""
         encoded_name = urllib.parse.quote(name, safe="")
         encoded_url  = urllib.parse.quote(TEST_URL, safe="")
         endpoint = (f"{api}/proxies/{encoded_name}/delay"
                     f"?url={encoded_url}&timeout={TIMEOUT_MS}")
-        subprocess.run(
+        rr = subprocess.run(
             ["curl", "-s", "--noproxy", "*", "--max-time",
              str(TIMEOUT_MS // 1000 + 3),
              "-H", f"Authorization: Bearer {api_secret}",
              endpoint],
             capture_output=True, text=True, timeout=TIMEOUT_MS // 1000 + 5
         )
+        rtt: int | None = None
+        err: str | None = None
+        try:
+            body = json.loads(rr.stdout)
+            if "delay" in body:
+                rtt = int(body["delay"])
+            else:
+                err = body.get("message") or "no-delay"
+        except Exception as e:
+            err = f"parse-error: {e}"
+
         with lock:
             done_count[0] += 1
             n = done_count[0]
-            bar_len = 24
-            filled  = int(bar_len * n / total)
-            bar     = f"{GREEN}{'█' * filled}{NC}{'░' * (bar_len - filled)}"
-            print(f"\r  [{bar}] {n}/{total}", end="", flush=True)
+            entry = {"node": name, "rtt_ms": rtt,
+                     "ok": rtt is not None, "error": err}
+            results.append(entry)
+            if as_json:
+                # NDJSON：每节点完成立即流式输出一行
+                _sys.stdout.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                _sys.stdout.flush()
+            else:
+                bar_len = 24
+                filled  = int(bar_len * n / total)
+                bar     = f"{GREEN}{'█' * filled}{NC}{'░' * (bar_len - filled)}"
+                print(f"\r  [{bar}] {n}/{total}", end="", flush=True)
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         list(pool.map(_test_node, all_nodes))
 
-    print()  # 结束进度行
+    if as_json:
+        from proxyctl._io import emit_json, envelope, OK
+        ok_count = sum(1 for r in results if r["ok"])
+        rtts = [r["rtt_ms"] for r in results if r["ok"]]
+        summary = {
+            "groups": list(group_members.keys()),
+            "total": total,
+            "ok_count": ok_count,
+            "fail_count": total - ok_count,
+            "avg_rtt_ms": (sum(rtts) // len(rtts)) if rtts else None,
+            "min_rtt_ms": min(rtts) if rtts else None,
+            "max_rtt_ms": max(rtts) if rtts else None,
+            "results": results,
+        }
+        emit_json(envelope("bench", data=summary, ok=ok_count > 0,
+                           code=OK if ok_count > 0 else 1))
+        _sys.exit(0 if ok_count > 0 else 1)
 
-    # ── 重新拉取并展示最新延迟 ────────────────────────────────────────────────
+    print()
     print()
     _proxy_groups_section(api, api_secret, groups=list(group_members.keys()))
 
@@ -458,14 +520,33 @@ def cmd_check(engine, api: str, api_secret: str,
               config: dict, mode_str: str = "", registry=None):
     """proxyctl check — 4 阶段全面健康检查。
 
-    Args:
-        engine: Backend 实例
-        api: Clash API 基础 URL
-        api_secret: Clash API Bearer token
-        config: 全局配置字典
-        mode_str: 代理模式字符串（tun/proxy/mixed）
-        registry: PluginRegistry，提供 check_targets/check_outbound_probes/check_groups
+    --json 模式：丢弃人类打印，收集关键事实到 collector，末尾输出 envelope。
     """
+    import io as _io_mod
+    import sys as _sys
+    try:
+        from proxyctl.explain import GLOBAL_FLAGS_REF as _gf
+        as_json = bool(_gf().get("json"))
+    except Exception:
+        as_json = False
+    collector: dict = {
+        "engine": engine.name,
+        "mode": mode_str,
+        "stages": {
+            "basic": {"daemon_up": False, "pid": "", "uptime": "",
+                      "ports": {"ok": [], "fail": []},
+                      "claude_proxy": None,
+                      "network": {}},
+            "groups": "skipped_in_json_v1",
+            "connectivity": [],
+            "outbound_ip": {},
+            "split_routing": None,
+        },
+    }
+    _real_stdout = _sys.stdout
+    if as_json:
+        _sys.stdout = _io_mod.StringIO()
+
     dns_lock_label = config.get("dns_lock_label", "com.proxyctl.dns-lock")
     claude_proxy_label = config.get("claude_proxy_label", "com.proxyctl.claude-proxy")
     sb_dir = config.get("config_dir", f"{HOME}/.config") + "/proxyctl"
@@ -527,8 +608,20 @@ def cmd_check(engine, api: str, api_secret: str,
                              capture_output=True, text=True)
         etime = r2.stdout.strip()
         print(f"  {GREEN}✓{NC} daemon PID {pid}, uptime {etime or '?'}")
+        collector["stages"]["basic"]["daemon_up"] = True
+        collector["stages"]["basic"]["pid"] = pid
+        collector["stages"]["basic"]["uptime"] = etime
     else:
         print(f"  {RED}✗{NC} daemon not running — 执行 proxyctl start")
+        collector["stages"]["basic"]["daemon_up"] = False
+        if as_json:
+            _sys.stdout = _real_stdout
+            from proxyctl._io import emit_json, envelope, ENGINE_DOWN
+            emit_json(envelope("check", data=collector, ok=False,
+                               code=ENGINE_DOWN,
+                               error="daemon not running",
+                               hint="proxyctl start"))
+            _sys.exit(ENGINE_DOWN)
         return
 
     # 端口检测（proxy 模式不检查 53）— 端口来自 config + api_base
@@ -573,6 +666,10 @@ def cmd_check(engine, api: str, api_secret: str,
         if cp_status and not ok_ports:
             parts += f"  {cp_status}"
         print(parts)
+    collector["stages"]["basic"]["ports"]["ok"] = ok_ports
+    collector["stages"]["basic"]["ports"]["fail"] = fail_ports
+    collector["stages"]["basic"]["claude_proxy"] = bool(cp_status and "✓" in cp_status) \
+                                                    if IS_MACOS else None
 
     # 网络环境状态行
     if IS_MACOS:
@@ -677,6 +774,10 @@ def cmd_check(engine, api: str, api_secret: str,
             except (OSError, ValueError):
                 pass
     print(f"  {infra}")
+    collector["stages"]["basic"]["network"] = {
+        "en0": en0_addr, "corp_net": corp_net, "corp_via": corp_via,
+        "dns_bad": dns_bad, "mode_dns_hijack": dns_hijack,
+    }
 
     # ── 2. 代理组 ─────────────────────────────────────────────────────────────
     print(f"{BOLD}[2/4] 代理组{NC}")
@@ -740,6 +841,13 @@ def cmd_check(engine, api: str, api_secret: str,
                 print(line)
                 if not ok:
                     fail = True
+                collector["stages"]["connectivity"].append({
+                    "name": targets[idx].name,
+                    "url": targets[idx].url,
+                    "mode": targets[idx].mode,
+                    "ok": bool(ok),
+                    "message": _strip_ansi(line),
+                })
 
     # [4/4] 出口 IP：等 IP 线程结束并展示每个 probe 的结果
     print(f"{BOLD}[4/4] 出口 IP{NC}")
@@ -753,6 +861,9 @@ def cmd_check(engine, api: str, api_secret: str,
         ip = probe_ips.get(probe.name, "")
         geo = _ipgeo(ip, cache_file, api_secret, proxy_port=proxy_port)
         print(f"  {probe.name:<7s}{_fmt_ip(ip, geo)}")
+        collector["stages"]["outbound_ip"][probe.name] = {
+            "ip": ip, "geo": geo, "mode": getattr(probe, "mode", ""),
+        }
 
     # 分流校验：当同时有 proxy 出口和 direct 出口时比较
     proxy_probe_ip  = next((probe_ips[p.name] for p in probes
@@ -762,8 +873,16 @@ def cmd_check(engine, api: str, api_secret: str,
     if proxy_probe_ip and direct_probe_ip:
         if proxy_probe_ip != direct_probe_ip:
             print(f"  {GREEN}✓{NC} 分流正常")
+            collector["stages"]["split_routing"] = {
+                "ok": True,
+                "proxy_ip": proxy_probe_ip, "direct_ip": direct_probe_ip,
+            }
         else:
             print(f"  {YELLOW}!{NC} 出口相同 — 检查分流规则")
+            collector["stages"]["split_routing"] = {
+                "ok": False,
+                "proxy_ip": proxy_probe_ip, "direct_ip": direct_probe_ip,
+            }
 
     # ── 结果 ──────────────────────────────────────────────────────────────────
     print()
@@ -773,3 +892,13 @@ def cmd_check(engine, api: str, api_secret: str,
         print(f"{YELLOW}{BOLD}Some checks failed.{NC}")
         if dns_bad:
             print(f"{CYAN}DNS 异常，执行 {BOLD}sb fix{NC}{CYAN} 修复。{NC}")
+
+    if as_json:
+        _sys.stdout = _real_stdout
+        from proxyctl._io import emit_json, envelope, OK, GENERIC
+        hint = "proxyctl fix" if dns_bad else None
+        emit_json(envelope("check", data=collector,
+                           ok=(not fail),
+                           code=OK if not fail else GENERIC,
+                           hint=hint))
+        _sys.exit(0 if not fail else 1)
