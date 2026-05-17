@@ -148,6 +148,20 @@ class Plugin:
         return []
 
 
+# ── 内部工具 ─────────────────────────────────────────────────────────────────
+
+def _apply_color_policy(modname: str) -> None:
+    """插件模块加载后立刻调用：若当前是关色态，把模块自定义的 RED/GREEN/...
+    常量抹空。解决用户插件（如 sb_private.py）在 cli.main() 的 set_no_color
+    之后加载，导致硬编码 ANSI 字面量泄漏到管道输出的问题。"""
+    try:
+        from proxyctl import _io
+        _io.maybe_disable_module_colors(modname)
+    except Exception:
+        # 插件加载链路不应被色彩策略阻断
+        pass
+
+
 # ── Registry ─────────────────────────────────────────────────────────────────
 
 class PluginRegistry:
@@ -171,7 +185,9 @@ class PluginRegistry:
             if modname.startswith("_"):
                 continue
             try:
-                mod = importlib.import_module(f"proxyctl.builtin_plugins.{modname}")
+                full_name = f"proxyctl.builtin_plugins.{modname}"
+                mod = importlib.import_module(full_name)
+                _apply_color_policy(full_name)
                 self._discover_in_module(mod, config, source=f"builtin/{modname}")
             except Exception as e:
                 self.errors.append((f"builtin/{modname}", _fmt_err(e)))
@@ -192,6 +208,7 @@ class PluginRegistry:
                 mod = importlib.util.module_from_spec(spec)
                 sys.modules[mod_name] = mod
                 spec.loader.exec_module(mod)
+                _apply_color_policy(mod_name)
                 self._discover_in_module(mod, config, source=f"user/{fname}")
             except Exception as e:
                 self.errors.append((f"user/{fname}", _fmt_err(e)))

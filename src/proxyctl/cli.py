@@ -1361,7 +1361,16 @@ def _read_log_lines(path: str, tail_n: int | None) -> list:
 
 # ── 帮助 ──────────────────────────────────────────────────────────────────────
 
-VERSION = "0.3.0"
+def _read_version() -> str:
+    """单一事实来源：pyproject.toml 的 [project] version。"""
+    try:
+        from importlib.metadata import version
+        return version("proxyctl")
+    except Exception:
+        return "unknown"
+
+
+VERSION = _read_version()
 
 
 # Help 输出按 group 分块的顺序（避免依赖 dict 插入顺序变化）

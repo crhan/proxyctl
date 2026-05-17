@@ -271,6 +271,61 @@ def test_load_user_empty_name_warns_but_loads(tmp_path: Path, capsys):
     assert "empty name" in capsys.readouterr().err
 
 
+def test_load_user_strips_plugin_ansi_when_no_color(tmp_path: Path):
+    """关色态下加载用户插件，插件自定义的 ANSI 常量应被抹空。
+
+    回归 0.3.1：sb_private.py 这类插件自己定义 RED/GREEN/NC 时，
+    set_no_color(True) 之后加载的它会继续吐 \\033[...] 字面量到管道输出。
+    """
+    from proxyctl import _io
+
+    (tmp_path / "color_plugin.py").write_text(
+        "from proxyctl.core.plugin import Plugin\n"
+        "RED = '\\033[0;31m'\n"
+        "GREEN = '\\033[0;32m'\n"
+        "YELLOW = '\\033[0;33m'\n"
+        "NC = '\\033[0m'\n"
+        "class P(Plugin):\n"
+        "    name = 'color-plugin'\n"
+    )
+    mod_name = "proxyctl_user_plugin.color_plugin"
+    sys.modules.pop(mod_name, None)
+    try:
+        _io.set_no_color(True)
+        reg = PluginRegistry()
+        reg.load_user(str(tmp_path), {})
+        mod = sys.modules[mod_name]
+        assert mod.RED == ""
+        assert mod.GREEN == ""
+        assert mod.YELLOW == ""
+        assert mod.NC == ""
+    finally:
+        _io.set_no_color(False)
+        sys.modules.pop(mod_name, None)
+
+
+def test_load_user_keeps_plugin_ansi_when_color_on(tmp_path: Path):
+    """彩色态下加载，插件 ANSI 常量不应被改动。"""
+    from proxyctl import _io
+
+    (tmp_path / "color_plugin_keep.py").write_text(
+        "from proxyctl.core.plugin import Plugin\n"
+        "GREEN = '\\033[0;32m'\n"
+        "class P(Plugin):\n"
+        "    name = 'keep-color'\n"
+    )
+    mod_name = "proxyctl_user_plugin.color_plugin_keep"
+    sys.modules.pop(mod_name, None)
+    try:
+        _io.set_no_color(False)
+        reg = PluginRegistry()
+        reg.load_user(str(tmp_path), {})
+        mod = sys.modules[mod_name]
+        assert mod.GREEN == "\033[0;32m"
+    finally:
+        sys.modules.pop(mod_name, None)
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # build_registry 工厂
 # ────────────────────────────────────────────────────────────────────────────

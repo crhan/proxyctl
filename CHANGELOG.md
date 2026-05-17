@@ -5,6 +5,25 @@
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-05-17
+
+### Fixed
+- **用户插件 ANSI 字面量泄漏到管道** — 当用户插件
+  （如 `~/.config/proxyctl/plugins/sb_private.py`）自己定义 `RED/GREEN/...`
+  常量时，`set_no_color(True)` 后才被加载的插件代码继续吐 `\033[...]m`
+  字面量到 status / check 等命令的非 TTY 输出。修复：`core/plugin.py` 的
+  `load_builtin` / `load_user` 在 import 完每个插件模块后立刻调一次
+  `maybe_disable_module_colors`，使关色态对插件模块生效。
+- **`src/proxyctl/__init__.py` 的 `__version__` 与 pyproject 脱节**
+  （0.2.2 vs 0.3.0）— 此后由发版流程统一同步。
+- **`cli.VERSION` 硬编码 `"0.3.0"`** 导致 `proxyctl --version` 跟 pyproject 脱节。
+  改为通过 `importlib.metadata.version("proxyctl")` 单一事实来源读取。
+
+### Added — 测试
+- `test_load_user_strips_plugin_ansi_when_no_color` /
+  `test_load_user_keeps_plugin_ansi_when_color_on` — 插件加载色彩策略回归。
+- 总测试数 426 → 428。
+
 ## [0.3.0] — 2026-05-17
 
 > Agent-friendliness + clig.dev 全面合规。这是一个有意 breaking 的版本——
