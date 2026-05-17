@@ -5,6 +5,25 @@
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-18
+
+> T5（plan ↔ exec 一致性）正式版。0.4.0a1 的功能完整 + 补 `--dry-run` 行为
+> 在 README / man page 的用户/agent 文档。零 schema 变更，公开 CLI 行为完全
+> 兼容 0.3.x；私有 `_plan_*` helper 签名变更（仅影响仓库外直接 import 的代码）。
+
+### Added — Documentation (vs. 0.4.0a1)
+
+- **README.md**：扩展 `--dry-run` 段。给出 `proxyctl dns-unlock --dry-run --json |
+  jq` 的可复读 argv 示例，列 9 种 PlanStep.action 枚举，指向 contract test 文件。
+- **man/proxyctl.1**：扩展 `--dry-run` 段。明确 "自 0.4.0 plan.target 全部真实化"，
+  列 action 枚举，提及 CI contract test。
+
+### 0.4.0a1 → 0.4.0 之间无功能变化
+
+a1 的所有改动（plan.target 真实化 / 5 个共享 helper / 11 个 contract test /
+agent-guide Plan action types 段 / 5 人 review P1 follow-up）全部保留。
+本版仅补文档使正式 release 信息对称。
+
 ## [0.4.0a1] — 2026-05-17
 
 > Plan ↔ Exec 一致性（T5）：8 个写命令的 `_plan_*` 与 `cmd_*` 共享单一 argv 事实

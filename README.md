@@ -34,7 +34,16 @@ PROXYCTL_AGENT=1 proxyctl <cmd>      # 一键 --json + 关色 + 非交互
 
 - envelope schema v2：`schema_version / cmd / ok / data / error / code / hints[] / warnings[] / doc / meta{{ts,elapsed_ms,proxyctl_version,request_id}}`
 - 退出码分语义：`0 OK / 2 USAGE / 3 NOT_FOUND / 4 PERMISSION / 5 ENGINE_DOWN / 6 CONFIG_ERR / 7 NETWORK_ERR / 8 LOCKED / 9 TIMEOUT / 10 DEPENDENCY_MISSING`
-- 写命令支持 `--dry-run` 输出结构化 plan；`audit/check` 支持 `--plain` TSV
+- 写命令支持 `--dry-run` 输出结构化 plan（`data.plan = [PlanStep, ...]`）；自 0.4.0 起
+  `plan.target` 全部真实化，`action=="subprocess"` 的 target.split() 可直接当 argv 复读：
+  ```bash
+  proxyctl dns-unlock --dry-run --json | jq -r '.data.plan[] | select(.action=="subprocess").target'
+  # → launchctl bootout system/com.proxyctl.dns-lock
+  # → rm -f /Library/LaunchDaemons/com.proxyctl.dns-lock.plist
+  ```
+  PlanStep.action 枚举：`subprocess / system_op / fs_write / fs_copy / fs_write_atomic / fs_remove / edit_yaml / scan_log / http_put`。
+  CI 层 contract test（`tests/integration/test_plan_exec_contract.py`）保证 plan ↔ exec 永不漂移。
+- `audit/check` 支持 `--plain` TSV
 - `proxyctl help <cmd>` 与 `<cmd> --help` 同源；错误带可执行 hints + explain topic
 - 非 TTY 自动关色；不读 stdin / 不 prompt；写操作 fcntl.flock 互斥
 - 从 0.2.x 升级见 [MIGRATION-0.3.md](MIGRATION-0.3.md)
