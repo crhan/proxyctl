@@ -493,13 +493,141 @@ def _suggest(name: str, candidates: list) -> list:
 # ── 主入口 2: agent-guide ─────────────────────────────────────────────────
 
 def cmd_agent_guide(args: list, backend, config) -> None:
-    """proxyctl agent-guide [--json] — 给 LLM Agent 一份 ≤200 行的自描述文档。"""
+    """proxyctl agent-guide [--section <name>] [--list-sections] [--json]
+
+    无参 → 输出完整 markdown（≤300 行）。
+    `--list-sections` → 列出所有可用 section 名，agent 可挑一个取。
+    `--section <name>` → 只输出该 section 的 markdown（H2 标题下 + 直到下一个 H2）。
+    name 是大小写不敏感 + 空格容忍的模糊匹配（"envelope fields" / "envelope-fields"
+    / "Envelope 字段含义表" 都接受）。
+    """
     as_json = GLOBAL_FLAGS_REF().get("json", False)
+
+    # 解析 args
+    positional, flags = _io.extract_flags(
+        args, known={"--section": "value", "--list-sections": "bool"})
+
     text = _build_agent_guide(backend, config)
+    sections = _split_agent_guide_sections(text)
+    section_names = list(sections.keys())  # 保持原顺序
+
+    if flags.get("list_sections"):
+        if as_json:
+            emit_json(envelope("agent-guide", data={
+                "available_sections": section_names,
+                "section_count": len(section_names),
+            }))
+            return
+        print(f"{BOLD}可用 section（{len(section_names)} 个）：{NC}")
+        for s in section_names:
+            print(f"  {CYAN}{s}{NC}")
+        print(f"\n{DIM}用法：proxyctl agent-guide --section <name>{NC}")
+        return
+
+    requested = flags.get("section")
+    if requested:
+        match = _match_section(requested, section_names)
+        if match is None:
+            import difflib
+            suggest = difflib.get_close_matches(
+                requested, section_names, n=3, cutoff=0.3)
+            hints = [f"可用 section: {', '.join(section_names)}"]
+            if suggest:
+                hints.insert(0, f"是否想要：{suggest[0]}？")
+            _io.fail(f"未识别 section：{requested}",
+                     hints=hints, doc="agent",
+                     code=_io.USAGE, cmd="agent-guide")
+        chunk = sections[match]
+        if as_json:
+            emit_json(envelope("agent-guide", data={
+                "section": match,
+                "markdown": chunk,
+                "available_sections": section_names,
+            }))
+            return
+        print(chunk)
+        return
+
     if as_json:
-        emit_json(envelope("agent-guide", data={"markdown": text}))
+        emit_json(envelope("agent-guide", data={
+            "markdown": text,
+            "available_sections": section_names,
+        }))
         return
     print(text)
+
+
+def _split_agent_guide_sections(md: str) -> dict[str, str]:
+    """把 _build_agent_guide 输出的 markdown 按 H2 标题切分。
+
+    返回 OrderedDict 形式（python 3.7+ 普通 dict 即有序）：
+      {section_name: section_markdown_including_heading}
+
+    section_name 是 H2 标题去 emoji / 中文标点后的归一化版（lowercase + 空格连字符化），
+    便于 agent 用 ASCII 名稳定引用。
+    """
+    import re
+    lines = md.split("\n")
+    sections: dict[str, str] = {}
+    cur_name: str | None = None
+    cur_lines: list[str] = []
+    # 文档开头到第一个 H2 之前的内容 → "introduction"
+    intro_started = False
+    for ln in lines:
+        m = re.match(r"^##\s+(.+?)\s*$", ln)
+        if m:
+            # 收尾上一个 section
+            if cur_name is not None:
+                sections[cur_name] = "\n".join(cur_lines).rstrip() + "\n"
+            elif cur_lines:
+                # 文档开头部分作为 "introduction"
+                sections["introduction"] = "\n".join(cur_lines).rstrip() + "\n"
+            title = m.group(1).strip()
+            cur_name = _normalize_section_name(title)
+            cur_lines = [ln]
+        else:
+            cur_lines.append(ln)
+    if cur_name is not None:
+        sections[cur_name] = "\n".join(cur_lines).rstrip() + "\n"
+    elif cur_lines and not sections:
+        sections["introduction"] = "\n".join(cur_lines).rstrip() + "\n"
+    return sections
+
+
+def _normalize_section_name(title: str) -> str:
+    """H2 标题 → ASCII 友好的 section name（agent 引用稳定）。
+
+    约定：H2 推荐写成 ``## English Name — 中文标题``，取破折号（—/–/-）前
+    的英文段做 ID。这样 agent 引用的是稳定 ASCII slug，人类标题仍然中文友好。
+
+    映射规则：取破折号前内容（若有）→ 保留 ASCII 字母数字 → 空格合并 →
+    转连字符 → lowercase。全空回退 'section'。
+    """
+    import re
+    # 1. 取破折号前的部分（U+2014 — / U+2013 – / ASCII - 都接受）。
+    #    必须两边都有空格才算分隔符，避免误切 "Non-Interactive" / "Self-Discovery"
+    #    这类内部含 ASCII 连字符但无空格的英文短语。
+    parts = re.split(r"\s+[—–\-]\s+", title, maxsplit=1)
+    head = parts[0] if parts else title
+    # 2. 留下 ASCII 字母数字、空格、连字符
+    s = re.sub(r"[^A-Za-z0-9\s\-]", " ", head)
+    s = re.sub(r"\s+", " ", s).strip()
+    s = s.replace(" ", "-").lower()
+    # 3. 连续连字符合并 + 去边界
+    s = re.sub(r"-+", "-", s).strip("-")
+    return s or "section"
+
+
+def _match_section(requested: str, names: list[str]) -> str | None:
+    """模糊匹配：requested 可以是归一化后的 name、原始 H2 标题、或子串。"""
+    norm_req = _normalize_section_name(requested)
+    if norm_req in names:
+        return norm_req
+    # 子串匹配（防止 agent 拼 'envelope' 想找 'envelope-fields'）
+    candidates = [n for n in names if norm_req and norm_req in n]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
 
 
 def _build_agent_guide(backend, config) -> str:
@@ -523,7 +651,7 @@ def _build_agent_guide(backend, config) -> str:
 > 本文档由 `proxyctl agent-guide` 在运行时输出，含当前 backend/路径/端口。
 > 仓库视角（开发/贡献协议）见仓库根 `AGENTS.md`。
 
-## Agent 第一次接入：6 步引导路径
+## Onboarding — Agent 第一次接入：6 步引导路径
 
 ```
 Step 1  proxyctl agent-guide              # 你正在看
@@ -537,7 +665,7 @@ Step 6  proxyctl explain <topic>          # 深入概念（topic 见下）
 
 调用任何写命令前先加 `--dry-run --json` 看 `data.plan`，确认无误再去掉。
 
-## 能做什么（按副作用三分类）
+## Capabilities — 能做什么（按副作用三分类）
 
 | 类别 | sudo | 命令 |
 |---|---|---|
@@ -549,7 +677,7 @@ Step 6  proxyctl explain <topic>          # 深入概念（topic 见下）
 
 完整精确表见 `proxyctl commands --json` 的 `side_effects` 与 `conditional_side_effects` 字段。
 
-## 不能做什么（去别处改）
+## Exclusions — 不能做什么（去别处改）
 
 - 添加 / 修改 / 删除分流规则 → 编辑 `{mcfg}` 的 `rules:` 段
 - 添加节点 / 改订阅 → 编辑 `{mcfg}` 的 `proxies:` / `proxy-providers:` 段
@@ -558,7 +686,7 @@ Step 6  proxyctl explain <topic>          # 深入概念（topic 见下）
 - 安装 mihomo / sing-box → `brew install mihomo` 等
 - 重启第三方应用 → 浏览器 / Slack / VSCode 需用户自己重启读 system proxy
 
-## 概念地图（"想改 X 去哪"）
+## Concept Map — "想改 X 去哪"
 
 | 想改 | 文件 | 段 / 字段 |
 |---|---|---|
@@ -571,7 +699,7 @@ Step 6  proxyctl explain <topic>          # 深入概念（topic 见下）
 更多：`proxyctl explain <topic>`，topic：
 {topics_list}
 
-## 关键路径（当前 backend = {backend.name}）
+## Paths — 关键路径（当前 backend = {backend.name}）
 
 - proxyctl 配置: `{pcfg}`
 - 引擎配置: `{mcfg}`
@@ -581,7 +709,7 @@ Step 6  proxyctl explain <topic>          # 深入概念（topic 见下）
 - 用户插件目录: `~/.config/proxyctl/plugins/*.py`
 - 锁文件目录: `{lock_dir}/.lock.{{system|config|daemon}}`
 
-## 退出码
+## Exit Codes — 退出码
 
 ```
 {exit_lines}
@@ -589,7 +717,7 @@ Step 6  proxyctl explain <topic>          # 深入概念（topic 见下）
 
 旧路径仍返回 1（GENERIC）。新错误路径使用分语义码。SIGINT → 130。
 
-## JSON envelope（schema v2）
+## Envelope — JSON envelope（schema v2）
 
 ```json
 {{
@@ -632,7 +760,7 @@ Step 6  proxyctl explain <topic>          # 深入概念（topic 见下）
 NDJSON 流式：`bench --json` 每节点一行 JSON + 末尾 envelope summary；
 `log --json` 每行一个 `{{file, line}}` 对象（非 envelope）。
 
-## 故障决策树（给 Agent 自动化）
+## Decision Tree — 故障决策树（给 Agent 自动化）
 
 1. `proxyctl doctor --json`  ← 最快，5 项布尔 + score（+ engine/mode/lock_path 信息字段）
 2. 如果 `engine_up=false` → `proxyctl start`
@@ -643,13 +771,13 @@ NDJSON 流式：`bench --json` 每节点一行 JSON + 末尾 envelope summary；
 7. 切网后 → `proxyctl recover`（不重启进程）
 8. 拿不到锁（exit=8 LOCKED）→ 见下方"锁文件位置 + 手动释放"
 
-## non-interactive 承诺
+## Non-Interactive — non-interactive 承诺
 
 proxyctl 在 stdin 非 TTY 时**不会**调用 `input()` 等阻塞读取。
 设置 `PROXYCTL_AGENT=1` 等价同时打开 `--json + --no-color + 非交互`，
 所有命令默认输出 envelope v2，写操作摘要打到 stderr。
 
-## 锁文件位置 + 手动释放
+## Locks — 锁文件位置 + 手动释放
 
 写操作（mode/engine/fix/audit apply/config set/daemon/dns-lock 等）通过
 `fcntl.flock` 保护，并发冲突返回 `LOCKED(8)`。
@@ -663,7 +791,7 @@ proxyctl 在 stdin 非 TTY 时**不会**调用 `input()` 等阻塞读取。
 
 LOCKED 错误的 `hints` 列表已包含具体锁路径。
 
-## footgun（提醒）
+## Footgun — footgun 提醒
 
 - `mode tun` 需要 sudo；macOS launchd 已自动 sudo prompt
 - `audit apply` 会写引擎 `rules:` 段；建议先 `proxyctl audit apply --dry-run`
@@ -672,7 +800,7 @@ LOCKED 错误的 `hints` 列表已包含具体锁路径。
 - 节点订阅由 mihomo `proxy-providers` 自管；proxyctl 不会刷新订阅
 - `--quiet` 仅压制非关键 stderr；envelope / error 仍输出
 
-## 自发现
+## Self-Discovery — 自发现
 
 - `proxyctl --version --json` — schema_version + supported_features 探测
 - `proxyctl commands --json` — 全部命令元数据
@@ -681,7 +809,7 @@ LOCKED 错误的 `hints` 列表已包含具体锁路径。
 - `proxyctl help <cmd>` — 单命令完整说明
 - `proxyctl doctor --json` — 健康基线
 
-## 仓库视角
+## Repo — 仓库视角
 
 如果你正在编辑 proxyctl 源码（而非调用安装好的 CLI），仓库根的
 `AGENTS.md` 含开发约定（DISPATCH 注册 / 错误路径 / 锁 / 提交规范）。
@@ -855,10 +983,14 @@ COMMANDS_META: list[dict] = [
      "needs_sudo": False, "interactive": False, "exit_codes": [0, 2],
      "examples": ["proxyctl explain", "proxyctl explain rules --json"]},
     {"name": "agent-guide", "group": "agent",
-     "summary": "给 LLM Agent 的入门 markdown（含能力边界、退出码、决策树）",
+     "summary": "给 LLM Agent 的入门 markdown（含能力边界、退出码、决策树）；"
+                "支持 --section <name> 按需取小块",
      "args": [], "supports_json": True, "side_effects": [],
-     "needs_sudo": False, "interactive": False, "exit_codes": [0],
-     "examples": ["proxyctl agent-guide", "proxyctl agent-guide --json"]},
+     "needs_sudo": False, "interactive": False, "exit_codes": [0, 2],
+     "examples": ["proxyctl agent-guide",
+                  "proxyctl agent-guide --list-sections",
+                  "proxyctl agent-guide --section envelope --json",
+                  "proxyctl agent-guide --json"]},
     {"name": "commands", "group": "agent",
      "summary": "所有命令的元数据（含 side_effects / needs_sudo / exit_codes）；"
                 "--schema 输出 JSON Schema",
@@ -1233,9 +1365,12 @@ def cmd_doctor(args: list, backend, config) -> None:
         held = []
     lock_path_map = _io.lock_paths()
 
+    healthy = (score == len(flags))
     data = {
         **flags,
-        "score": score, "max": len(flags), "hint": hint,
+        "score": score, "max": len(flags),
+        "healthy": healthy,        # 0.3.3：agent 不必自己算 score == max
+        "hint": hint,
         # informational fields (W15 in 0.3.0):
         "engine": backend.name,
         "mode": mode_str,
@@ -1245,7 +1380,6 @@ def cmd_doctor(args: list, backend, config) -> None:
         "lock_held": held,
         "lock_path": lock_path_map,
     }
-    healthy = (score == len(flags))
     code = OK if healthy else ENGINE_DOWN
 
     if as_json:
@@ -1342,5 +1476,12 @@ def GLOBAL_FLAGS_REF() -> dict:
 
 
 def set_global_flags(flags: dict) -> None:
+    """让 explain 模块 + _io 模块的 json 模式保持同步。
+
+    cli.main() 调一次即可；测试若想绕过 cli.main 直接调子命令，也应该用
+    这个 setter（而不是手工写 _GLOBAL_FLAGS），否则 _io.fail / _io.is_json_mode
+    会读到旧值，错误路径不输出 envelope。
+    """
     _GLOBAL_FLAGS.clear()
     _GLOBAL_FLAGS.update(flags)
+    _io.set_json_mode(bool(flags.get("json", False)))

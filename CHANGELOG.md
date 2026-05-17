@@ -5,6 +5,49 @@
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-05-17
+
+> 4 项 agent 体感改进 + 1 组端到端回归测试。零 breaking、零 schema 变化，
+> 0.3.x 消费者可无感升级。
+
+### Added — Agent-facing
+- **`doctor --json` 增 `healthy: bool` 字段**（agent 不必再算 `score == max`）。
+  `supported_features.doctor_healthy_field = true`。
+- **`agent-guide --section <name>` / `--list-sections`** — agent 按需取小块
+  markdown，避免每次拉 ~200 行全文。H2 标题改为 `English — 中文` 双语
+  （ASCII slug 稳定供 agent 引用，中文供人类阅读）。模糊匹配 + did-you-mean。
+  `supported_features.agent_guide_sections = true`。
+- **shell 补全脚本补齐 0.3.x 全部新 flag** — bash/zsh/fish 补全现在覆盖：
+  `--dry-run`（写命令位置）、`--plain`（audit/check 位置）、
+  `commands --schema`、`agent-guide --section/--list-sections`、
+  `help <cmd>` 顶层子命令、`log --tail/--no-follow`、`env --unset`。
+
+### Changed — 结构性
+- **`explain.set_global_flags` 同步设 `_io._JSON_MODE`** — 解决子模块直接
+  调用（绕过 `cli.main`）时 `_io.fail` 拿不到正确 JSON 模式的问题。
+  本来只影响测试代码，但同样适用于第三方调用方。
+
+### Added — 端到端回归测试（防 0.3.2 类 bug 再发）
+- **`tests/integration/test_regression_0_3_2.py`** 新增 8 个集成测试：
+  - `test_cmd_dns_unlock_macos_no_nameerror` — Bug #3 回归（IS_MACOS 分支
+    NameError），mock `IS_MACOS=True` + `run()` 走完整 happy path。
+  - `test_plan_mode_no_system_double_prefix` / `_plan_engine_*` —
+    Bug #4 回归（plan target 双前缀）。
+  - `test_all_plan_funcs_no_system_double_prefix` — **通用契约**：所有
+    `_plan_*` 函数 target 都不含 `system/system/`，新增写命令也会被这个
+    测试抓住漂移。
+  - `test_cmd_trace_json_envelope_ok_is_true_when_no_remote_ip` /
+    `_when_remote_ip_present` — Bug #5 回归（envelope.ok 与
+    `remote_ip` 字符串解耦；connectivity.ok 仍是 informational）。
+  - `test_dry_run_plan_target_no_placeholder_for_resolved_backend` —
+    mode/engine/fix 的 plan target 应是真实路径，不是占位符（为 0.4.0 T5
+    plan/exec 真绑定打底）。
+  - `test_cli_version_matches_pyproject` — 0.3.1 引入的"VERSION 单一事实
+    来源"契约（再加一道防线）。
+
+### Test stats
+- 总测试数 430 → 466（+36：T1 +1 / T2 +13 / T3 +14 / T4 +8）。
+
 ## [0.3.2] — 2026-05-17
 
 > v0.3.0 引入 `--plain` / `--dry-run` 时的 4 处遗留 bug。无新增能力、无 schema 变更，

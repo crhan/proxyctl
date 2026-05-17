@@ -117,20 +117,26 @@ def test_agent_guide_has_required_sections(backend, config, capsys):
     text = capsys.readouterr().out
 
     # 9 个关键章节关键词必须都在
+    # 0.3.3：H2 标题改为 "English — 中文" 双语，agent 引用稳定 ASCII slug；
+    # 测试同时核对英文 slug 与中文短语，确保两边都没掉。
     required = [
-        "一句话",  # 一句话定位
-        "能做什么",
-        "不能做什么",
-        "概念地图",
-        "关键路径",
-        "退出码",
-        "故障决策树",
+        "一句话",                # 一句话定位
+        ("Capabilities", "能做什么"),
+        ("Exclusions", "不能做什么"),
+        ("Concept Map", "想改 X 去哪"),
+        ("Paths", "关键路径"),
+        ("Exit Codes", "退出码"),
+        ("Decision Tree", "故障决策树"),
         "non-interactive",
-        "JSON envelope",
+        ("Envelope", "JSON envelope"),
         "footgun",
     ]
     for kw in required:
-        assert kw in text, f"agent-guide 缺少章节关键词: {kw}"
+        if isinstance(kw, tuple):
+            for one in kw:
+                assert one in text, f"agent-guide 缺少章节关键词: {one}"
+        else:
+            assert kw in text, f"agent-guide 缺少章节关键词: {kw}"
 
     # 至少 80 行（agent 入门要够厚）
     assert text.count("\n") >= 80

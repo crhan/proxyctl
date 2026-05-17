@@ -1571,6 +1571,8 @@ def cmd_version_print() -> None:
                 "agents_md":               True,
                 "commands_schema":         True,
                 "doctor_extended":         True,
+                "doctor_healthy_field":    True,   # 0.3.3
+                "agent_guide_sections":    True,   # 0.3.3
                 "log_ndjson_v2":           True,
             },
         }

@@ -66,6 +66,22 @@ def test_doctor_includes_informational_fields(backend, config, capsys,
     # score 仍只数核心 5 项
     assert data["score"] <= data["max"]
     assert data["max"] == 5
+    # 0.3.3：healthy 字段免去 agent 自己算 score == max
+    assert "healthy" in data
+    assert isinstance(data["healthy"], bool)
+    assert data["healthy"] == (data["score"] == data["max"])
+
+
+def test_doctor_healthy_false_when_some_fail(backend, config, capsys,
+                                              monkeypatch):
+    """所有探测都失败 → score=0 → healthy=False。"""
+    _patch_doctor_probes(monkeypatch, engine_up=False)
+    explain.set_global_flags({"json": True})
+    with pytest.raises(SystemExit):
+        explain.cmd_doctor([], backend, config)
+    data = json.loads(capsys.readouterr().out)["data"]
+    assert data["score"] == 0
+    assert data["healthy"] is False
 
 
 def test_doctor_lock_path_strings_end_with_lock_name(backend, config,

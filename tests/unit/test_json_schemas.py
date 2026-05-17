@@ -94,7 +94,7 @@ DOCTOR_V2 = {
     "type": "object",
     "required": ["engine_up", "port_listen", "dns_ok",
                  "system_proxy_ok", "connectivity_ok",
-                 "score", "max", "hint"],
+                 "score", "max", "healthy", "hint"],
     "properties": {
         "engine_up": {"type": "boolean"},
         "port_listen": {"type": "boolean"},
@@ -103,6 +103,7 @@ DOCTOR_V2 = {
         "connectivity_ok": {"type": "boolean"},
         "score": {"type": "integer"},
         "max": {"type": "integer"},
+        "healthy": {"type": "boolean"},
         "hint": {"type": ["string", "null"]},
     },
 }

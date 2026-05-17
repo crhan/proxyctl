@@ -67,7 +67,7 @@ def test_version_json_supported_features_known_keys():
         "exit_codes_extended", "did_you_mean", "lock_path_in_error",
         "side_effects_enum", "dry_run", "plain",
         "flag_position_invariant", "commands_schema", "doctor_extended",
-        "log_ndjson_v2", "agents_md",
+        "doctor_healthy_field", "log_ndjson_v2", "agents_md",
     }
     missing = required_keys - set(feat)
     assert not missing, f"supported_features 缺少 keys: {missing}"

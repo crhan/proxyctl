@@ -53,8 +53,10 @@ dns-lock / dns-unlock。
 .SH COMMANDS
 .SS 自描述（Agent 入口）
 .TP
-.B proxyctl agent-guide
+\fBproxyctl agent-guide\fR [\fB--list-sections\fR | \fB--section\fR \fINAME\fR]
 输出给 LLM 的运行时入门 markdown（能力地图 / 引导路径 / 决策树 / envelope 字段表 / 锁文件位置 / footgun）。
+v0.3.3 新增：\fB--list-sections\fR 列出所有 ASCII slug 形式的 section 名；
+\fB--section <name>\fR 只输出该 section（模糊匹配 + did-you-mean），agent 按需取小块。
 .TP
 \fBproxyctl explain\fR [\fITOPIC\fR]
 无参输出"想改 X 去哪？"速查表；带 topic 输出卡片。
@@ -74,7 +76,8 @@ supports_dry_run / needs_sudo / interactive / exit_codes / examples。
 .B proxyctl doctor [--json]
 极简 5 项健康打分：engine_up / port_listen / dns_ok / system_proxy_ok /
 connectivity_ok。\fB--json\fR 额外含 informational 字段：
-engine / mode / port / config_path / engine_config_path / lock_held / lock_path。
+engine / mode / port / config_path / engine_config_path / lock_held / lock_path /
+\fBhealthy\fR (v0.3.3 新增 bool，agent 不必再算 score==max)。
 .TP
 .B proxyctl help [\fICOMMAND\fR]
 顶层帮助 / 单命令完整说明。等价 \fBproxyctl --help\fR / \fBproxyctl <cmd> --help\fR。

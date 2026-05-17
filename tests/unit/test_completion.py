@@ -63,3 +63,114 @@ def test_completion_json_envelope(capsys):
     assert env["data"]["shell"] == "zsh"
     assert "compdef proxyctl" in env["data"]["script"]
     set_global_flags({"json": False})
+
+
+# ── 0.3.3：新 flag 必须在补全脚本里 ────────────────────────────────────────
+def test_bash_completion_includes_0_3_x_global_flags(capsys):
+    completion.cmd_completion(["bash"])
+    out = capsys.readouterr().out
+    for flag in ("--dry-run", "--plain"):
+        assert flag in out, f"bash 补全缺 {flag}"
+
+
+def test_bash_completion_includes_help_subcommand(capsys):
+    """0.3.0 新增的 proxyctl help <cmd> 顶层命令应被补全。"""
+    completion.cmd_completion(["bash"])
+    out = capsys.readouterr().out
+    # 顶层命令列表里应含 help
+    assert " help " in out or '"help"' in out or "help -" in out or "help " in out
+
+
+def test_bash_completion_includes_commands_schema(capsys):
+    completion.cmd_completion(["bash"])
+    out = capsys.readouterr().out
+    assert "--schema" in out
+
+
+def test_bash_completion_includes_agent_guide_section(capsys):
+    completion.cmd_completion(["bash"])
+    out = capsys.readouterr().out
+    assert "--section" in out
+    assert "--list-sections" in out
+
+
+def test_zsh_completion_includes_help_subcommand_dispatch(capsys):
+    completion.cmd_completion(["zsh"])
+    out = capsys.readouterr().out
+    assert "help)" in out  # case $words[2] in help) ...
+    assert "_proxyctl_cmd_names" in out
+
+
+def test_zsh_completion_documents_new_global_flags(capsys):
+    completion.cmd_completion(["zsh"])
+    out = capsys.readouterr().out
+    for flag in ("--plain", "--dry-run", "--no-color"):
+        assert flag in out, f"zsh 补全缺 {flag}"
+
+
+def test_zsh_completion_handles_commands_schema(capsys):
+    completion.cmd_completion(["zsh"])
+    out = capsys.readouterr().out
+    # case $words[2] in commands) _values 'flag' --schema --json ;;
+    assert "commands)" in out
+    assert "--schema" in out
+
+
+def test_zsh_completion_handles_agent_guide_section(capsys):
+    completion.cmd_completion(["zsh"])
+    out = capsys.readouterr().out
+    assert "agent-guide)" in out
+    assert "--section" in out
+    assert "--list-sections" in out
+
+
+def test_fish_completion_includes_dry_run_for_each_write_command(capsys):
+    completion.cmd_completion(["fish"])
+    out = capsys.readouterr().out
+    # 至少 mode / engine / fix 上有 --dry-run
+    for cmd in ("mode", "engine", "fix", "audit", "config", "daemon",
+                "dns-lock", "dns-unlock"):
+        line = (f"complete -c proxyctl -n '__fish_seen_subcommand_from "
+                f"{cmd}' -l dry-run")
+        assert line in out, f"fish 补全缺 {cmd} 的 --dry-run"
+
+
+def test_fish_completion_includes_plain_for_audit_check(capsys):
+    completion.cmd_completion(["fish"])
+    out = capsys.readouterr().out
+    for cmd in ("audit", "check"):
+        line = (f"complete -c proxyctl -n '__fish_seen_subcommand_from "
+                f"{cmd}' -l plain")
+        assert line in out, f"fish 补全缺 {cmd} 的 --plain"
+
+
+def test_fish_completion_includes_help_subcommand(capsys):
+    completion.cmd_completion(["fish"])
+    out = capsys.readouterr().out
+    # help 作为顶层子命令
+    assert "-a 'help'" in out
+
+
+def test_fish_completion_includes_commands_schema(capsys):
+    completion.cmd_completion(["fish"])
+    out = capsys.readouterr().out
+    assert ("complete -c proxyctl -n '__fish_seen_subcommand_from commands' "
+            "-l schema") in out
+
+
+def test_fish_completion_includes_agent_guide_flags(capsys):
+    completion.cmd_completion(["fish"])
+    out = capsys.readouterr().out
+    assert ("complete -c proxyctl -n '__fish_seen_subcommand_from agent-guide' "
+            "-l section") in out
+    assert ("complete -c proxyctl -n '__fish_seen_subcommand_from agent-guide' "
+            "-l list-sections") in out
+
+
+def test_fish_completion_includes_log_tail_no_follow(capsys):
+    completion.cmd_completion(["fish"])
+    out = capsys.readouterr().out
+    assert ("complete -c proxyctl -n '__fish_seen_subcommand_from log' "
+            "-l tail") in out
+    assert ("complete -c proxyctl -n '__fish_seen_subcommand_from log' "
+            "-l no-follow") in out
