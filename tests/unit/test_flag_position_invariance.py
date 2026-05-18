@@ -85,8 +85,12 @@ def test_log_tail_position_invariant(monkeypatch, tmp_path):
     log = tmp_path / "fake.log"
     log.write_text("line 1\nline 2\nline 3\n")
 
-    # 让 cmd_log 用我们的临时文件
-    monkeypatch.setattr("proxyctl.engine.mihomo.MihomoBackend.log_file",
+    # 让 cmd_log 用我们的临时文件。
+    # 注意：cli.main 实际用 proxyctl.cli.MihomoBackend（cli.py:115 的实现），
+    # 不是 proxyctl.engine.mihomo.MihomoBackend（engine 模块那份是双胞胎、
+    # 当前未在 main 路径使用）。给错类会导致测试只在本机偶然 PASS
+    # （依赖 ~/.config/mihomo/mihomo.log 真实存在）、在 CI 上挂。
+    monkeypatch.setattr("proxyctl.cli.MihomoBackend.log_file",
                         str(log))
 
     a, _, ca = _run_capture(
@@ -99,10 +103,32 @@ def test_log_tail_position_invariant(monkeypatch, tmp_path):
     assert a == b == c  # NDJSON 完全一致
 
 
+def test_log_tail_monkeypatch_targets_correct_class_no_real_logfile_required(
+    monkeypatch, tmp_path
+):
+    """v0.4.3 回归：测试不能依赖 ~/.config/mihomo/mihomo.log 真实存在。
+
+    历史 bug：测试 monkeypatch 错的类（engine.mihomo.MihomoBackend），
+    本机有真 log 文件兜底所以通过，CI 没有就挂。修法是改 patch 到
+    cli.MihomoBackend。本测试通过指向不存在的目录确保 patch 真生效。
+    """
+    log = tmp_path / "doesnt_exist_yet" / "fake.log"
+    log.parent.mkdir()
+    log.write_text("x\ny\nz\n")
+    monkeypatch.setattr("proxyctl.cli.MihomoBackend.log_file", str(log))
+
+    a, _, ca = _run_capture(
+        ["proxyctl", "log", "--tail", "2", "--no-follow", "--json"])
+    assert ca == 0
+    # 必含 fake.log 路径作为 source（证明 patch 生效），且不报"日志文件不存在"
+    assert "doesnt_exist_yet" in a
+    assert "日志文件不存在" not in a
+
+
 def test_log_tail_value_picked_up_regardless_of_position(monkeypatch, tmp_path):
     log = tmp_path / "fake.log"
     log.write_text("a\nb\nc\nd\ne\n")
-    monkeypatch.setattr("proxyctl.engine.mihomo.MihomoBackend.log_file",
+    monkeypatch.setattr("proxyctl.cli.MihomoBackend.log_file",
                         str(log))
 
     # NDJSON v2：首行 meta header + N 数据行 = N+1 行

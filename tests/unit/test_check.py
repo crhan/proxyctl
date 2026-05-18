@@ -223,3 +223,81 @@ def test_ipgeo_bad_json_returns_empty(tmp_path: Path, fake_subprocess):
     cache = tmp_path / "geo.txt"
     fake_subprocess.set_default(stdout="not json", returncode=0)
     assert check._ipgeo("3.3.3.3", str(cache), "secret") == ""
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# _collect_fail_hints — v0.4.3 体感改进：envelope.ok=False 时给 agent 摘要
+# ────────────────────────────────────────────────────────────────────────────
+
+def _make_collector(*, daemon_up=True, fail_ports=None,
+                    connectivity=None, split_ok=None):
+    """构造与 cmd_check.collector 同构的最小快照。"""
+    coll: dict = {
+        "stages": {
+            "basic": {
+                "daemon_up": daemon_up,
+                "ports": {"ok": [], "fail": fail_ports or []},
+            },
+            "connectivity": connectivity or [],
+        }
+    }
+    if split_ok is not None:
+        coll["stages"]["split_routing"] = {"ok": split_ok}
+    return coll
+
+
+def test_collect_fail_hints_returns_empty_when_pass():
+    coll = _make_collector(connectivity=[{"name": "a", "ok": True}])
+    assert check._collect_fail_hints(coll, dns_bad=False, failed=False) == []
+
+
+def test_collect_fail_hints_connectivity_failed_names_listed():
+    coll = _make_collector(connectivity=[
+        {"name": "discord", "ok": False, "message": "timeout"},
+        {"name": "google",  "ok": True,  "message": "..."},
+        {"name": "github",  "ok": False, "message": "timeout"},
+    ])
+    hints = check._collect_fail_hints(coll, dns_bad=False, failed=True)
+    # 必须含两个失败名（顺序保留）
+    joined = " | ".join(hints)
+    assert "connectivity failed" in joined
+    assert "discord" in joined and "github" in joined
+    assert "google" not in joined
+
+
+def test_collect_fail_hints_dns_bad_appends_fix_hint():
+    coll = _make_collector(connectivity=[{"name": "a", "ok": True}])
+    hints = check._collect_fail_hints(coll, dns_bad=True, failed=True)
+    assert any("DNS" in h and "proxyctl fix" in h for h in hints)
+
+
+def test_collect_fail_hints_missing_ports_and_engine_down():
+    coll = _make_collector(daemon_up=False, fail_ports=["proxy:7890"])
+    hints = check._collect_fail_hints(coll, dns_bad=False, failed=True)
+    assert any("missing ports" in h and "7890" in h for h in hints)
+    assert any("engine not running" in h for h in hints)
+
+
+def test_collect_fail_hints_split_routing_inactive():
+    coll = _make_collector(connectivity=[{"name": "a", "ok": True}],
+                           split_ok=False)
+    hints = check._collect_fail_hints(coll, dns_bad=False, failed=True)
+    assert any("split routing inactive" in h for h in hints)
+
+
+def test_collect_fail_hints_aggregates_multiple_categories():
+    """同时多种失败时 hints 全部聚合，agent 一眼看全。"""
+    coll = _make_collector(
+        daemon_up=True,
+        fail_ports=["api:9090"],
+        connectivity=[
+            {"name": "x", "ok": False, "message": "timeout"},
+        ],
+        split_ok=False,
+    )
+    hints = check._collect_fail_hints(coll, dns_bad=True, failed=True)
+    joined = " | ".join(hints)
+    assert "missing ports" in joined
+    assert "connectivity failed" in joined
+    assert "split routing" in joined
+    assert "DNS" in joined

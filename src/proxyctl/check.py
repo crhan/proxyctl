@@ -532,6 +532,52 @@ def _fetch_probe(probe, env_clean: dict, proxy_port: int = 7890) -> str:
     return text
 
 
+def _collect_fail_hints(collector: dict, *, dns_bad: bool, failed: bool) -> list[str]:
+    """从 check 的 collector 提取每个失败 stage 的简短摘要。
+
+    设计目标：envelope.ok=False 时 agent 不需要挖 stages.*.ok 自行定位真凶。
+    本函数为 cmd_check 在 emit_json 之前调用，输出 hints 列表。
+
+    Args:
+        collector: cmd_check 沉淀的事实快照（见 cmd_check.collector）
+        dns_bad:   basic.network.dns 不健康
+        failed:    整体是否任一 stage fail（fail 变量真值）
+
+    Returns:
+        摘要 hint 行列表。整体 pass 时返回空列表。
+    """
+    hints: list[str] = []
+    if not failed:
+        return hints
+
+    stages = collector.get("stages") or {}
+    basic = stages.get("basic") or {}
+    ports = basic.get("ports") or {}
+    fail_ports = ports.get("fail") or []
+    if fail_ports:
+        hints.append(f"missing ports: {' '.join(fail_ports)}")
+
+    if basic.get("daemon_up") is False:
+        hints.append("engine not running")
+
+    # connectivity: 列表形式，每项 {name, url, ok, message}
+    conn = stages.get("connectivity") or []
+    failed_conns = [c.get("name", "?") for c in conn
+                    if isinstance(c, dict) and not c.get("ok")]
+    if failed_conns:
+        hints.append(f"connectivity failed: {','.join(failed_conns)}")
+
+    split = stages.get("split_routing")
+    if isinstance(split, dict) and split.get("ok") is False:
+        hints.append("split routing inactive (proxy == direct egress)")
+
+    if dns_bad:
+        # 保留旧行为：DNS 异常时引导 proxyctl fix
+        hints.append("DNS unhealthy — try `proxyctl fix`")
+
+    return hints
+
+
 def cmd_check(engine, api: str, api_secret: str,
               config: dict, mode_str: str = "", registry=None):
     """proxyctl check — 4 阶段全面健康检查。
@@ -923,11 +969,13 @@ def cmd_check(engine, api: str, api_secret: str,
     if as_json:
         _sys.stdout = _real_stdout
         from proxyctl._io import emit_json, envelope, OK, GENERIC
-        hint = "proxyctl fix" if dns_bad else None
+        # 失败时聚合每个失败 stage 的简短摘要到 hints。
+        # 不让 agent 在 envelope.ok=False 时还要挖 stages.*.ok 才定位真凶。
+        hints = _collect_fail_hints(collector, dns_bad=dns_bad, failed=fail)
         emit_json(envelope("check", data=collector,
                            ok=(not fail),
                            code=OK if not fail else GENERIC,
-                           hint=hint))
+                           hints=hints))
         _sys.exit(0 if not fail else 1)
     if as_plain:
         _sys.stdout = _real_stdout

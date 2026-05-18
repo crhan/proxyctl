@@ -5,6 +5,70 @@
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-05-18
+
+> CI 修复 + agent 体感增强：修 GitHub Actions 连续 4 次失败的真凶（测试
+> monkeypatch 错的类，本地有真实 log 兜底所以通过、CI 没有就挂），同时把
+> `check --json` 失败时的真凶聚合到 envelope.hints，agent 不再需要挖
+> `stages.*.ok` 自己定位。零 breaking、零 schema 变更，0.4.2 消费者可
+> 无感升级。
+
+### Fixed — CI 连续失败（P0，必修）
+
+`tests/unit/test_flag_position_invariance.py::test_log_tail_*` 在 macOS CI runner 上
+持续挂（最近 4 个 release 全部失败），但 `Release to PyPI` 工作流照常发包。
+真凶：
+
+- **测试 monkeypatch 错的类**。代码里有两份 `MihomoBackend` 双胞胎：
+  - `proxyctl.cli.MihomoBackend`（cli.py:115，`cli.main` 实际使用的那份）
+  - `proxyctl.engine.mihomo.MihomoBackend`（engine 模块那份，当前未被 main 路径用）
+- 测试 patch 的是 engine 那份 → patch 从未生效 → `cmd_log` 拿到真路径
+  `~/.config/mihomo/mihomo.log`。本机有真 log 兜底所以本地 PASS，CI runner
+  没有这个文件就挂，envelope 输出"日志文件不存在"19 行 JSON，断言期望 4 行。
+- 修复：测试 patch 改为 `proxyctl.cli.MihomoBackend.log_file`。
+
+### Added — 防回归测试
+
+- `test_log_tail_monkeypatch_targets_correct_class_no_real_logfile_required` —
+  显式 patch 到一个**不存在**的目录路径，确保 monkeypatch 真生效（如果未来
+  又有人 patch 错类，本测试会立即抓住，不必依赖 CI 偶发场景才暴露）。
+
+### Added — `check --json` 失败摘要聚合到 envelope.hints（P0 体感）
+
+历史行为：`check` 任一 stage 失败时 envelope 顶层 `ok=False / code=1`，但
+`hints=[] / warnings=[] / error=null` — agent 拿到 ok=False 必须自己挖
+`data.stages.connectivity[].ok` / `data.stages.basic.ports.fail` 才能定位
+真凶，违反 v0.3.0 引入的 envelope 设计精神（顶层字段应足够 agent 路由）。
+
+修复：新增 `check._collect_fail_hints(collector, dns_bad, failed)` helper，
+在 `emit_json` 之前根据 collector 聚合摘要：
+
+- `missing ports: proxy:7890 api:9090` — basic.ports.fail 非空
+- `engine not running` — basic.daemon_up=False
+- `connectivity failed: discord,github` — connectivity 失败项名列表
+- `split routing inactive (proxy == direct egress)` — split_routing.ok=False
+- `DNS unhealthy — try \`proxyctl fix\`` — DNS 异常时（替换原 hint 同语义）
+
+`check` 全部通过时 hints 为空列表（与历史 `hint=null → hints=[]` 行为一致）。
+
+### Added — `check._collect_fail_hints` 测试覆盖
+
+- `test_check.py` 新增 6 个测试：empty-when-pass / connectivity-failed-names /
+  dns-bad-appends-fix / missing-ports-and-engine-down / split-routing-inactive /
+  aggregates-multiple-categories。
+
+### Known tech debt（不在本版处理）
+
+- **双胞胎 `MihomoBackend` / `SingboxBackend`**：`cli.py` 和 `engine/*.py`
+  各自维护一份，签名不同（`__init__` 一个吃 dict、一个吃字符串）。属历史
+  遗留，合并需重审 cli 内所有 backend 使用点，单独 PR 处理。
+- **connectivity 目标 `optional: true` 配置项**：让 discord 这种长期失败
+  的目标不计入整体 fail。扩 config schema 属 minor bump（0.5.0）。
+
+### Test stats
+
+- 总测试数 516 → 523（+7：1 防回归 monkeypatch / 6 hints 聚合）。
+
 ## [0.4.2] — 2026-05-18
 
 > 一次性收拾 0.4.1 自查发现的 dry-run 契约硬合同破裂（P0）+ 配套测试盲区
