@@ -5,6 +5,90 @@
 
 ## [Unreleased]
 
+## [0.4.4] — 2026-05-18
+
+> `status` 显示订阅状态（到期日 / 剩余流量 / 拉取状态）。proxyctl 自己不
+> 主动拉远端订阅 —— 通过一份 `~/.config/proxyctl/subscription.json` 契约
+> 文件由用户脚本写入；本版加上读取、渲染、风险摘要到 envelope.hints 的
+> 链路。零 breaking、零 schema 变更（envelope v2 不变，新增字段在 data 内）。
+
+### Added — `status` 命令显示订阅状态
+
+`status` 末尾增加 `SUBSCRIPTION` 段（仅当契约文件存在时打印）：
+
+```
+SUBSCRIPTION
+  ✓ expire 2026-08-18 (91d left) · traffic 0.15G/500.00G (0.03%) · n2ray.dev
+     updated 2m ago
+     官网:next.n2ray.dev
+     已用:0.0%
+     到期:2026-08-18
+```
+
+`status --json` envelope 多两块字段：
+- `data.subscription`：完整快照（schema_version / fetch_ok / expire_at /
+  expire_days_left / traffic_*_bytes / traffic_used_pct / info_nodes / ...）
+- `hints[]`：风险摘要（过期 ≤ 7 天、流量 ≥ 80%、fetch fail 时分级填入）
+
+### Added — `src/proxyctl/subscription.py` 新模块
+
+公开 API：`load()` / `severity()` / `summarize_hints()` / `format_line()` /
+`fmt_bytes()` / `updated_at_human()`。proxyctl 本身不拉网络、不解析订阅
+URL，只读契约 JSON 文件。
+
+环境变量 `PROXYCTL_SUBSCRIPTION_PATH` 覆盖默认路径
+`~/.config/proxyctl/subscription.json`（测试 / 多账户场景用）。
+
+文件不存在或损坏时 `load()` 返回 None，不破坏 status 主流程
+（订阅状态非必需 —— 单纯本地用代理也能跑）。
+
+### Added — `supported_features.status_subscription = true`
+
+agent 探测 0.4.4+ 后可直接消费 `data.subscription`，无需 fallback 检测。
+
+### Added — 测试
+
+`tests/unit/test_subscription.py` 新增 **23 个测试**，覆盖：
+- `load()` happy / missing / corrupt / non-dict 四种路径
+- `severity()` 5 个状态切换（ok / warn-expire / warn-traffic / critical-*）
+- `summarize_hints()` 5 类场景（含 fetch-failed short-circuit）
+- `format_line()` happy / expired / fetch-failed
+- `fmt_bytes()` GB / 0 / None
+- `updated_at_human()` 相对时间 + bad input
+
+### Schema — `~/.config/proxyctl/subscription.json` (v1)
+
+契约字段（全部可选，缺失 = None）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| schema_version | int | 当前 1 |
+| updated_at | str | ISO 8601 |
+| fetch_ok | bool | 最近一次拉取是否成功 |
+| fetch_http_status | int | HTTP 状态码（0=连接级失败）|
+| fetch_channel | str\|null | "proxy-7890" / "direct" 等 |
+| fetch_error | str\|null | 失败原因 |
+| url_host | str | 订阅 URL hostname |
+| expire_at | str\|null | ISO 8601 套餐到期 |
+| expire_days_left | int\|null | 剩余天数（负=已过期）|
+| traffic_upload_bytes | int\|null | 已上传字节 |
+| traffic_download_bytes | int\|null | 已下载字节 |
+| traffic_used_bytes | int\|null | 总已用 |
+| traffic_total_bytes | int\|null | 套餐总流量 |
+| traffic_used_pct | float\|null | 使用百分比 |
+| info_nodes | list[str] | 机场塞节点列表的元信息行 |
+| node_count | int | 主节点数 |
+| relay_node_count | int | relay 节点数（可选）|
+| http_relay_sub_ok | bool | relay 订阅成功（可选）|
+
+更新者（用户的订阅刷新脚本）：每次拉订阅后写此文件 —— 成功或失败都写
+（fetch_ok=false 时填 fetch_error）。本仓库 `update-subscription.sh` 已
+落实此契约，可作参考实现。
+
+### Test stats
+
+- 总测试数 523 → 546（+23 subscription 模块）。
+
 ## [0.4.3] — 2026-05-18
 
 > CI 修复 + agent 体感增强：修 GitHub Actions 连续 4 次失败的真凶（测试

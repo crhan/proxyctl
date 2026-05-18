@@ -1583,6 +1583,7 @@ def cmd_version_print() -> None:
                 "log_ndjson_v2":           True,
                 "lifecycle_dry_run":       True,   # 0.4.2: start/stop/restart/recover --dry-run
                 "version_subcommand":      True,   # 0.4.2: `proxyctl version` 子命令
+                "status_subscription":     True,   # 0.4.4: status envelope.data.subscription
             },
         }
         _io.emit_json(_io.envelope("version", data=data))

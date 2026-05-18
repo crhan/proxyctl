@@ -537,6 +537,10 @@ def cmd_status(engine, api: str, api_secret: str,
                  for var in ("http_proxy", "https_proxy", "all_proxy")
                  if os.environ.get(var)}
 
+    # 订阅状态（从契约文件读，本身不拉远端；文件不存在为 None 不报错）
+    from proxyctl import subscription as _sub
+    sub_data = _sub.load()
+
     if as_json:
         from proxyctl._io import emit_json, envelope
         data = {
@@ -550,10 +554,14 @@ def cmd_status(engine, api: str, api_secret: str,
             "env": env_proxy,
             "mode": mode,
             "backend": engine.name,
+            "subscription": sub_data,
         }
+        # 订阅风险摘要 → envelope.hints（过期 / 流量满 / fetch fail）
+        hints = _sub.summarize_hints(sub_data) if sub_data else []
         emit_json(envelope("status", data=data,
                            ok=bool(daemon_up),
-                           code=0 if daemon_up else 5))
+                           code=0 if daemon_up else 5,
+                           hints=hints))
         return
 
     # 人类模式：与之前一致的顺序渲染
@@ -573,9 +581,30 @@ def cmd_status(engine, api: str, api_secret: str,
                 f"[plugin warning] status_section {section.name} failed: {e}\n"
             )
 
+    if sub_data:
+        _print_subscription(sub_data)
+
     if env_proxy:
         print(f"\n{BOLD}ENV{NC}")
         print(f"  {' '.join(f'{k}={v}' for k, v in env_proxy.items())}")
+
+
+def _print_subscription(sub: dict) -> None:
+    """打印订阅状态一段。受 severity 染色。"""
+    from proxyctl import subscription as _sub
+    sev = _sub.severity(sub)
+    color = GREEN if sev == "ok" else (YELLOW if sev == "warn" else RED)
+    mark = "✓" if sev == "ok" else ("!" if sev == "warn" else "✗")
+    print(f"\n{BOLD}SUBSCRIPTION{NC}")
+    print(f"  {color}{mark}{NC} {_sub.format_line(sub)}")
+    updated = _sub.updated_at_human(sub)
+    if updated:
+        print(f"     {updated}")
+    info_nodes = sub.get("info_nodes") or []
+    if info_nodes:
+        # 机场塞 name 的元信息行（"官网" / "已用" / "到期"），逐行展示
+        for line in info_nodes[:4]:
+            print(f"     {CYAN}{line}{NC}")
 
 
 def _jsonify(obj):
