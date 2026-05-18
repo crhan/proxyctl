@@ -98,6 +98,8 @@ def silence_helpers(monkeypatch):
     monkeypatch.setattr(cli, "launchctl_running", lambda *a, **kw: False)
     monkeypatch.setattr(cli, "get_mode", lambda *a, **kw: "tun")
     monkeypatch.setattr(cli, "wait_port", lambda *a, **kw: True)
+    # cmd_start 调用 _apply_route_hooks → 走 registry；contract test 不关心。
+    monkeypatch.setattr(cli, "_apply_route_hooks", lambda *a, **kw: None)
 
 
 # ── 1. 白盒：cmd_dns_unlock 真跑 → fake_subprocess.calls vs helper ──────────
@@ -368,3 +370,247 @@ def test_contract_mode_plan_no_subprocess(tmp_path):
         sub_steps = [s for s in plan if s.get("action") == "subprocess"]
         assert sub_steps == [], \
             f"_plan_mode({target!r}) 不应含 subprocess action（cmd_mode 实际不调 launchctl）"
+
+
+# ── 9. 白盒：cmd_start / cmd_stop / cmd_restart（0.4.2 新增）──────────────
+#
+# 0.4.2 起，lifecycle 4 命令补齐 --dry-run / plan。下面 6 个白盒测试覆盖
+# macOS + Linux 两种平台，断言 actual ⊆ plan 的 subprocess 部分。
+
+def test_contract_helper_start_macos(macos, silence_helpers, fake_subprocess,
+                                       monkeypatch, tmp_path):
+    """macOS：cmd_start 应跑 [cp <src> <dst>, launchctl bootstrap]
+    （首次安装路径，plist 不存在触发 cp）。actual ⊆ plan。
+    """
+    backend = cli.MihomoBackend({"config_dir": str(tmp_path), "proxy_port": 7890})
+    config = {"proxy_port": 7890, "dns_lock_label": "com.test.dns-lock"}
+
+    # plist 不存在 → 触发 cp 分支；plist 源文件视作存在跳过 _io.fail。
+    monkeypatch.setattr(cli.os.path, "isfile",
+                        lambda p: p != backend.plist)
+
+    expected = cli._service_start_argvs(backend)
+    fake_subprocess.set_default(returncode=0)
+    cli.cmd_start(backend, config)
+
+    plan = cli._plan_start(backend, config)
+    plan_argvs = _plan_subprocess_targets(plan)
+    _assert_actual_subset_of_plan(fake_subprocess.calls, plan_argvs, "start macOS")
+    # 至少应跑 cp + bootstrap（顺序由 service_start 决定）
+    assert len(fake_subprocess.calls) >= 2
+    # helper 的两条 argv 必须都在 plan subprocess.target 中
+    for argv in expected:
+        assert any(_argv_matches(argv, p) for p in plan_argvs), \
+            f"helper argv {argv!r} 不在 _plan_start 的 subprocess targets {plan_argvs!r} 中"
+
+
+def test_contract_helper_start_linux(silence_helpers, fake_subprocess,
+                                       monkeypatch, tmp_path):
+    """Linux：cmd_start 应跑 [systemctl --user start <unit>]。"""
+    monkeypatch.setattr(cli, "IS_MACOS", False)
+    backend = cli.MihomoBackend({"config_dir": str(tmp_path), "proxy_port": 7890})
+    config = {"proxy_port": 7890}
+
+    expected = cli._service_start_argvs(backend)
+    fake_subprocess.set_default(returncode=0)
+    cli.cmd_start(backend, config)
+
+    plan = cli._plan_start(backend, config)
+    plan_argvs = _plan_subprocess_targets(plan)
+    _assert_actual_subset_of_plan(fake_subprocess.calls, plan_argvs, "start Linux")
+    assert len(fake_subprocess.calls) == 1
+    assert _argv_matches(expected[0], fake_subprocess.calls[0])
+
+
+def test_contract_helper_stop_macos(macos, silence_helpers, fake_subprocess,
+                                      tmp_path):
+    """macOS：cmd_stop 应至少包含 launchctl bootout <backend.label>。
+    （DNS / proxy 联动函数被 silence_helpers mock 成 no-op，实际 subprocess
+    只剩 service_stop 的 launchctl bootout。）"""
+    backend = cli.MihomoBackend({"config_dir": str(tmp_path), "proxy_port": 7890})
+    config = {"dns_lock_label": "com.test.dns-lock"}
+
+    expected = cli._service_stop_argvs(backend)
+    fake_subprocess.set_default(returncode=0)
+    cli.cmd_stop(backend, config)
+
+    plan = cli._plan_stop(backend, config)
+    plan_argvs = _plan_subprocess_targets(plan)
+    _assert_actual_subset_of_plan(fake_subprocess.calls, plan_argvs, "stop macOS")
+    assert _argv_matches(expected[0], fake_subprocess.calls[-1])
+
+
+def test_contract_helper_stop_linux(silence_helpers, fake_subprocess,
+                                      monkeypatch, tmp_path):
+    """Linux：cmd_stop 应只跑 [systemctl --user stop <unit>]。"""
+    monkeypatch.setattr(cli, "IS_MACOS", False)
+    backend = cli.MihomoBackend({"config_dir": str(tmp_path), "proxy_port": 7890})
+    config = {}
+
+    expected = cli._service_stop_argvs(backend)
+    fake_subprocess.set_default(returncode=0)
+    cli.cmd_stop(backend, config)
+
+    plan = cli._plan_stop(backend, config)
+    plan_argvs = _plan_subprocess_targets(plan)
+    _assert_actual_subset_of_plan(fake_subprocess.calls, plan_argvs, "stop Linux")
+    assert len(fake_subprocess.calls) == 1
+    assert _argv_matches(expected[0], fake_subprocess.calls[0])
+
+
+def test_contract_helper_restart_macos(macos, silence_helpers, fake_subprocess,
+                                         tmp_path):
+    """macOS：cmd_restart 应至少包含 launchctl kickstart -k <label>。"""
+    backend = cli.MihomoBackend({"config_dir": str(tmp_path), "proxy_port": 7890})
+    config = {"proxy_port": 7890, "dns_lock_label": "com.test.dns-lock"}
+
+    expected = cli._service_restart_argvs(backend)
+    fake_subprocess.set_default(returncode=0)
+    cli.cmd_restart(backend, config)
+
+    plan = cli._plan_restart(backend, config, clean=False)
+    plan_argvs = _plan_subprocess_targets(plan)
+    _assert_actual_subset_of_plan(fake_subprocess.calls, plan_argvs, "restart macOS")
+    assert any(_argv_matches(expected[0], c) for c in fake_subprocess.calls)
+
+
+def test_contract_helper_restart_linux(silence_helpers, fake_subprocess,
+                                         monkeypatch, tmp_path):
+    """Linux：cmd_restart 应只跑 [systemctl --user restart <unit>]。"""
+    monkeypatch.setattr(cli, "IS_MACOS", False)
+    backend = cli.MihomoBackend({"config_dir": str(tmp_path), "proxy_port": 7890})
+    config = {"proxy_port": 7890}
+
+    expected = cli._service_restart_argvs(backend)
+    fake_subprocess.set_default(returncode=0)
+    cli.cmd_restart(backend, config)
+
+    plan = cli._plan_restart(backend, config, clean=False)
+    plan_argvs = _plan_subprocess_targets(plan)
+    _assert_actual_subset_of_plan(fake_subprocess.calls, plan_argvs, "restart Linux")
+    assert len(fake_subprocess.calls) == 1
+    assert _argv_matches(expected[0], fake_subprocess.calls[0])
+
+
+# ── 10. 白盒：cmd_recover —— 宽松断言（curl argv 包含 plan http_put URL）──
+
+def test_contract_helper_recover_macos(macos, silence_helpers, fake_subprocess,
+                                          monkeypatch, tmp_path):
+    """recover 的 plan 列出三个 http_put endpoints（configs / fakeip / proxies）。
+    cmd_recover 真跑后，fake_subprocess.calls 中应该至少存在 curl argv
+    把这三个 URL 作为参数传入。这是宽松断言（http_put 不是 subprocess action，
+    没有严格 argv 复读约束），但保证 plan ↔ exec 不漂移。
+    """
+    backend = cli.MihomoBackend({"config_dir": str(tmp_path), "proxy_port": 7890})
+    config = {"api_base": "http://127.0.0.1:9090",
+              "dns_lock_label": "com.test.dns-lock",
+              "api_secret": "test-secret"}
+    monkeypatch.setattr(cli, "launchctl_running", lambda *a, **kw: True)
+
+    # PUT /configs?force=true 返回 HTTP 200 跑过 reload check
+    fake_subprocess.set_prefix_result(
+        ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}"],
+        stdout="200", returncode=0)
+    # GET /proxies 返回空 proxies 列表，绕过 groups_to_test
+    fake_subprocess.set_prefix_result(
+        ["curl", "-s", "--noproxy", "*", "-H"],
+        stdout='{"proxies": {}}', returncode=0)
+    fake_subprocess.set_default(stdout="", returncode=0)
+
+    cli.cmd_recover(backend, config)
+
+    plan = cli._plan_recover(backend, config)
+    http_targets = [s["target"] for s in plan if s.get("action") == "http_put"]
+    assert len(http_targets) == 3
+
+    # 把所有 fake_subprocess.calls 摊平成字符串，断言每个 plan URL 都出现过
+    flat = " ".join(" ".join(c) for c in fake_subprocess.calls)
+    for url in http_targets:
+        assert url in flat, \
+            f"recover plan http_put target {url!r} 应在实际 curl argv 中出现；" \
+            f"实际 calls={fake_subprocess.calls!r}"
+
+
+# ── 11. 静态：扩展 plan no-placeholder 覆盖 0.4.2 新加的 5 个 _plan_* ────
+
+def test_contract_plan_no_placeholder_0_4_2(tmp_path):
+    """0.4.2 新增的 _plan_start / _plan_stop / _plan_restart / _plan_recover
+    target 都不得含 <...> 占位符。"""
+    backend = cli.MihomoBackend({"config_dir": str(tmp_path), "proxy_port": 7890})
+    config = {"api_base": "http://127.0.0.1:9090",
+              "dns_lock_label": "com.test.dns-lock"}
+    placeholder_re = re.compile(r"<[^>]+>")
+    plan_calls = [
+        ("start",         cli._plan_start,   (backend, config)),
+        ("stop",          cli._plan_stop,    (backend, config)),
+        ("restart",       cli._plan_restart, (backend, config), {"clean": False}),
+        ("restart-clean", cli._plan_restart, (backend, config), {"clean": True}),
+        ("recover",       cli._plan_recover, (backend, config)),
+    ]
+    for entry in plan_calls:
+        name, fn, args = entry[0], entry[1], entry[2]
+        kwargs = entry[3] if len(entry) > 3 else {}
+        plan = fn(*args, **kwargs)
+        for s in plan:
+            t = s.get("target", "")
+            assert not placeholder_re.search(t), \
+                f"plan {name!r} target 含 <...> 占位符: {t!r}"
+
+
+# ── 12. 静态：_plan_start / _plan_stop / _plan_restart 的 subprocess 部分
+#       严格等于对应 _service_*_argvs helper 输出（按 IS_MACOS 平台分流）─
+
+@pytest.mark.parametrize("is_macos", [True, False])
+def test_contract_lifecycle_plan_aligns_with_helper(monkeypatch, tmp_path, is_macos):
+    monkeypatch.setattr(cli, "IS_MACOS", is_macos)
+    backend = cli.MihomoBackend({"config_dir": str(tmp_path), "proxy_port": 7890})
+    config = {"proxy_port": 7890, "dns_lock_label": "com.test.dns-lock"}
+
+    # service_*_argvs 是 plan 与 cmd 的单一事实来源。plan 中的第一个
+    # subprocess（macOS：start 的 cp，stop 的 dns-lock bootout；
+    # restart 的 launchctl kickstart）/ Linux 唯一 subprocess 即 service helper 输出。
+    expected_start = cli._service_start_argvs(backend)
+    expected_stop = cli._service_stop_argvs(backend)
+    expected_restart = cli._service_restart_argvs(backend)
+
+    plan_start_subs = _plan_subprocess_targets(cli._plan_start(backend, config))
+    plan_stop_subs = _plan_subprocess_targets(cli._plan_stop(backend, config))
+    plan_restart_subs = _plan_subprocess_targets(
+        cli._plan_restart(backend, config, clean=False))
+
+    if is_macos:
+        # macOS: start plan 第一条 subprocess 应是 cp（_service_start_argvs[0]），
+        # 第二条是 bootstrap（[1]）
+        assert plan_start_subs[0] == expected_start[0], \
+            f"plan start[0] 与 _service_start_argvs[0] 漂移：{plan_start_subs[0]!r} != {expected_start[0]!r}"
+        assert plan_start_subs[1] == expected_start[1]
+        # stop plan 最后一条 subprocess（service_stop 的 bootout）等于 helper
+        assert plan_stop_subs[-1] == expected_stop[0], \
+            f"plan stop 最后一条 subprocess 与 _service_stop_argvs 漂移"
+        # restart plan 第一条 subprocess（kickstart）= helper
+        assert plan_restart_subs[0] == expected_restart[0], \
+            f"plan restart[0] 与 _service_restart_argvs 漂移"
+    else:
+        # Linux：plan 各只有一条 subprocess（systemctl）
+        assert plan_start_subs == [expected_start[0]]
+        assert plan_stop_subs == [expected_stop[0]]
+        assert plan_restart_subs == [expected_restart[0]]
+
+
+# ── 13. restart-clean 比 restart 多一条 fs_remove cache 步骤 ─────────────
+
+def test_contract_restart_clean_adds_cache_remove(tmp_path):
+    backend = cli.MihomoBackend({"config_dir": str(tmp_path), "proxy_port": 7890})
+    config = {"proxy_port": 7890, "dns_lock_label": "com.test.dns-lock"}
+
+    plain = cli._plan_restart(backend, config, clean=False)
+    clean = cli._plan_restart(backend, config, clean=True)
+
+    plain_actions = [s["action"] for s in plain]
+    clean_actions = [s["action"] for s in clean]
+    # clean=True 比 clean=False 多 1 步，且第一步是 fs_remove backend.cache_file
+    assert len(clean) == len(plain) + 1
+    assert clean[0]["action"] == "fs_remove"
+    assert clean[0]["target"] == backend.cache_file
+    # 其余顺序保持一致（plain 的 fs_remove watchdog + ... = clean 的 [1:]）
+    assert clean_actions[1:] == plain_actions

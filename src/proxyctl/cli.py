@@ -1581,6 +1581,8 @@ def cmd_version_print() -> None:
                 "doctor_healthy_field":    True,   # 0.3.3
                 "agent_guide_sections":    True,   # 0.3.3
                 "log_ndjson_v2":           True,
+                "lifecycle_dry_run":       True,   # 0.4.2: start/stop/restart/recover --dry-run
+                "version_subcommand":      True,   # 0.4.2: `proxyctl version` 子命令
             },
         }
         _io.emit_json(_io.envelope("version", data=data))
@@ -1812,6 +1814,50 @@ def _dns_unlock_subprocess_argvs(plist_path: str,
         ["launchctl", "bootout", full_label],
         ["rm", "-f", plist_path],
     ]
+
+
+def _service_start_argvs(backend: Backend) -> list[list[str]]:
+    """返回 service_start 的 argv list（不含 sudo），平台分流。
+
+    macOS：[cp <src> <dst>, launchctl bootstrap system <plist>]
+      cp 是 conditional（plist 已存在时跳过），plan 作为上界总展示。
+    Linux：[systemctl --user start <unit>]
+    """
+    if IS_MACOS:
+        src = os.path.join(DEFAULT_CONFIG_DIR, "launchdaemons",
+                            os.path.basename(backend.plist))
+        return [
+            ["cp", src, backend.plist],
+            ["launchctl", "bootstrap", "system", backend.plist],
+        ]
+    return [["systemctl", "--user", "start", backend.unit]]
+
+
+def _service_stop_argvs(backend: Backend) -> list[list[str]]:
+    """返回 service_stop 的 argv list（不含 sudo），平台分流。"""
+    if IS_MACOS:
+        return [["launchctl", "bootout", backend.label]]
+    return [["systemctl", "--user", "stop", backend.unit]]
+
+
+def _service_restart_argvs(backend: Backend) -> list[list[str]]:
+    """返回 service_restart 的 argv list（不含 sudo），平台分流。"""
+    if IS_MACOS:
+        return [["launchctl", "kickstart", "-k", backend.label]]
+    return [["systemctl", "--user", "restart", backend.unit]]
+
+
+def _recover_curl_endpoints(api_base: str) -> dict:
+    """返回 cmd_recover 三个 Clash API endpoint 的 URL。
+
+    每个 endpoint 进入 plan 时作为 http_put action 的 target；contract test
+    用宽松断言（actual curl argv 中包含该 URL 子串）验证 plan ↔ exec 一致。
+    """
+    return {
+        "configs_reload": f"{api_base}/configs?force=true",
+        "fakeip_flush":   f"{api_base}/cache/fakeip/flush",
+        "proxies":        f"{api_base}/proxies",
+    }
 
 
 def _plan_mode(backend, target: str) -> list[dict]:
@@ -2048,6 +2094,192 @@ def _plan_dns_unlock(config: dict) -> list[dict]:
     ]
 
 
+# ── start / stop / restart / restart-clean / recover plan helpers ───────────
+#
+# 0.4.2 起，原本完全没接 _maybe_dry_run 的 5 个写命令补上 plan：
+# - 跨平台：plan 按 IS_MACOS 分流，macOS 列 launchctl + 系统联动；
+#   Linux 列 systemctl --user
+# - actual ⊆ plan：DNS 注入 / proxy 激活等 iterating system_op 用描述性
+#   target；conditional 步骤（首次 cp、dns-lock conditional bootstrap、
+#   proxy_activate 仅 mode==proxy）作为上界总列出，contract test 用
+#   silence_helpers + actual ⊆ plan 方向天然容纳。
+
+def _plan_start(backend, config) -> list[dict]:
+    """start 的 plan：启动引擎 + macOS 系统联动（DNS/dns-lock/proxy）。"""
+    argvs = _service_start_argvs(backend)
+    if not IS_MACOS:
+        return [
+            {"action": "subprocess",
+             "target": " ".join(argvs[0]),
+             "summary": f"通过 systemctl --user 启动 {backend.unit}",
+             "reversible": True, "requires_sudo": False,
+             "side_effects": ["process"]},
+        ]
+    dns_lock_label = config.get("dns_lock_label", DEFAULTS["dns_lock_label"])
+    dns_lock_plist = f"/Library/LaunchDaemons/{dns_lock_label}.plist"
+    proxy_port = config.get("proxy_port", DEFAULTS["proxy_port"])
+    return [
+        {"action": "subprocess",
+         "target": " ".join(argvs[0]),
+         "summary": f"如 {backend.plist} 不存在则从源拷贝 plist（首次安装）",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["config-write"]},
+        {"action": "subprocess",
+         "target": " ".join(argvs[1]),
+         "summary": f"启动引擎 {backend.name}",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["process"]},
+        {"action": "system_op",
+         "target": "networksetup -setdnsservers (per service) 127.0.0.1 + "
+                   "scutil 三层注入 + dscacheutil -flushcache",
+         "summary": "系统 DNS → 127.0.0.1（三层防线）",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["system"]},
+        {"action": "subprocess",
+         "target": " ".join(["launchctl", "bootstrap", "system",
+                              dns_lock_plist]),
+         "summary": f"启动 DNS 看门狗 daemon（如已部署但未运行）",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["process"]},
+        {"action": "system_op",
+         "target": f"networksetup -setwebproxy* / -setsecurewebproxy* / "
+                   f"-setsocksfirewallproxy* (per service) 127.0.0.1:{proxy_port}",
+         "summary": "开启系统代理（仅 mode=proxy 时；mode=tun 时跳过）",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["system"]},
+    ]
+
+
+def _plan_stop(backend, config) -> list[dict]:
+    """stop 的 plan：停止引擎 + macOS 还原系统配置。"""
+    argvs = _service_stop_argvs(backend)
+    if not IS_MACOS:
+        return [
+            {"action": "subprocess",
+             "target": " ".join(argvs[0]),
+             "summary": f"通过 systemctl --user 停止 {backend.unit}",
+             "reversible": True, "requires_sudo": False,
+             "side_effects": ["process"]},
+        ]
+    dns_lock_label = config.get("dns_lock_label", DEFAULTS["dns_lock_label"])
+    full_lock_label = f"system/{dns_lock_label}"
+    return [
+        {"action": "subprocess",
+         "target": " ".join(["launchctl", "bootout", full_lock_label]),
+         "summary": "停止 DNS 看门狗 daemon（如在跑）",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["process"]},
+        {"action": "system_op",
+         "target": "networksetup -setdnsservers (per service) empty + "
+                   "scutil remove + dscacheutil -flushcache",
+         "summary": "还原系统 DNS（清除三层注入）",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["system"]},
+        {"action": "system_op",
+         "target": "networksetup -setwebproxystate / -setsecurewebproxystate / "
+                   "-setsocksfirewallproxystate (per service) off",
+         "summary": "关闭系统代理",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["system"]},
+        {"action": "subprocess",
+         "target": " ".join(argvs[0]),
+         "summary": f"停止引擎 {backend.name}",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["process"]},
+    ]
+
+
+def _plan_restart(backend, config, *, clean: bool = False) -> list[dict]:
+    """restart / restart-clean 的 plan。
+
+    clean=True 时额外加 fs_remove backend.cache_file。
+    """
+    steps: list[dict] = []
+    if clean:
+        steps.append({
+            "action": "fs_remove",
+            "target": backend.cache_file,
+            "summary": f"删除引擎缓存 {backend.cache_file}",
+            "reversible": False,
+            "side_effects": ["cache"],
+        })
+    steps.append({
+        "action": "fs_remove",
+        "target": "/tmp/proxyctl-recover-* /tmp/sb-recover-* /tmp/sb-proxy-fail",
+        "summary": "清空 watchdog 失败状态文件（避免误判触顶窗口）",
+        "reversible": False,
+        "side_effects": ["cache"],
+    })
+    argvs = _service_restart_argvs(backend)
+    if not IS_MACOS:
+        steps.append({
+            "action": "subprocess",
+            "target": " ".join(argvs[0]),
+            "summary": f"通过 systemctl --user 重启 {backend.unit}",
+            "reversible": True, "requires_sudo": False,
+            "side_effects": ["process"],
+        })
+        return steps
+    proxy_port = config.get("proxy_port", DEFAULTS["proxy_port"])
+    dns_lock_label = config.get("dns_lock_label", DEFAULTS["dns_lock_label"])
+    dns_lock_plist = f"/Library/LaunchDaemons/{dns_lock_label}.plist"
+    steps.extend([
+        {"action": "subprocess",
+         "target": " ".join(argvs[0]),
+         "summary": f"重启引擎 {backend.name}",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["process"]},
+        {"action": "system_op",
+         "target": "networksetup -setdnsservers (per service) 127.0.0.1 + "
+                   "scutil 三层注入 + dscacheutil -flushcache",
+         "summary": "系统 DNS → 127.0.0.1（刷新三层防线）",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["system"]},
+        {"action": "subprocess",
+         "target": " ".join(["launchctl", "bootstrap", "system",
+                              dns_lock_plist]),
+         "summary": "启动 DNS 看门狗 daemon（如已部署但未运行）",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["process"]},
+        {"action": "system_op",
+         "target": f"networksetup -setwebproxy* / -setsecurewebproxy* / "
+                   f"-setsocksfirewallproxy* (per service) 127.0.0.1:{proxy_port}",
+         "summary": "开启系统代理（mode=proxy 时）/ 关闭（mode=tun 时）",
+         "reversible": True, "requires_sudo": True,
+         "side_effects": ["system"]},
+    ])
+    return steps
+
+
+def _plan_recover(backend, config) -> list[dict]:
+    """recover 的 plan：3 个 Clash API 请求，不重启进程。
+
+    用 http_put action（与 _plan_fix 风格一致），实际 cmd_recover 还会对
+    /group/<name>/delay endpoint 并发请求 N 次做 healthcheck —— plan 把
+    healthcheck 整体折成一个 http_put step，target=描述性 endpoint pattern。
+    """
+    api_base = config.get("api_base", DEFAULTS["api_base"])
+    eps = _recover_curl_endpoints(api_base)
+    return [
+        {"action": "http_put",
+         "target": eps["configs_reload"],
+         "summary": "热重载配置（PUT /configs?force=true，清 DNS 缓存）",
+         "reversible": True,
+         "side_effects": ["network-io"]},
+        {"action": "http_put",
+         "target": eps["fakeip_flush"],
+         "summary": "清空 fakeip 缓存（POST /cache/fakeip/flush）",
+         "reversible": True,
+         "side_effects": ["cache", "network-io"]},
+        {"action": "http_put",
+         "target": eps["proxies"],
+         "summary": "拉取 proxies 列表 + 对 URLTest/Fallback/LoadBalance 组并发 "
+                   "GET /group/<name>/delay 触发 healthcheck",
+         "reversible": True,
+         "side_effects": ["network-io"]},
+    ]
+
+
 # ── 主入口 ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -2138,12 +2370,31 @@ def main():
 
 # ── Dispatch handlers + 路由表 ────────────────────────────────────────────
 
-def _h_start(ctx):    cmd_start(ctx["backend"], ctx["config"], registry=ctx["registry"])
-def _h_stop(ctx):     cmd_stop(ctx["backend"], ctx["config"], registry=ctx["registry"])
-def _h_restart(ctx):  cmd_restart(ctx["backend"], ctx["config"], registry=ctx["registry"])
+def _h_start(ctx):
+    _maybe_dry_run("start", lambda: _plan_start(ctx["backend"], ctx["config"]))
+    cmd_start(ctx["backend"], ctx["config"], registry=ctx["registry"])
+
+def _h_stop(ctx):
+    _maybe_dry_run("stop", lambda: _plan_stop(ctx["backend"], ctx["config"]))
+    cmd_stop(ctx["backend"], ctx["config"], registry=ctx["registry"])
+
+def _h_restart(ctx):
+    _maybe_dry_run(
+        "restart",
+        lambda: _plan_restart(ctx["backend"], ctx["config"], clean=False))
+    cmd_restart(ctx["backend"], ctx["config"], registry=ctx["registry"])
+
 def _h_restart_clean(ctx):
-    cmd_restart(ctx["backend"], ctx["config"], clean=True, registry=ctx["registry"])
-def _h_recover(ctx):  cmd_recover(ctx["backend"], ctx["config"])
+    _maybe_dry_run(
+        "restart-clean",
+        lambda: _plan_restart(ctx["backend"], ctx["config"], clean=True))
+    cmd_restart(ctx["backend"], ctx["config"], clean=True,
+                registry=ctx["registry"])
+
+def _h_recover(ctx):
+    _maybe_dry_run("recover",
+                   lambda: _plan_recover(ctx["backend"], ctx["config"]))
+    cmd_recover(ctx["backend"], ctx["config"])
 def _h_dns_unlock(ctx):
     _maybe_dry_run("dns-unlock", lambda: _plan_dns_unlock(ctx["config"]))
     _exec_with_lock("daemon", "dns-unlock", cmd_dns_unlock, ctx["config"])
@@ -2317,6 +2568,11 @@ def _h_help(ctx):
         cmd_help()
 
 
+def _h_version(ctx):
+    """proxyctl version — 子命令形式，与 --version flag 输出一致。"""
+    cmd_version_print()
+
+
 DISPATCH: dict = {
     "start":           _h_start,
     "stop":            _h_stop,
@@ -2346,6 +2602,7 @@ DISPATCH: dict = {
     "doctor":          _h_doctor,
     "completion":      _h_completion,
     "help":            _h_help,
+    "version":         _h_version,
 }
 
 

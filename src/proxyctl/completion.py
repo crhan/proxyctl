@@ -26,8 +26,10 @@ from __future__ import annotations
 import sys
 
 
-# 0.3.x：写命令支持 --dry-run（与 COMMANDS_META.supports_dry_run 同步）
-_DRY_RUN_CMDS = ("mode", "engine", "fix", "audit", "config",
+# 写命令支持 --dry-run（与 COMMANDS_META.supports_dry_run 同步）
+# 0.4.2 起，lifecycle 4 个 + recover 也补齐 --dry-run。
+_DRY_RUN_CMDS = ("start", "stop", "restart", "restart-clean", "recover",
+                 "mode", "engine", "fix", "audit", "config",
                  "daemon", "claude-proxy", "dns-lock", "dns-unlock")
 # 0.3.x：audit / check 支持 --plain
 _PLAIN_CMDS = ("audit", "check")

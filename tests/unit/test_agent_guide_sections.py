@@ -161,6 +161,39 @@ def test_no_args_still_outputs_full_markdown(backend, config, capsys):
     assert len(obj["data"]["markdown"]) > 1000
 
 
+# ── 0.4.2: 逐 section 可用性 parametrize ──────────────────────────────────
+def _list_sections_for_parametrize() -> list[str]:
+    """模块加载期就把 list-sections 输出枚举出来，作为 parametrize ids。"""
+    backend = MihomoBackend({"config_dir": "/tmp/test", "proxy_port": 7890})
+    config = {"backend": "mihomo", "proxy_port": 7890,
+              "api_base": "http://127.0.0.1:9090", "api_secret": ""}
+    md = explain._build_agent_guide(backend, config)
+    return list(explain._split_agent_guide_sections(md).keys())
+
+
+_ALL_SECTIONS = _list_sections_for_parametrize()
+
+
+@pytest.mark.parametrize("section_name", _ALL_SECTIONS)
+def test_every_listed_section_returns_non_empty(section_name, backend,
+                                                   config, capsys):
+    """0.4.2 guard：--list-sections 输出的**每一个** slug，
+    都必须能用 --section <slug> 取回非空 markdown 且 envelope.ok=True。"""
+    explain.set_global_flags({"json": True})
+    explain.cmd_agent_guide(["--section", section_name], backend, config)
+    env = json.loads(capsys.readouterr().out)
+    assert env["ok"] is True, \
+        f"section {section_name!r} 应能取回；envelope={env!r}"
+    assert env["data"]["section"] == section_name
+    md = env["data"]["markdown"]
+    assert isinstance(md, str) and md.strip(), \
+        f"section {section_name!r} 返回 markdown 为空"
+    # introduction 之外的 section 应至少含 1 个 H2 标题
+    if section_name != "introduction":
+        h2_lines = [l for l in md.split("\n") if l.startswith("## ")]
+        assert h2_lines, f"section {section_name!r} 应含至少一个 H2 标题"
+
+
 # ── supported_features 翻 true ────────────────────────────────────────────
 def test_version_features_agent_guide_sections_true():
     _io.set_no_color(True)

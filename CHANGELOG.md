@@ -5,6 +5,102 @@
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-05-18
+
+> 一次性收拾 0.4.1 自查发现的 dry-run 契约硬合同破裂（P0）+ 配套测试盲区
+> （P1）+ 体感改进（P2）。零公开 schema 变更，行为完全向后兼容。
+
+### Fixed — `--dry-run` 契约硬合同破裂（P0，关键）
+
+5 个写命令的 `--dry-run` **完全失效且会真执行**，README/man page 全局承诺
+"写命令支持 `--dry-run`" 在它们身上是空头支票。直接复现：
+
+```
+$ proxyctl stop --dry-run --json    # 0.4.1
+mihomo stopped                       # ← 真的把 mihomo 停了
+```
+
+修复列表（每条都补 `_plan_*` helper + 在 dispatcher 接 `_maybe_dry_run` +
+COMMANDS_META 标 `supports_dry_run: True` + completion `_DRY_RUN_CMDS` 同步）：
+
+- **`start`** — `_plan_start` 列 `launchctl bootstrap` / `systemctl --user start`
+  + macOS DNS 注入 + dns-lock + 系统代理激活的全套上界
+- **`stop`** — `_plan_stop` 列 dns-lock 停 + DNS 还原 + 系统代理关闭 +
+  `launchctl bootout` / `systemctl --user stop`
+- **`restart`** — `_plan_restart(clean=False)` 列 `launchctl kickstart -k` /
+  `systemctl --user restart` + DNS/代理刷新
+- **`restart-clean`** — `_plan_restart(clean=True)` 比 restart 多一条
+  `fs_remove backend.cache_file`
+- **`recover`** — `_plan_recover` 列三个 Clash API endpoint（http_put action）
+
+`_service_start_argvs` / `_service_stop_argvs` / `_service_restart_argvs` /
+`_recover_curl_endpoints` 四个新 helper 作为 plan ↔ exec 单一事实来源，
+按 `IS_MACOS` 分流。
+
+### Added — Contract test 覆盖（P1）
+
+- `tests/integration/test_plan_exec_contract.py` 补 9 个测试：
+  - 白盒：`cmd_start` / `cmd_stop` / `cmd_restart` 在 macOS + Linux 两种平台下
+    真跑（mock subprocess），断言 `actual ⊆ plan` 的 subprocess 部分
+  - 白盒：`cmd_recover` 用宽松断言（curl argv 中包含 plan http_put URL 子串）
+  - 静态：`_plan_start/_plan_stop/_plan_restart/_plan_recover` target 无 `<...>` 占位符
+  - 静态：lifecycle plan subprocess 严格等于 `_service_*_argvs` helper 输出
+    （按平台 parametrize）
+  - 静态：`_plan_restart(clean=True)` 比 `_plan_restart(clean=False)` 多 1 步
+    `fs_remove backend.cache_file`
+
+### Added — VERSION 三源一致性 guard（P1）
+
+- `tests/unit/test_version_consistency.py` 新增 5 个测试。以 `pyproject.toml`
+  为唯一事实来源，断言：
+  1. `proxyctl.__version__`（importlib.metadata 动态读）一致
+  2. `cli.VERSION` 一致
+  3. `_io.envelope().meta.proxyctl_version` 一致
+  4. `cmd_version_print --json` 的 `data.version` 一致
+  5. 新增 `version` 子命令与 `--version` flag 输出一致
+
+### Added — agent-guide section 可用性 parametrize（P1）
+
+- `tests/unit/test_agent_guide_sections.py` 加 parametrize 测试：
+  `--list-sections` 输出的**每一个** slug，都验证 `--section <slug>` 能取回
+  非空 markdown 且 `envelope.ok=True`。覆盖 15 个 section。
+
+### Added — `--json` 错误路径不泄漏 traceback（P2）
+
+- `tests/unit/test_error_envelope.py` 新增 5 个测试，覆盖 USAGE 系列错误：
+  未识别子命令 / trace 缺参 / audit 错参 / mode 错参 / agent-guide --section 拼错。
+  断言：JSON 模式下输出合法 envelope（schema_version=2 / ok=False / 含 hints），
+  且 stdout/stderr **不含 Python traceback 标记**。
+
+### Added — `proxyctl version` 子命令（P2）
+
+新增 `version` 子命令作为 `--version` flag 的等价别名。`proxyctl version --json`
+输出与 `proxyctl --version --json` 完全一致的 envelope（`cmd: "version"` /
+`data.version` + `supported_features`）。agent 拿结构化版本号不再需要旁路。
+
+### Added — `supported_features` 字段
+
+- `lifecycle_dry_run: True` — 标记 0.4.2 起 start/stop/restart/restart-clean/recover
+  全部支持 `--dry-run`
+- `version_subcommand: True` — 标记 0.4.2 起有 `version` 子命令
+
+### Test stats
+
+- 总测试数 480 → 516（+36）。包括 9 个 lifecycle contract test、
+  5 个 version 一致性、15 个 agent-guide section parametrize、5 个
+  error envelope，外加现有静态测试自动覆盖新加 plan 函数。
+
+### 复盘
+
+dispatcher（cli.py 中 `_h_start` / `_h_stop` 等）调 `cmd_*` 时**不走** `_maybe_dry_run`
+卫语句，未知 flag `--dry-run` 被 `_extract_global_flags` 剥离后**静默吃掉**，
+导致 cmd_* 走正常路径真执行。0.4.0a1 引入 plan 契约时把焦点放在写操作命令的
+helper 抽取上，**漏审了 lifecycle 4 个**——它们写得最早（v0.1.0 就有），
+最后才需要 plan，反而被错过。
+
+教训记录到 `_DRY_RUN_CMDS` 与 `COMMANDS_META.supports_dry_run` 必须双向同步，
+且 contract test 应**自动覆盖**所有 `supports_dry_run=True` 的命令（未来工作）。
+
 ## [0.4.1] — 2026-05-18
 
 > 修 cmd_discovery 在 Linux 平台 hardcode `engine_up=False` 的 bug。
