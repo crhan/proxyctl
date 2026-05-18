@@ -5,6 +5,33 @@
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-05-18
+
+> 修 cmd_discovery 在 Linux 平台 hardcode `engine_up=False` 的 bug。
+> agent 探测 + 人类 banner 在 Linux 上现在正确反映 systemd 服务状态。
+
+### Fixed
+
+- **`cmd_discovery` 在非 macOS 平台正确反映引擎状态**（cli.py:1494）
+  原代码：`engine_up = launchctl_running(backend.label) if IS_MACOS else False`
+  Linux 用户裸 `proxyctl` 永远显示 `✗ engine=mihomo`，**即使 systemd 服务在跑**；
+  JSON discovery envelope `data.engine.running` 永远 false，**agent 探测拿到错值**。
+  修改为 `engine_up = service_running(backend)`，走平台分支（macOS launchctl /
+  Linux systemctl --user is-active）。
+
+### Added
+
+- **`tests/integration/test_regression_0_4_0.py`** 新增 3 个回归测试：
+  - `test_cmd_discovery_linux_uses_service_running` — JSON discovery envelope
+    在 Linux + service_running=True 时 `data.engine.running` 必 True
+  - `test_cmd_discovery_linux_banner_shows_check_when_running` — 人类 banner
+    在 Linux + 引擎跑时显示 ✓
+  - `test_cmd_discovery_linux_banner_shows_cross_when_stopped` — 反向验证
+
+### Test stats
+
+- 总测试数 477 → 480（+3 regression）。
+
 ## [0.4.0] — 2026-05-18
 
 > T5（plan ↔ exec 一致性）正式版。0.4.0a1 的功能完整 + 补 `--dry-run` 行为

@@ -1491,7 +1491,7 @@ def cmd_discovery(backend, config) -> None:
     """
     port = config.get("proxy_port", 7890)
     try:
-        engine_up = launchctl_running(backend.label) if IS_MACOS else False
+        engine_up = service_running(backend)
     except Exception:
         engine_up = False
 
