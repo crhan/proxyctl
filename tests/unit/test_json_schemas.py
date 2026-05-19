@@ -95,6 +95,10 @@ DOCTOR_V2 = {
     "required": ["engine_up", "port_listen", "dns_ok",
                  "system_proxy_ok", "connectivity_ok",
                  "score", "max", "healthy", "hint"],
+    # additionalProperties=True 是默认值；显式标注让向后兼容契约清晰：
+    # v0.5.0+ data 新增 suggestions[]、engine_version、mode 等字段都通过此通道追加，
+    # 老 agent（v0.4.x）按 required 列表读取的代码不受影响。
+    "additionalProperties": True,
     "properties": {
         "engine_up": {"type": "boolean"},
         "port_listen": {"type": "boolean"},
@@ -105,6 +109,30 @@ DOCTOR_V2 = {
         "max": {"type": "integer"},
         "healthy": {"type": "boolean"},
         "hint": {"type": ["string", "null"]},
+        # v0.5.0+ 新增字段（非 required，老 agent 可忽略）
+        "suggestions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["id", "severity", "actor", "title", "evidence",
+                             "doc", "fingerprint", "first_seen", "since"],
+                "properties": {
+                    "id": {"type": "string"},
+                    "severity": {"enum": ["info", "advisory", "warn"]},
+                    "actor": {"enum": ["user", "agent", "cron", "engine"]},
+                    "title": {"type": "string"},
+                    "evidence": {"type": "object"},
+                    "inspect_command": {"type": ["string", "null"]},
+                    "fix_command": {"type": ["string", "null"]},
+                    "auto_fixable": {"type": "boolean"},
+                    "doc": {"type": "string"},
+                    "fingerprint": {"type": "string"},
+                    "first_seen": {"type": "string"},
+                    "since": {"type": "string"},
+                },
+                "additionalProperties": True,
+            },
+        },
     },
 }
 

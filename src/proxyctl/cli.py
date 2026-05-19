@@ -1649,6 +1649,9 @@ def cmd_version_print() -> None:
                 "version_subcommand":      True,   # 0.4.2: `proxyctl version` 子命令
                 "status_subscription":     True,   # 0.4.4: status envelope.data.subscription
                 "engine_version":          True,   # 0.4.7: status/doctor data.engine_version (mihomo -v)
+                "doctor_suggestions":              True,   # 0.5.0: doctor data.suggestions[] 引导建议
+                "doctor_suggestions_v1":           True,   # 0.5.0: suggestion schema v1（未来 bump 用新 key）
+                "autostart_inspect":               True,   # 0.5.0: plist/unit binary/version/config_dir 比对
             },
         }
         _io.emit_json(_io.envelope("version", data=data))

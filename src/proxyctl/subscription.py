@@ -123,7 +123,7 @@ def to_suggestions(sub: dict[str, Any] | None) -> list[dict[str, Any]]:
             "actor": "user",
             "title": "未配置订阅快照，状态未知",
             "evidence": {},
-            "inspect_command": "proxyctl explain doc subscription",
+            "inspect_command": "proxyctl explain subscription",
             "doc": "suggestion:subscription.missing",
             "since": "0.5.0",
         })
@@ -144,7 +144,7 @@ def to_suggestions(sub: dict[str, Any] | None) -> list[dict[str, Any]]:
                 "fetch_http_status": sub.get("fetch_http_status"),
                 "url_host": host,
             },
-            "inspect_command": "proxyctl explain doc subscription",
+            "inspect_command": "proxyctl explain subscription",
             "doc": "suggestion:subscription.last_fetch_error",
             "since": "0.5.0",
         })
@@ -240,7 +240,7 @@ def to_suggestions(sub: dict[str, Any] | None) -> list[dict[str, Any]]:
                         "updated_at": updated_at,
                         "age_hours": hours,
                     },
-                    "inspect_command": "proxyctl explain doc subscription",
+                    "inspect_command": "proxyctl explain subscription",
                     "doc": "suggestion:subscription.stale",
                     "since": "0.5.0",
                 })

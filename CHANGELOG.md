@@ -5,6 +5,151 @@
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-05-19
+
+> doctor 长期只是"5 项布尔健康分"，但 proxyctl 周边已经积累了一堆**值得提示**
+> 的状态信号——订阅快到期、autostart plist 指向的 mihomo 与 PATH 里的不是一个、
+> GeoIP 数据库 30 天没更新、Clash API secret 太短。这些都不算 "broken"，
+> 但 agent 跑 doctor 时应该一并暴露出来，不必让用户/agent 自己挖。
+>
+> 本版加入 `data.suggestions[]` 维度（与 5 项布尔 score 完全解耦），
+> 首发 **21 条规则**覆盖订阅 / autostart / 安全 / 引擎 / 数据五类。
+> 永不影响 exit code，老 agent 透明忽略（字段追加 + additionalProperties=true）。
+
+### 关键诉求来源（哥的原话）
+
+> "doctor 能不能做的更多，比如订阅更新？还有什么功能之类的可以做一个引导提示"
+> "自动启动依赖的是什么有没有管理比如 macos 用 launchdaemon，
+>  然后 launch daemon 里面使用的 mihomo 是什么路径什么版本是不是也应该有检测"
+
+第二条是关键：之前调试 TUIC 时栽过的坑—— PATH 装了 v1.20 但 plist 还指向 v1.15
+旧 binary，`mihomo -v` 看到新版实际服务跑老版。0.4.7 加了 engine_version 但
+只看 PATH binary，本版补齐 autostart binary 对比。
+
+### Added — Suggestion Schema v1
+
+每条 suggestion 字段（写进 `tests/unit/test_json_schemas.py::DOCTOR_V2`）：
+
+```json
+{
+  "id":              "autostart.version_mismatch",
+  "severity":        "info | advisory | warn",
+  "actor":           "user | agent | cron | engine",
+  "title":           "autostart 引擎版本 v1.15.0 ≠ PATH v1.18.10",
+  "evidence":        { "autostart_version": "1.15.0", "path_version": "1.18.10" },
+  "inspect_command": "proxyctl status --json | jq .data.engine",
+  "fix_command":     null,
+  "auto_fixable":    false,
+  "doc":             "suggestion:autostart.version_mismatch",
+  "fingerprint":     "abc123def456",
+  "first_seen":      "2026-05-19T10:23:00Z",
+  "since":           "0.5.0"
+}
+```
+
+设计立场：
+- **severity 三档**：info / advisory / warn —— 没有 error / critical
+  （错误走 `envelope.hints[]`，suggestion 永远是"该做的事"不是"出了事"）
+- **actor 四档**：user / agent / cron / engine —— agent 据此决策"自己干 vs 问用户"
+- **evidence 是结构化 dict**——agent 不必 regex title 拼凑事实
+- **inspect_command ≠ fix_command**：拆开避免歧义
+- **fingerprint = sha1(id)[:12]**：跨次 doctor 调用稳定去重的唯一字段，
+  抖动字段（百分比、剩余天数）不进 hash
+- **first_seen**：从 `~/.cache/proxyctl/suggestions_state.json` 读，
+  CLI 维护，agent 不必碰；持续问题不重置时间戳
+- **排序契约**：`severity desc, id asc`（写进 AGENTS.md，agent 可稳定 diff）
+
+### Added — 首批 21 条规则
+
+**订阅类（7）** —— `src/proxyctl/subscription.py::to_suggestions`：
+- `subscription.expired` warn — `expire_days_left < 0`
+- `subscription.expiring_soon` advisory — `0 ≤ days ≤ 7`
+- `subscription.traffic_exhausted` warn — `used_pct ≥ 100`
+- `subscription.traffic_warn` warn — `90 ≤ used_pct < 100`
+- `subscription.traffic_high` advisory — `70 ≤ used_pct < 90`（UX review 指出 80% 太晚，改成 70/90 两级）
+- `subscription.last_fetch_error` warn — `fetch_ok=false`
+- `subscription.stale` info — `now - updated_at > 24h`
+- `subscription.missing` info — `engine_up` 但快照不存在（仅 `--hint-missing` 触发）
+
+**Autostart 类（8）** —— 哥主动加的维度，`src/proxyctl/autostart.py`：
+- `autostart.unit_missing` warn — plist / unit 文件不存在（短路其他规则）
+- `autostart.binary_missing` warn — plist 引用的 binary 不存在
+- `autostart.binary_mismatch` advisory — plist binary ≠ `which mihomo`
+- `autostart.version_mismatch` advisory — plist binary `-v` ≠ PATH binary `-v`
+- `autostart.config_dir_mismatch` warn — plist `-d` ≠ `backend.config_dir`
+- `autostart.placeholder_unrendered` warn — plist 含 `yourname` 字面量未替换
+- `autostart.disabled` info — plist 存在但未 bootstrap / unit 未 enable
+- `autostart.flapping` warn — launchctl LastExitStatus≠0 / systemctl is-failed
+
+**安全配置类（3）** —— `src/proxyctl/suggest_rules.py`：
+- `controller.empty_secret` warn — Clash API secret == ""
+- `controller.weak_secret` advisory — secret 长度 < 16
+- `controller.public_bind` warn — external-controller bind 0.0.0.0 / 局域网 IP
+
+**引擎/数据类（2 + 1 stub）**：
+- `engine.outdated` info/warn — 读 `~/.cache/proxyctl/known_versions.json` 契约文件
+- `data.geo_stale` info — geoip.dat / geosite.dat mtime > 30 天
+- `proxy_group.mostly_dead` —— 推迟到 v0.5.1（需要调 mihomo `/proxies` API，复杂度独立处理）
+
+### Added — 8 个 doctor 集成点
+
+`src/proxyctl/explain.py::cmd_doctor`：
+- 新增 `--no-suggest` flag，关闭整个建议引擎（恢复 v0.4.x 极简体验）
+- `data.suggestions[]` 字段输出全部（含 info 级，`--json` 必现）
+- 人类输出新增 suggestions 块：仅显 warn + advisory，上限 3 条，
+  超出折叠为 `...and N more (use --json)`
+- `--quiet` 完全跳过 suggestion 块（修复历史 quiet 不抑制 print 的潜在 bug）
+- 符号：`[!] warn` / `[*] advisory` / `[i] info`（纯 ASCII）
+- 调用所有 inspect_* 都独立 try-except：建议引擎绝不能阻塞 doctor 主流程
+
+### Added — 21 个 explain topics
+
+每条 suggestion id 都注册了 `proxyctl explain suggestion:<id>`：
+- 用户/agent 看到 doctor 输出后能一键跳到详情
+- CI 强校验 (`tests/unit/test_suggest_explain_completeness.py`)：
+  - 每个规则 id 必须有对应 explain topic
+  - 无孤儿 topic（规则砍了 explain 也得砍）
+
+### Added — supported_features 探测点
+
+`proxyctl --version --json`：
+```json
+"supported_features": {
+  ...
+  "doctor_suggestions": true,        // 0.5.0
+  "doctor_suggestions_v1": true,     // schema v1（未来 bump 用新 key）
+  "autostart_inspect": true          // 0.5.0
+}
+```
+
+agent 据此决定要不要解析 `data.suggestions[]`。
+
+### Refactor — 单一事实源（消除 status/doctor 文案漂移）
+
+`subscription.summarize_hints()` 重构：内部委托给新的 `to_suggestions()`，
+派生 `envelope.hints[]` 字符串。status 和 doctor 共用一套规则推导逻辑，
+未来改阈值只动一处。
+
+### 红线（doctor 即使扩展也不碰的）
+
+1. doctor 不自动修复——`suggestion.fix_command` 是字符串，从不主动执行
+2. doctor 不拉网络——所有"过期"判定来自本地 `subscription.json` / `known_versions.json`
+3. suggestion 不影响 exit code——21 条 warn 全亮也是 exit 0
+4. 规则失败静默降级——任何 inspect 异常 → 那一组规则跳过，不影响其他维度
+
+### 验证
+
+- `pytest`：655 passed（39 新测试覆盖 21 规则 + 框架 + 集成）
+- 实地跑 `proxyctl doctor` 在哥本机立刻发现两个真问题：
+  Clash API secret 长度 14 < 16（advisory）+
+  geoip.dat / geosite.dat 57 天没更新（info）
+
+### 设计文档参考
+
+- `src/proxyctl/suggest.py` 模块 docstring：Schema v1 完整契约
+- `src/proxyctl/autostart.py` 模块 docstring：两层 inspect 设计
+- `proxyctl explain suggestion:<id>`：每条规则的触发逻辑 + 修复路径
+
 ## [0.4.7] — 2026-05-19
 
 > proxyctl 是引擎生命周期管理 CLI，但**之前任何位置都不显示引擎版本号**——

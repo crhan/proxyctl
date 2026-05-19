@@ -1,0 +1,282 @@
+"""proxyctl.suggest_rules — 安全/引擎/数据类规则（v0.5.0+）。
+
+容纳 controller / engine / data 三组规则的纯函数：
+  controller.empty_secret      — external-controller secret == ""
+  controller.weak_secret       — secret 长度 < 16
+  controller.public_bind       — external-controller bind 到 0.0.0.0 / 公网
+  engine.outdated              — 当前版本 < known_versions.json 的 safe_min
+  data.geo_stale               — geoip.dat / geosite.dat mtime > 30 天
+
+每条规则都是纯函数：输入预解析过的字典，输出 Suggestion list。
+读 mihomo config / known_versions.json / geo 文件 mtime 的副作用统一在 inspect_*。
+
+注：proxy_group.mostly_dead 需要调 mihomo /proxies API，复杂度高，留待 v0.5.1。
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import time
+from typing import Any
+
+GEO_STALE_DAYS = 30
+GEO_FILES = ("geoip.dat", "geosite.dat", "geoip.metadb")
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Mihomo config 解析 — controller 三规则的输入
+# ────────────────────────────────────────────────────────────────────────────
+
+def inspect_engine_config(config_file: str) -> dict[str, Any]:
+    """读 mihomo / sing-box config，提取 controller 字段。
+
+    设计立场：不引入新依赖（yaml 库 proxyctl 已经在用），
+    但解析失败时静默降级——doctor 不能因为用户 config 损坏就死。
+
+    Returns:
+        {
+          "config_exists": bool,
+          "controller_host": "127.0.0.1" | "0.0.0.0" | None,
+          "controller_port": int | None,
+          "controller_secret": str | None,   # 可为 ""
+          "errors": list[str],
+        }
+    """
+    out: dict[str, Any] = {
+        "config_exists": False,
+        "controller_host": None,
+        "controller_port": None,
+        "controller_secret": None,
+        "errors": [],
+    }
+    if not config_file or not os.path.isfile(config_file):
+        return out
+    out["config_exists"] = True
+    try:
+        with open(config_file, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError as e:
+        out["errors"].append(f"config read failed: {e}")
+        return out
+
+    # 用正则解析（不强求完整 YAML —— 用户 config 可能有 anchors / merge 复杂结构）
+    # external-controller: 127.0.0.1:9090 / 0.0.0.0:9090 / :9090
+    m = re.search(r"^external-controller:\s*['\"]?([^'\"\s#]+)['\"]?\s*$",
+                  text, re.M)
+    if m:
+        spec = m.group(1).strip()
+        if spec.startswith(":"):
+            out["controller_host"] = "127.0.0.1"
+            try:
+                out["controller_port"] = int(spec[1:])
+            except ValueError:
+                pass
+        else:
+            # host:port
+            parts = spec.rsplit(":", 1)
+            if len(parts) == 2:
+                out["controller_host"] = parts[0]
+                try:
+                    out["controller_port"] = int(parts[1])
+                except ValueError:
+                    pass
+
+    # secret: "xxxx" / secret: xxxx / secret: '' / 缺失即 None
+    m = re.search(r"^secret:\s*['\"]?([^'\"\n#]*)['\"]?\s*$", text, re.M)
+    if m:
+        out["controller_secret"] = m.group(1).strip()
+    return out
+
+
+def _is_public_bind(host: str | None) -> bool:
+    """判断 host 是否为"公网/任意"绑定。
+
+    包含：0.0.0.0 / :: / 非环回的具体 IP / 非环回的具体 hostname。
+    """
+    if not host:
+        return False
+    h = host.strip()
+    if h in ("0.0.0.0", "::", "*"):
+        return True
+    if h in ("127.0.0.1", "::1", "localhost"):
+        return False
+    # 具体 IP 如 192.168.x.x / 公网 IP —— 也算 public bind（暴露给局域网/外网）
+    if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", h):
+        return True
+    # 非环回 hostname（少见但可能）
+    return True
+
+
+def controller_rules(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    """3 条 controller 规则。cfg 来自 inspect_engine_config。"""
+    if not cfg.get("config_exists"):
+        return []
+    out: list[dict[str, Any]] = []
+    host = cfg.get("controller_host")
+    port = cfg.get("controller_port")
+    secret = cfg.get("controller_secret")
+
+    # empty_secret —— 空字符串或字段不存在但 controller 已配置
+    if (host or port) and (secret == "" or secret is None):
+        # 仅在 controller 已经配置时报告（避免完全没用 API 的用户被打扰）
+        out.append({
+            "id": "controller.empty_secret",
+            "severity": "warn",
+            "actor": "user",
+            "title": "Clash API secret 为空",
+            "evidence": {
+                "controller_host": host,
+                "controller_port": port,
+                "secret_set": False,
+            },
+            "fix_command": "proxyctl explain subscription",
+            "doc": "suggestion:controller.empty_secret",
+            "since": "0.5.0",
+        })
+    elif secret and len(secret) < 16:
+        out.append({
+            "id": "controller.weak_secret",
+            "severity": "advisory",
+            "actor": "user",
+            "title": f"Clash API secret 过短（长度 {len(secret)} < 16）",
+            "evidence": {"secret_length": len(secret)},
+            "doc": "suggestion:controller.weak_secret",
+            "since": "0.5.0",
+        })
+
+    if _is_public_bind(host):
+        out.append({
+            "id": "controller.public_bind",
+            "severity": "warn",
+            "actor": "user",
+            "title": f"Clash API bind 到非环回地址：{host}",
+            "evidence": {"controller_host": host, "controller_port": port},
+            "doc": "suggestion:controller.public_bind",
+            "since": "0.5.0",
+        })
+    return out
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# engine.outdated — 读 known_versions.json 契约文件
+# ────────────────────────────────────────────────────────────────────────────
+
+KNOWN_VERSIONS_PATH = "~/.cache/proxyctl/known_versions.json"
+
+
+def known_versions_path() -> str:
+    p = os.environ.get("PROXYCTL_KNOWN_VERSIONS_PATH") or KNOWN_VERSIONS_PATH
+    return os.path.expanduser(p)
+
+
+def load_known_versions() -> dict[str, Any] | None:
+    """读 known_versions.json。设计同 subscription.json 契约：
+    用户脚本写、proxyctl 只读、缺失即静默。
+
+    Schema:
+        {
+          "safe_min_version": "1.18.0",
+          "unsafe_versions": ["1.19.18", "1.19.19"],
+          "updated_at": "2026-05-19T..."
+        }
+    """
+    import json
+    p = known_versions_path()
+    if not os.path.isfile(p):
+        return None
+    try:
+        with open(p, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _parse_version(v: str) -> tuple:
+    """简易语义版本解析。'1.18.10' → (1, 18, 10)；不规范字段当 0。"""
+    parts = re.findall(r"\d+", v)
+    return tuple(int(p) for p in parts[:3]) + (0,) * (3 - min(len(parts), 3))
+
+
+def engine_rules(current_version: str | None,
+                  known: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """engine.outdated 规则。current_version 缺失或 known 缺失即跳过。"""
+    if not current_version or not known:
+        return []
+    safe_min = known.get("safe_min_version")
+    unsafe = known.get("unsafe_versions") or []
+    cur_t = _parse_version(current_version)
+
+    if current_version in unsafe:
+        return [{
+            "id": "engine.outdated",
+            "severity": "warn",
+            "actor": "user",
+            "title": f"当前引擎版本 {current_version} 已知存在问题",
+            "evidence": {
+                "current_version": current_version,
+                "unsafe_versions": unsafe,
+            },
+            "doc": "suggestion:engine.outdated",
+            "since": "0.5.0",
+        }]
+    if safe_min and cur_t < _parse_version(safe_min):
+        return [{
+            "id": "engine.outdated",
+            "severity": "info",
+            "actor": "user",
+            "title": (f"引擎版本 {current_version} 低于已知安全基线 "
+                      f"{safe_min}"),
+            "evidence": {
+                "current_version": current_version,
+                "safe_min_version": safe_min,
+            },
+            "doc": "suggestion:engine.outdated",
+            "since": "0.5.0",
+        }]
+    return []
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# data.geo_stale — GeoIP / GeoSite 文件 mtime
+# ────────────────────────────────────────────────────────────────────────────
+
+def geo_rules(engine_config_dir: str | None,
+              *, now: float | None = None) -> list[dict[str, Any]]:
+    """data.geo_stale 规则。
+
+    Args:
+        engine_config_dir: 引擎 config 目录（含 geoip.dat / geosite.dat）
+        now: time.time() 注入点（测试用）
+    """
+    if not engine_config_dir or not os.path.isdir(engine_config_dir):
+        return []
+    now_t = now if now is not None else time.time()
+    stale: list[tuple[str, int]] = []
+    for fn in GEO_FILES:
+        p = os.path.join(engine_config_dir, fn)
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        age_days = int((now_t - st.st_mtime) // 86400)
+        if age_days > GEO_STALE_DAYS:
+            stale.append((fn, age_days))
+    if not stale:
+        return []
+    files_str = ", ".join(f"{n}({d}d)" for n, d in stale)
+    return [{
+        "id": "data.geo_stale",
+        "severity": "info",
+        "actor": "cron",
+        "title": f"GeoIP/GeoSite 数据 > {GEO_STALE_DAYS} 天未更新：{files_str}",
+        "evidence": {
+            "stale_files": [{"name": n, "age_days": d} for n, d in stale],
+        },
+        "fix_command": (
+            "# 在用户脚本/cron 中拉取最新 GeoIP / GeoSite："
+            " https://github.com/MetaCubeX/meta-rules-dat"),
+        "doc": "suggestion:data.geo_stale",
+        "since": "0.5.0",
+    }]

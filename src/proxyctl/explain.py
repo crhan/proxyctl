@@ -1435,12 +1435,15 @@ def _resolve_dot_key(d: dict, key: str):
 # ── 主入口 5: doctor ──────────────────────────────────────────────────────
 
 def cmd_doctor(args: list, backend, config) -> None:
-    """proxyctl doctor [--json] — 极简健康打分。
+    """proxyctl doctor [--json] [--no-suggest] — 健康打分 + 引导建议。
 
-    v0.3.0：score 仍只数核心 5 项布尔；新增 informational 字段（不计分）：
-      engine, mode, config_path, lock_held, lock_path
+    score 仍只数核心 5 项布尔（≤500ms 网络探测），不计建议入分。
+    suggestions 默认显示 warn+advisory（上限 3 条，info 仅 --json），
+    永不影响 exit code。`--no-suggest` 关闭整个建议引擎（恢复 v0.4.x 极简体验）。
     """
     as_json = GLOBAL_FLAGS_REF().get("json", False)
+    quiet = GLOBAL_FLAGS_REF().get("quiet", False)
+    no_suggest = "--no-suggest" in (args or [])
 
     # 从 cli.py 复用 service_running，但为避免循环 import 在这里独立判断
     from proxyctl.cli import service_running, get_mode, get_engine_version
@@ -1474,6 +1477,17 @@ def cmd_doctor(args: list, backend, config) -> None:
         held = []
     lock_path_map = _io.lock_paths()
 
+    engine_ver = get_engine_version(backend.name)
+
+    # ── suggestions 引擎（v0.5.0+，与 score 解耦，永不影响 exit code）──────
+    suggestions: list = []
+    if not no_suggest:
+        try:
+            suggestions = _build_doctor_suggestions(backend, config, engine_ver)
+        except Exception:
+            # 建议引擎绝不能阻塞 doctor 主流程；任何意外都静默降级为空建议
+            suggestions = []
+
     healthy = (score == len(flags))
     data = {
         **flags,
@@ -1482,13 +1496,15 @@ def cmd_doctor(args: list, backend, config) -> None:
         "hint": hint,
         # informational fields (W15 in 0.3.0):
         "engine": backend.name,
-        "engine_version": get_engine_version(backend.name),  # v0.4.7+, None 即未知
+        "engine_version": engine_ver,  # v0.4.7+, None 即未知
         "mode": mode_str,
         "port": port,
         "config_path": _io_proxyctl_config_path(),
         "engine_config_path": backend.config_file,
         "lock_held": held,
         "lock_path": lock_path_map,
+        # v0.5.0+：与 score 解耦的引导建议列表；--json 总是输出（含 info 级）
+        "suggestions": suggestions,
     }
     code = OK if healthy else ENGINE_DOWN
 
@@ -1498,7 +1514,7 @@ def cmd_doctor(args: list, backend, config) -> None:
         sys.exit(code)
 
     icon = lambda b: f"{GREEN}✓{NC}" if b else f"{RED}✗{NC}"
-    ev = data.get("engine_version") or {}
+    ev = engine_ver or {}
     ev_tag = f" v{ev['version']}" if ev.get("version") else ""
     print(f"{BOLD}proxyctl doctor{NC}  ({score}/{len(flags)})  "
           f"{DIM}engine={backend.name}{ev_tag} mode={mode_str} port={port}{NC}")
@@ -1511,7 +1527,82 @@ def cmd_doctor(args: list, backend, config) -> None:
         print(f"  {DIM}lock_held: {', '.join(held)}{NC}")
     if hint:
         print(f"{CYAN}next:{NC} {hint}")
+
+    # ── suggestions 人类输出块 ─────────────────────────────────────────
+    # 规则：默认仅显 warn + advisory，上限 3 条；info 仅 --json
+    # --quiet 完全跳过整块
+    if suggestions and not quiet:
+        visible = [s for s in suggestions if s["severity"] in ("warn", "advisory")]
+        if visible:
+            cap = 3
+            shown = visible[:cap]
+            extra = len(suggestions) - len(shown)
+            print()
+            print(f"{BOLD}suggestions{NC} ({len(shown)}/{len(suggestions)}):")
+            for s in shown:
+                mark = {"warn": "[!]", "advisory": "[*]", "info": "[i]"}.get(
+                    s["severity"], "[?]")
+                color = {"warn": RED, "advisory": YELLOW,
+                         "info": DIM}.get(s["severity"], "")
+                print(f"  {color}{mark}{NC} {CYAN}{s['id']:<32}{NC} {s['title']}")
+                cmd = s.get("fix_command") or s.get("inspect_command")
+                if cmd:
+                    print(f"      {DIM}→ {cmd}{NC}")
+            if extra > 0:
+                print(f"  {DIM}...and {extra} more (use --json){NC}")
+
     sys.exit(code)
+
+
+def _build_doctor_suggestions(backend, config, engine_ver) -> list:
+    """采集所有 suggestion 输入并调 build_suggestions。
+
+    所有 inspect_* 调用都独立 try-except，任一失败不影响其他维度。
+    """
+    from proxyctl import subscription as _sub
+    from proxyctl import autostart as _autostart
+    from proxyctl import suggest as _suggest
+    from proxyctl import suggest_rules as _rules
+
+    try:
+        sub = _sub.load()
+    except Exception:
+        sub = None
+
+    autostart_inspect = None
+    path_binary = None
+    path_version = None
+    expected_cfg_dir = os.path.dirname(backend.config_file)
+    try:
+        static_inspect = _autostart.inspect_static(backend)
+        autostart_inspect = _autostart.inspect_runtime(static_inspect, backend)
+    except Exception:
+        autostart_inspect = None
+
+    if engine_ver:
+        path_binary = engine_ver.get("binary")
+        path_version = engine_ver.get("version")
+
+    try:
+        eng_cfg_inspect = _rules.inspect_engine_config(backend.config_file)
+    except Exception:
+        eng_cfg_inspect = None
+
+    try:
+        known_versions = _rules.load_known_versions()
+    except Exception:
+        known_versions = None
+
+    return _suggest.build_suggestions(
+        sub=sub,
+        autostart_inspect=autostart_inspect,
+        path_binary=path_binary,
+        path_version=path_version,
+        expected_config_dir=expected_cfg_dir,
+        engine_config_inspect=eng_cfg_inspect,
+        known_versions=known_versions,
+        engine_config_dir=expected_cfg_dir,
+    )
 
 
 def _tcp_open(host: str, port: int, timeout: float = 0.5) -> bool:
@@ -1597,3 +1688,264 @@ def set_global_flags(flags: dict) -> None:
     _GLOBAL_FLAGS.clear()
     _GLOBAL_FLAGS.update(flags)
     _io.set_json_mode(bool(flags.get("json", False)))
+
+
+# ── Suggestion Topics (v0.5.0+) ───────────────────────────────────────────
+# 每个 suggestion.id 对应一个 `proxyctl explain suggestion:<id>` topic，
+# CI 强校验：tests/unit/test_suggest_explain_completeness.py 遍历所有 id
+# 必须能 explain 出非空 card。
+
+_SUGGESTION_DOCS: dict[str, dict] = {
+    # ── 订阅 7 条 ─────────────────────────────────────────────────────
+    "subscription.expired": {
+        "summary": "订阅已过期。proxyctl 不主动续订——续费/换源由用户脚本或人工处理。",
+        "edit": (
+            "  # 1. 续费机场\n"
+            "  # 2. 用户脚本拉新订阅，写 ~/.config/proxyctl/subscription.json\n"
+            "  # 3. proxyctl restart 让引擎读新配置"
+        ),
+        "verify": "proxyctl status --json | jq .data.subscription",
+        "next_commands": ["status", "explain subscription"],
+    },
+    "subscription.expiring_soon": {
+        "summary": "订阅 7 天内到期。提前续费避免业务中断。",
+        "edit": "  # 同 subscription.expired，提前操作即可",
+        "verify": "proxyctl status --json | jq .data.subscription.expire_days_left",
+        "next_commands": ["status", "explain subscription"],
+    },
+    "subscription.traffic_exhausted": {
+        "summary": "套餐流量已 100% 用完。继续用可能被限速或停服。",
+        "edit": "  # 升级套餐 / 等月初重置 / 换机场",
+        "verify": "proxyctl status --json | jq .data.subscription.traffic_used_pct",
+        "next_commands": ["status"],
+    },
+    "subscription.traffic_warn": {
+        "summary": "流量已用 ≥ 90%。提前升级套餐或限制后台流量。",
+        "edit": "  # 1. 升级套餐\n  # 2. 暂停大流量应用（云盘同步等）",
+        "verify": "proxyctl status --json",
+        "next_commands": ["status"],
+    },
+    "subscription.traffic_high": {
+        "summary": "流量已用 ≥ 70%。监控级别建议，无须立即处理。",
+        "edit": "  # 关注剩余流量趋势，必要时升级",
+        "verify": "proxyctl status --json",
+        "next_commands": ["status"],
+    },
+    "subscription.last_fetch_error": {
+        "summary": (
+            "最近一次订阅拉取失败。原因：网络挂 / 机场跑路 / 密钥变更 / 脚本 bug。"
+        ),
+        "edit": (
+            "  # 1. 手动重跑用户脚本（如 update-subscription.sh）\n"
+            "  # 2. 检查机场 URL / token 是否仍有效\n"
+            "  # 3. 看脚本日志 ~/.config/proxyctl/dns-watchdog.log 或对应 cron 输出"
+        ),
+        "verify": "proxyctl status --json | jq '.data.subscription | {fetch_ok,fetch_error}'",
+        "next_commands": ["status", "explain subscription"],
+    },
+    "subscription.stale": {
+        "summary": (
+            "订阅快照超过 24h 未更新。可能：cron 脚本停了 / 用户脚本崩了 / 机器睡眠。"
+        ),
+        "edit": (
+            "  # 1. 确认 cron / launchd 任务在跑\n"
+            "  # 2. 检查脚本最近输出\n"
+            "  # 3. 手动重跑一次拉订阅"
+        ),
+        "verify": "ls -la ~/.config/proxyctl/subscription.json",
+        "next_commands": ["status"],
+    },
+    "subscription.missing": {
+        "summary": (
+            "未配置订阅状态快照。proxyctl 不主动拉订阅——需用户脚本写 "
+            "~/.config/proxyctl/subscription.json 后才能显示订阅状态。"
+        ),
+        "edit": "  # 参考 proxyctl explain subscription 配置用户脚本",
+        "verify": "test -f ~/.config/proxyctl/subscription.json && echo OK",
+        "next_commands": ["explain subscription"],
+    },
+
+    # ── Autostart 8 条 ─────────────────────────────────────────────────
+    "autostart.unit_missing": {
+        "summary": (
+            "自动启动 unit（macOS plist / Linux systemd user unit）未安装。"
+            "重启系统后引擎不会自动启动。"
+        ),
+        "edit": (
+            "  # macOS:\n"
+            "  sudo cp ~/.config/proxyctl/launchdaemons/com.mihomo.tun.plist /Library/LaunchDaemons/\n"
+            "  sudo launchctl bootstrap system /Library/LaunchDaemons/com.mihomo.tun.plist\n\n"
+            "  # Linux:\n"
+            "  cp systemd/mihomo.service ~/.config/systemd/user/\n"
+            "  systemctl --user daemon-reload && systemctl --user enable --now mihomo.service"
+        ),
+        "verify": "proxyctl doctor --json | jq '.data.suggestions[] | select(.id==\"autostart.unit_missing\")'",
+        "next_commands": ["doctor"],
+    },
+    "autostart.binary_missing": {
+        "summary": (
+            "autostart unit 引用的引擎二进制不存在。常见于 brew uninstall 后忘了更新 plist。"
+        ),
+        "edit": (
+            "  # 1. 装回引擎：brew install mihomo  或  cargo install ... \n"
+            "  # 2. 或编辑 plist/unit 改 binary 路径到当前 PATH 里的 mihomo\n"
+            "  # 3. 重新 bootstrap"
+        ),
+        "verify": "ls -la $(grep -oE '/[^ ]*mihomo' /Library/LaunchDaemons/com.mihomo.tun.plist | head -1)",
+        "next_commands": ["doctor", "explain suggestion:autostart.unit_missing"],
+    },
+    "autostart.binary_mismatch": {
+        "summary": (
+            "autostart 跑的 binary 与 PATH 里的不同。`mihomo -v` 看到一个版本，"
+            "实际服务跑另一个。哥之前调试 TUIC 时栽过的坑。"
+        ),
+        "edit": (
+            "  # 1. 选定权威路径（一般 PATH 里那个最新）\n"
+            "  # 2. 改 plist/unit 的 binary 路径到权威路径\n"
+            "  # 3. launchctl bootout + bootstrap 让 plist 生效"
+        ),
+        "verify": "diff <($(which mihomo) -v) <(/path/in/plist -v)",
+        "next_commands": ["doctor"],
+    },
+    "autostart.version_mismatch": {
+        "summary": (
+            "autostart binary 与 PATH binary 报告不同版本号。可能是双安装"
+            "（brew + 手动装）或 plist 指向被遗忘的老路径。"
+        ),
+        "edit": "  # 同 autostart.binary_mismatch，统一到一个 binary",
+        "verify": "proxyctl doctor --json | jq '.data.suggestions[] | select(.id==\"autostart.version_mismatch\") .evidence'",
+        "next_commands": ["doctor", "explain suggestion:autostart.binary_mismatch"],
+    },
+    "autostart.config_dir_mismatch": {
+        "summary": (
+            "autostart unit 指向的 config 目录与 proxyctl 看到的不一致。"
+            "改了配置但 autostart 跑的是另一份的高风险来源。"
+        ),
+        "edit": (
+            "  # 1. 决定权威 config 目录（通常是 ~/.config/mihomo）\n"
+            "  # 2. 改 plist/unit 的 -d 参数到权威目录\n"
+            "  # 3. 重新 bootstrap"
+        ),
+        "verify": "grep -E '\\-d ' /Library/LaunchDaemons/com.mihomo.tun.plist",
+        "next_commands": ["doctor"],
+    },
+    "autostart.placeholder_unrendered": {
+        "summary": (
+            "autostart unit 模板未被 install.sh 替换占位符（如 'yourname'）。"
+            "服务无法启动。"
+        ),
+        "edit": "  # 重新跑 install.sh，或手动 sed 替换 yourname → $USER",
+        "verify": "grep -n yourname /Library/LaunchDaemons/com.mihomo.tun.plist",
+        "next_commands": ["doctor"],
+    },
+    "autostart.disabled": {
+        "summary": "unit 文件存在但未 bootstrap / enable，重启后不会自动启动。",
+        "edit": (
+            "  # macOS:\n"
+            "  sudo launchctl bootstrap system /Library/LaunchDaemons/com.mihomo.tun.plist\n"
+            "  # Linux:\n"
+            "  systemctl --user enable mihomo.service"
+        ),
+        "verify": "launchctl print system/com.mihomo.tun  # 或 systemctl --user is-enabled mihomo",
+        "next_commands": ["doctor", "start"],
+    },
+    "autostart.flapping": {
+        "summary": (
+            "autostart 服务最近异常退出（macOS LastExitStatus != 0 / Linux is-failed）。"
+            "KeepAlive 在背后反复重启，但用户感知不到。"
+        ),
+        "edit": (
+            "  # 1. 看引擎日志 ~/.config/mihomo/mihomo.log / .err\n"
+            "  # 2. 看系统层日志：\n"
+            "  #    macOS: launchctl print system/com.mihomo.tun\n"
+            "  #    Linux: journalctl --user -u mihomo.service -n 100\n"
+            "  # 3. 修复 config 错误后 proxyctl restart"
+        ),
+        "verify": "proxyctl log",
+        "next_commands": ["log", "doctor"],
+    },
+
+    # ── Controller / Engine / Data 5 条 ────────────────────────────────
+    "controller.empty_secret": {
+        "summary": (
+            "Clash API secret 为空字符串。本地连接没影响，但若 controller bind "
+            "到非环回地址（见 controller.public_bind），任何人都能调你的 API。"
+        ),
+        "edit": (
+            "  # 在 mihomo config.yaml 加：\n"
+            "  secret: <一段 >= 16 字符的随机字符串，用 openssl rand -hex 16 生成>"
+        ),
+        "verify": "grep -E '^secret:' ~/.config/mihomo/config.yaml",
+        "next_commands": ["explain subscription"],
+    },
+    "controller.weak_secret": {
+        "summary": (
+            "Clash API secret 长度 < 16。本地用没事，但若不慎暴露到局域网，"
+            "短 secret 容易爆破。"
+        ),
+        "edit": "  # 用 openssl rand -hex 24 重新生成一段强 secret",
+        "verify": "grep -E '^secret:' ~/.config/mihomo/config.yaml",
+        "next_commands": ["explain suggestion:controller.empty_secret"],
+    },
+    "controller.public_bind": {
+        "summary": (
+            "Clash API external-controller bind 到 0.0.0.0 或局域网 IP。"
+            "局域网任何设备都能控制你的代理 —— 包括切换节点、读取节点列表。"
+        ),
+        "edit": (
+            "  # 在 mihomo config.yaml 改回环回：\n"
+            "  external-controller: 127.0.0.1:9090\n"
+            "  # 如果确实需要远程访问，强制配 secret 且至少 24 字符"
+        ),
+        "verify": "grep -E '^external-controller:' ~/.config/mihomo/config.yaml",
+        "next_commands": ["explain suggestion:controller.empty_secret"],
+    },
+    "engine.outdated": {
+        "summary": (
+            "引擎版本 < known_versions.json 中的 safe_min_version，"
+            "或当前版本在 unsafe_versions 黑名单中（如已知 QUIC race / TUN regression）。"
+        ),
+        "edit": (
+            "  # 1. 升级 binary：brew upgrade mihomo  或重新下载\n"
+            "  # 2. 重启服务：proxyctl restart\n"
+            "  # 3. known_versions.json 由用户脚本维护，schema：\n"
+            "  #    {\"safe_min_version\":\"1.18.0\",\"unsafe_versions\":[],\"updated_at\":\"...\"}"
+        ),
+        "verify": "mihomo -v",
+        "next_commands": ["status", "restart"],
+    },
+    "data.geo_stale": {
+        "summary": (
+            "GeoIP / GeoSite 数据库 > 30 天未更新。新加入的网站可能走错路由分流。"
+            "对中国大陆用户特别相关——分流规则依赖最新的 CN 段。"
+        ),
+        "edit": (
+            "  # 用户脚本拉最新数据：\n"
+            "  cd ~/.config/mihomo\n"
+            "  curl -L -o geoip.dat https://github.com/MetaCubeX/meta-rules-dat/raw/release/geoip.dat\n"
+            "  curl -L -o geosite.dat https://github.com/MetaCubeX/meta-rules-dat/raw/release/geosite.dat\n"
+            "  proxyctl restart"
+        ),
+        "verify": "stat -f '%m %N' ~/.config/mihomo/geo*.dat",
+        "next_commands": ["restart"],
+    },
+}
+
+
+def _make_suggestion_topic(sid: str, doc: dict):
+    """工厂函数：用闭包绑定 sid/doc，避免 for 循环共享变量陷阱。"""
+    @topic(f"suggestion:{sid}")
+    def _t(backend, config) -> TopicCard:
+        return {
+            "topic": f"suggestion:{sid}",
+            "summary": doc["summary"],
+            "file": doc.get("file", "(no file)"),
+            "edit": doc["edit"],
+            "verify": doc["verify"],
+            "next_commands": doc.get("next_commands", ["doctor"]),
+        }
+    return _t
+
+
+for _sid, _doc in _SUGGESTION_DOCS.items():
+    _make_suggestion_topic(_sid, _doc)

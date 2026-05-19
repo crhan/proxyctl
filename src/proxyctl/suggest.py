@@ -159,6 +159,9 @@ def build_suggestions(*, sub: dict[str, Any] | None = None,
                       path_binary: str | None = None,
                       path_version: str | None = None,
                       expected_config_dir: str | None = None,
+                      engine_config_inspect: dict[str, Any] | None = None,
+                      known_versions: dict[str, Any] | None = None,
+                      engine_config_dir: str | None = None,
                       persist_state: bool = True,
                       _extra_raw: list[dict[str, Any]] | None = None,
                       ) -> list[dict[str, Any]]:
@@ -198,7 +201,17 @@ def build_suggestions(*, sub: dict[str, Any] | None = None,
             expected_config_dir=expected_config_dir,
         ))
 
-    # security / engine_data 等规则模块在 commit 3 接入
+    if engine_config_inspect is not None:
+        from proxyctl import suggest_rules as _rules
+        raw.extend(_rules.controller_rules(engine_config_inspect))
+
+    if path_version and known_versions:
+        from proxyctl import suggest_rules as _rules
+        raw.extend(_rules.engine_rules(path_version, known_versions))
+
+    if engine_config_dir:
+        from proxyctl import suggest_rules as _rules
+        raw.extend(_rules.geo_rules(engine_config_dir))
 
     if _extra_raw:
         raw.extend(_extra_raw)
