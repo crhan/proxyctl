@@ -2320,6 +2320,232 @@ def _plan_restart(backend, config, *, clean: bool = False) -> list[dict]:
     return steps
 
 
+def _resolve_autostart_targets(backend) -> tuple[str | None, str]:
+    """计算 autostart sync 的目标 binary + config_dir。
+
+    Returns: (binary_or_none, config_dir)
+        binary 为 None 表示 PATH 找不到 → cmd 应 fail USAGE
+    """
+    import shutil
+    binary = shutil.which(backend.name)
+    config_dir = os.path.dirname(backend.config_file)
+    return binary, config_dir
+
+
+def _plan_autostart_sync(backend) -> list[dict]:
+    """proxyctl autostart sync 的 dry-run plan。
+
+    步骤（macOS）：
+      1. launchctl bootout system/<label>（停旧 daemon）
+      2. fs_write_atomic <plist>（覆盖 plist，保留其他字段）
+      3. launchctl bootstrap system <plist>（起新 daemon）
+
+    Linux：
+      1. systemctl --user stop <unit>
+      2. fs_write_atomic <unit_path>
+      3. systemctl --user daemon-reload
+      4. systemctl --user start <unit>
+    """
+    from proxyctl import autostart as _autostart
+    binary, config_dir = _resolve_autostart_targets(backend)
+    if not binary:
+        # 无法 plan：返回单步骤 noop 说明缺前置
+        return [{
+            "action": "subprocess",
+            "target": f"echo 'no {backend.name} in PATH; aborting'",
+            "summary": (f"PATH 中找不到 {backend.name}：先 brew/cargo install 后重试"),
+            "reversible": True, "requires_sudo": False, "side_effects": [],
+        }]
+
+    static = _autostart.inspect_static(backend)
+    diff = _autostart.compute_sync(static,
+                                    target_binary=binary,
+                                    target_config_dir=config_dir)
+    if not diff["needs_update"]:
+        return [{
+            "action": "subprocess",
+            "target": "echo 'autostart already in sync; no-op'",
+            "summary": ("autostart 已与 PATH binary + config_dir 一致，无须 sync"),
+            "reversible": True, "requires_sudo": False, "side_effects": [],
+        }]
+
+    plat = static.get("platform", "")
+    unit_path = static["unit_path"]
+    changes = "; ".join(diff["changes"])
+
+    if plat == "darwin":
+        sudo = True
+        return [
+            {"action": "subprocess",
+             "target": f"launchctl bootout {backend.label}",
+             "summary": f"停旧 autostart daemon（{backend.label}）",
+             "reversible": False, "requires_sudo": sudo,
+             "side_effects": ["process", "system"]},
+            {"action": "fs_write_atomic",
+             "target": unit_path,
+             "summary": f"覆盖 plist（{changes}）",
+             "reversible": False, "requires_sudo": sudo,
+             "side_effects": ["config-write"]},
+            {"action": "subprocess",
+             "target": f"launchctl bootstrap system {unit_path}",
+             "summary": "起新 autostart daemon（bootstrap）",
+             "reversible": True, "requires_sudo": sudo,
+             "side_effects": ["process", "system"]},
+        ]
+    elif plat == "linux":
+        return [
+            {"action": "subprocess",
+             "target": f"systemctl --user stop {backend.unit}",
+             "summary": f"停旧 autostart service（{backend.unit}）",
+             "reversible": False, "requires_sudo": False,
+             "side_effects": ["process", "system"]},
+            {"action": "fs_write_atomic",
+             "target": unit_path,
+             "summary": f"覆盖 unit（{changes}）",
+             "reversible": False, "requires_sudo": False,
+             "side_effects": ["config-write"]},
+            {"action": "subprocess",
+             "target": "systemctl --user daemon-reload",
+             "summary": "systemctl daemon-reload",
+             "reversible": True, "requires_sudo": False,
+             "side_effects": ["system"]},
+            {"action": "subprocess",
+             "target": f"systemctl --user start {backend.unit}",
+             "summary": "起新 autostart service",
+             "reversible": True, "requires_sudo": False,
+             "side_effects": ["process", "system"]},
+        ]
+    else:
+        return [{
+            "action": "subprocess",
+            "target": f"echo 'unsupported platform: {plat}'",
+            "summary": f"autostart sync 暂不支持 {plat}",
+            "reversible": True, "requires_sudo": False, "side_effects": [],
+        }]
+
+
+def cmd_autostart(backend: "Backend", subcmd: str, config: dict) -> None:
+    """proxyctl autostart [inspect|sync] — 自动启动 unit 管理。
+
+    - 无参 / inspect：展示 plist/unit 当前状态 + 应改为什么（只读）
+    - sync：把 PATH binary + 当前 config_dir 同步到 plist/unit
+            （写命令，macOS 需 sudo；支持 --dry-run）
+    """
+    from proxyctl import autostart as _autostart
+
+    subcmd = (subcmd or "inspect").strip()
+    valid = ("inspect", "sync")
+    if subcmd not in valid:
+        import difflib
+        suggest = difflib.get_close_matches(subcmd, valid, n=1, cutoff=0.4)
+        hints = [f"子命令: {', '.join(valid)}"]
+        if suggest:
+            hints.insert(0, f"是否想要：{suggest[0]}？")
+        _io.fail(f"未识别 autostart 子命令：{subcmd}",
+                 hints=hints, doc="suggestion:autostart.unit_missing",
+                 code=_io.USAGE, cmd="autostart")
+
+    as_json = GLOBAL_FLAGS.get("json", False)
+
+    static = _autostart.inspect_static(backend)
+
+    if subcmd == "inspect":
+        # 只读：跑 runtime 也拉 binary -v / launchctl print
+        full = _autostart.inspect_runtime(static, backend)
+        if as_json:
+            _io.emit_json(_io.envelope("autostart", data={"inspect": full}))
+            return
+        plat = full.get("platform", "?")
+        print(f"{BOLD}autostart {plat}{NC}  unit={full.get('unit_path')}")
+        print(f"  exists:    {full.get('unit_exists')}")
+        print(f"  binary:    {full.get('binary')} (exists={full.get('binary_exists')})")
+        if full.get("autostart_version"):
+            print(f"  version:   {full.get('autostart_version')}")
+        print(f"  config:    {full.get('config_dir')}")
+        print(f"  enabled:   {full.get('enabled')}")
+        if full.get("last_exit_status") is not None:
+            print(f"  last_exit: {full.get('last_exit_status')}")
+        if full.get("is_failed"):
+            print(f"  systemd:   {YELLOW}failed{NC}")
+        if full.get("placeholder_unrendered"):
+            print(f"  {YELLOW}placeholder unrendered (yourname){NC}")
+        return
+
+    # sync 走 plan/exec 路径
+    _maybe_dry_run("autostart sync", lambda: _plan_autostart_sync(backend))
+
+    binary, config_dir = _resolve_autostart_targets(backend)
+    if not binary:
+        _io.fail(f"PATH 中找不到 {backend.name}",
+                 hint=f"先安装：brew install {backend.name}  /  "
+                      f"cargo install ...，然后重试",
+                 doc="suggestion:autostart.binary_missing",
+                 code=_io.DEPENDENCY_MISSING, cmd="autostart")
+
+    diff = _autostart.compute_sync(static, target_binary=binary,
+                                    target_config_dir=config_dir)
+    if diff["errors"]:
+        _io.fail("autostart sync 中止：" + "; ".join(diff["errors"]),
+                 hint=("先 proxyctl autostart inspect 看现状；"
+                       "或手动重装 unit（参考 proxyctl explain suggestion:autostart.unit_missing）"),
+                 doc="suggestion:autostart.unit_missing",
+                 code=_io.CONFIG_ERR, cmd="autostart")
+
+    if not diff["needs_update"]:
+        msg = "autostart 已与 PATH binary + config_dir 一致，无须 sync"
+        if as_json:
+            _io.emit_json(_io.envelope("autostart",
+                                        data={"changed": False, "changes": []}))
+            return
+        print(msg)
+        return
+
+    plat = static["platform"]
+    unit_path = static["unit_path"]
+
+    def _do_sync():
+        if plat == "darwin":
+            # 1. bootout
+            run(["launchctl", "bootout", backend.label], sudo=True)
+            # 2. 覆盖 plist
+            tmp = unit_path + ".proxyctl.tmp"
+            with open(tmp, "wb") as f:
+                f.write(diff["new_content_bytes"])
+            # 用 sudo mv 覆盖（plist 在 /Library/...，需要 root）
+            run(["/bin/mv", tmp, unit_path], sudo=True)
+            # 3. bootstrap
+            r = run(["launchctl", "bootstrap", "system", unit_path],
+                    sudo=True, capture=True)
+            if r.returncode != 0:
+                _io.fail(f"launchctl bootstrap 失败",
+                         hints=[r.stderr.strip()] if r.stderr else None,
+                         doc="suggestion:autostart.flapping",
+                         code=_io.PERMISSION, cmd="autostart")
+        elif plat == "linux":
+            run(["systemctl", "--user", "stop", backend.unit])
+            with open(unit_path, "w", encoding="utf-8") as f:
+                f.write(diff["new_content_text"])
+            run(["systemctl", "--user", "daemon-reload"])
+            run(["systemctl", "--user", "start", backend.unit])
+        else:
+            _io.fail(f"autostart sync 暂不支持 {plat}",
+                     code=_io.NOT_FOUND, cmd="autostart")
+
+    _exec_with_lock("system", "autostart sync", _do_sync)
+
+    if as_json:
+        _io.emit_json(_io.envelope(
+            "autostart",
+            data={"changed": True, "changes": diff["changes"],
+                  "unit_path": unit_path},
+            hints=["proxyctl status  # 验证服务起来了",
+                   "proxyctl doctor  # 检查 version_mismatch 已消除"]))
+        return
+    print(f"{GREEN}✓{NC} autostart synced")
+    for c in diff["changes"]:
+        print(f"  {DIM}- {c}{NC}")
+
+
 def _plan_recover(backend, config) -> list[dict]:
     """recover 的 plan：3 个 Clash API 请求，不重启进程。
 
@@ -2669,6 +2895,10 @@ DISPATCH: dict = {
     "commands":        _h_commands,
     "config":          _h_config,
     "doctor":          _h_doctor,
+    "autostart":       lambda ctx: cmd_autostart(
+        ctx["backend"],
+        ctx["args"][0] if ctx["args"] else "inspect",
+        ctx["config"]),
     "completion":      _h_completion,
     "help":            _h_help,
     "version":         _h_version,

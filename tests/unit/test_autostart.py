@@ -278,3 +278,104 @@ def test_to_suggestions_empty_inspect():
     """inspect 为 dict 但什么都没探测到不应 crash。"""
     out = autostart.to_suggestions({"unit_exists": False, "platform": "darwin"})
     assert _ids(out) == ["autostart.unit_missing"]
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# compute_sync — 写命令的 diff 计算（纯函数）
+# ────────────────────────────────────────────────────────────────────────────
+
+def test_compute_sync_no_change_returns_no_op(tmp_path):
+    plist = _write_plist(tmp_path / "p.plist",
+                          binary="/opt/homebrew/bin/mihomo",
+                          config_dir="/Users/alice/.config/mihomo")
+    backend = _FakeBackend(str(plist))
+    static = autostart.inspect_static(backend, platform="darwin")
+    diff = autostart.compute_sync(static,
+                                   target_binary="/opt/homebrew/bin/mihomo",
+                                   target_config_dir="/Users/alice/.config/mihomo")
+    assert diff["needs_update"] is False
+    assert diff["changes"] == []
+
+
+def test_compute_sync_binary_change_produces_new_plist(tmp_path):
+    plist = _write_plist(tmp_path / "p.plist",
+                          binary="/opt/homebrew/bin/mihomo",
+                          config_dir="/Users/alice/.config/mihomo")
+    backend = _FakeBackend(str(plist))
+    static = autostart.inspect_static(backend, platform="darwin")
+    diff = autostart.compute_sync(static,
+                                   target_binary="/Users/alice/.local/bin/mihomo",
+                                   target_config_dir="/Users/alice/.config/mihomo")
+    assert diff["needs_update"] is True
+    assert any("binary:" in c for c in diff["changes"])
+    # 解析新 plist 应见到新 binary 且保留其他字段（KeepAlive 等）
+    new_data = plistlib.loads(diff["new_content_bytes"])
+    assert new_data["ProgramArguments"][0] == "/Users/alice/.local/bin/mihomo"
+    assert new_data["KeepAlive"] is True   # 保留
+
+
+def test_compute_sync_config_dir_change(tmp_path):
+    plist = _write_plist(tmp_path / "p.plist",
+                          binary="/opt/homebrew/bin/mihomo",
+                          config_dir="/Users/alice/.config/mihomo")
+    backend = _FakeBackend(str(plist))
+    static = autostart.inspect_static(backend, platform="darwin")
+    diff = autostart.compute_sync(static,
+                                   target_binary="/opt/homebrew/bin/mihomo",
+                                   target_config_dir="/Users/alice/new-cfg/mihomo")
+    new_data = plistlib.loads(diff["new_content_bytes"])
+    # ProgramArguments 中 -d 后面的目录应被更新
+    args = new_data["ProgramArguments"]
+    d_idx = args.index("-d")
+    assert args[d_idx + 1] == "/Users/alice/new-cfg/mihomo"
+
+
+def test_compute_sync_unit_missing_errors(tmp_path):
+    backend = _FakeBackend(str(tmp_path / "nope.plist"))
+    static = autostart.inspect_static(backend, platform="darwin")
+    diff = autostart.compute_sync(static,
+                                   target_binary="/bin/mihomo",
+                                   target_config_dir="/cfg")
+    assert diff["needs_update"] is False
+    assert any("unit 文件不存在" in e for e in diff["errors"])
+
+
+def test_compute_sync_linux_unit(tmp_path, monkeypatch):
+    fake_home = tmp_path / "home"
+    sysd = fake_home / ".config" / "systemd" / "user"
+    sysd.mkdir(parents=True)
+    unit = _write_systemd_unit(sysd / "mihomo.service",
+                                binary="%h/.local/bin/mihomo",
+                                config_dir="%h/.config/mihomo")
+    monkeypatch.setenv("HOME", str(fake_home))
+    backend = _FakeBackend(plist_path="/unused", unit_name="mihomo.service")
+    static = autostart.inspect_static(backend, platform="linux")
+    diff = autostart.compute_sync(
+        static,
+        target_binary=str(fake_home / ".local/bin/mihomo-v2"),
+        target_config_dir=str(fake_home / ".config" / "mihomo"))
+    assert diff["needs_update"] is True
+    assert diff["new_content_text"]
+    # 新内容应该含目标 binary 且仍是 systemd unit 格式
+    assert "mihomo-v2" in diff["new_content_text"]
+    assert "[Unit]" in diff["new_content_text"]
+    assert "[Service]" in diff["new_content_text"]
+
+
+def test_compute_sync_linux_unit_without_execstart_rejects(tmp_path, monkeypatch):
+    fake_home = tmp_path / "home"
+    sysd = fake_home / ".config" / "systemd" / "user"
+    sysd.mkdir(parents=True)
+    bad = sysd / "mihomo.service"
+    bad.write_text(  # 故意没 ExecStart
+        "[Unit]\nDescription=mihomo\n\n[Service]\nType=simple\n",
+        encoding="utf-8")
+    monkeypatch.setenv("HOME", str(fake_home))
+    backend = _FakeBackend(plist_path="/unused", unit_name="mihomo.service")
+    static = autostart.inspect_static(backend, platform="linux")
+    diff = autostart.compute_sync(
+        static, target_binary="/bin/mihomo",
+        target_config_dir="/cfg")
+    # 应拒绝（unit 被改得面目全非），不冒险覆盖
+    assert diff["needs_update"] is False
+    assert any("ExecStart=" in e for e in diff["errors"])

@@ -964,7 +964,23 @@ COMMANDS_META: list[dict] = [
     {"name": "doctor", "group": "diagnostic", "summary": "极简 5 项健康打分（最快）",
      "args": [], "supports_json": True, "side_effects": [],
      "needs_sudo": False, "interactive": False, "exit_codes": [0, 5],
-     "examples": ["proxyctl doctor", "proxyctl doctor --json"]},
+     "examples": ["proxyctl doctor", "proxyctl doctor --json",
+                  "proxyctl doctor --suggest-only",
+                  "proxyctl doctor --since 0.4.7"]},
+    {"name": "autostart", "group": "maintenance",
+     "summary": "自动启动 unit 管理（inspect / sync）",
+     "args": [{"name": "subcmd", "choices": ["inspect", "sync"],
+               "required": False}],
+     "supports_json": True,
+     "side_effects": [],
+     "conditional_side_effects": {"sync": ["process", "system", "config-write"]},
+     "supports_dry_run": True,
+     "needs_sudo": True, "interactive": False,
+     "exit_codes": [0, 2, 6, 8, 10],
+     "examples": ["proxyctl autostart",
+                  "proxyctl autostart inspect --json",
+                  "proxyctl autostart sync --dry-run",
+                  "proxyctl autostart sync"]},
     {"name": "check", "group": "diagnostic", "summary": "全面健康检查（4 阶段）",
      "args": [], "supports_json": True, "side_effects": ["network-io"],
      "needs_sudo": False, "interactive": False, "exit_codes": [0, 1, 5, 7],
@@ -1860,21 +1876,27 @@ _SUGGESTION_DOCS: dict[str, dict] = {
             "实际服务跑另一个。哥之前调试 TUIC 时栽过的坑。"
         ),
         "edit": (
+            "  # 一键修复（v0.5.0+）：\n"
+            "  proxyctl autostart sync --dry-run   # 预览\n"
+            "  proxyctl autostart sync             # 写 plist + bootstrap\n"
+            "  # 手动方式：\n"
             "  # 1. 选定权威路径（一般 PATH 里那个最新）\n"
             "  # 2. 改 plist/unit 的 binary 路径到权威路径\n"
             "  # 3. launchctl bootout + bootstrap 让 plist 生效"
         ),
         "verify": "diff <($(which mihomo) -v) <(/path/in/plist -v)",
-        "next_commands": ["doctor"],
+        "next_commands": ["autostart", "doctor"],
     },
     "autostart.version_mismatch": {
         "summary": (
             "autostart binary 与 PATH binary 报告不同版本号。可能是双安装"
             "（brew + 手动装）或 plist 指向被遗忘的老路径。"
         ),
-        "edit": "  # 同 autostart.binary_mismatch，统一到一个 binary",
+        "edit": (
+            "  proxyctl autostart sync   # v0.5.0+ 一键同步到 PATH 版本"),
         "verify": "proxyctl doctor --json | jq '.data.suggestions[] | select(.id==\"autostart.version_mismatch\") .evidence'",
-        "next_commands": ["doctor", "explain suggestion:autostart.binary_mismatch"],
+        "next_commands": ["autostart", "doctor",
+                          "explain suggestion:autostart.binary_mismatch"],
     },
     "autostart.config_dir_mismatch": {
         "summary": (
@@ -1882,12 +1904,11 @@ _SUGGESTION_DOCS: dict[str, dict] = {
             "改了配置但 autostart 跑的是另一份的高风险来源。"
         ),
         "edit": (
-            "  # 1. 决定权威 config 目录（通常是 ~/.config/mihomo）\n"
-            "  # 2. 改 plist/unit 的 -d 参数到权威目录\n"
-            "  # 3. 重新 bootstrap"
+            "  proxyctl autostart sync   # v0.5.0+ 一键修复\n"
+            "  # 手动方式：改 plist/unit 的 -d 参数到权威目录 + bootstrap"
         ),
         "verify": "grep -E '\\-d ' /Library/LaunchDaemons/com.mihomo.tun.plist",
-        "next_commands": ["doctor"],
+        "next_commands": ["autostart", "doctor"],
     },
     "autostart.placeholder_unrendered": {
         "summary": (

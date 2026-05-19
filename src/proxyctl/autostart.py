@@ -256,6 +256,103 @@ def inspect_runtime(static_result: dict[str, Any], backend, *,
     return out
 
 
+def compute_sync(inspect_result: dict[str, Any], *,
+                  target_binary: str,
+                  target_config_dir: str) -> dict[str, Any]:
+    """计算 sync 操作的"差异 + 写入内容"。纯函数，无副作用。
+
+    Returns:
+        {
+          "needs_update": bool,          # 是否需要写
+          "changes": list[str],          # 人类可读的变更描述
+          "new_content_bytes": bytes,    # macOS plist 的新字节内容（plistlib.dumps）
+                                           Linux 用 new_content_text
+          "new_content_text": str,       # Linux unit 的新文本（保留其他段）
+          "platform": str,
+          "unit_path": str,
+          "errors": list[str],
+        }
+    """
+    out: dict[str, Any] = {
+        "needs_update": False,
+        "changes": [],
+        "new_content_bytes": None,
+        "new_content_text": None,
+        "platform": inspect_result.get("platform", ""),
+        "unit_path": inspect_result.get("unit_path", ""),
+        "errors": [],
+    }
+    if not inspect_result.get("unit_exists"):
+        out["errors"].append("unit 文件不存在，无法 sync（先 install）")
+        return out
+
+    current_binary = inspect_result.get("binary")
+    current_cfg = inspect_result.get("config_dir")
+    plat = inspect_result["platform"]
+
+    if current_binary != target_binary:
+        out["changes"].append(f"binary: {current_binary} → {target_binary}")
+    if current_cfg and os.path.normpath(current_cfg) != os.path.normpath(target_config_dir):
+        out["changes"].append(f"config_dir: {current_cfg} → {target_config_dir}")
+    if not out["changes"]:
+        return out  # no-op
+
+    out["needs_update"] = True
+    unit_path = inspect_result["unit_path"]
+
+    if plat == "darwin":
+        try:
+            with open(unit_path, "rb") as f:
+                data = plistlib.load(f)
+        except (OSError, plistlib.InvalidFileException) as e:
+            out["errors"].append(f"plist 解析失败: {e}")
+            out["needs_update"] = False
+            return out
+        # in-place 改 ProgramArguments：保留 binary 之后的所有参数，
+        # 仅替换 binary 和 -d/-c 后面的目录
+        args = list(data.get("ProgramArguments") or [])
+        if args:
+            args[0] = target_binary
+            for i, a in enumerate(args):
+                if a == "-d" and i + 1 < len(args):
+                    args[i + 1] = target_config_dir
+                    break
+                if a == "-c" and i + 1 < len(args):
+                    # sing-box 用 -c 指 config 文件——保留文件名，仅换目录
+                    fname = os.path.basename(args[i + 1])
+                    args[i + 1] = os.path.join(target_config_dir, fname)
+                    break
+            data["ProgramArguments"] = args
+        out["new_content_bytes"] = plistlib.dumps(data)
+    elif plat == "linux":
+        try:
+            with open(unit_path, encoding="utf-8") as f:
+                text = f.read()
+        except OSError as e:
+            out["errors"].append(f"unit 读取失败: {e}")
+            out["needs_update"] = False
+            return out
+        # 保守做法：仅替换 ExecStart= 整行，保留其他段
+        # 我们的模板形如：
+        #   ExecStart=/bin/sh -c 'exec %h/.local/bin/mihomo -d %h/.config/mihomo >> ...'
+        # 用户可能改了 sh 包装或日志重定向；为安全起见，**重新生成完整 ExecStart**
+        # 用模板：exec <binary> -d <config_dir> >> <config_dir>/<name>.log 2>> <name>.err
+        engine_name = os.path.basename(target_binary).replace("-", "_")
+        new_exec = (
+            f"ExecStart=/bin/sh -c 'exec {target_binary} -d {target_config_dir} "
+            f">> {target_config_dir}/{engine_name}.log "
+            f"2>> {target_config_dir}/{engine_name}.err'"
+        )
+        new_text = re.sub(r"^ExecStart=.*$", new_exec, text, flags=re.M)
+        if new_text == text:
+            # 没匹配到 ExecStart=：可能 unit 被改得面目全非，不动
+            out["errors"].append("unit 中未找到 ExecStart= 行，sync 拒绝执行")
+            out["needs_update"] = False
+            return out
+        out["new_content_text"] = new_text
+    return out
+
+
 def to_suggestions(inspect_result: dict[str, Any] | None, *,
                    path_binary: str | None = None,
                    path_version: str | None = None,
