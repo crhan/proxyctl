@@ -128,7 +128,7 @@ proxyctl doctor --json | jq '.data.suggestions[] | select(.id | startswith("auto
 proxyctl explain suggestion:autostart.version_mismatch
 ```
 
-### Coverage (v0.5.0)
+### Coverage (v0.5.0 — 21 rules)
 
 - **Subscription (7)**: expired / expiring_soon / traffic_high|warn|exhausted /
   last_fetch_error / stale / missing
@@ -139,14 +139,46 @@ proxyctl explain suggestion:autostart.version_mismatch
 - **Engine/Data (2)**: engine.outdated (reads
   `~/.cache/proxyctl/known_versions.json` contract file) /
   data.geo_stale (geoip.dat / geosite.dat mtime > 30d)
+- **Proxy groups (1)**: proxy_group.mostly_dead — polls local mihomo
+  `/proxies` API (0 external network, 0.5s timeout). Each affected group
+  emits its **own** suggestion; fingerprint includes `evidence.group_name`
+  so agents can track multiple dead groups independently.
 
-`proxy_group.mostly_dead` is reserved for v0.5.1 (requires polling
-mihomo `/proxies` API).
+### Doctor flags (v0.5.0)
 
-### Reading suggestions disables — for users only
+| Flag                   | Use case                                            |
+|------------------------|-----------------------------------------------------|
+| `--json`               | Machine-readable envelope (always recommend)        |
+| `--no-suggest`         | Disable suggestions entirely (user-facing)          |
+| `--suggest-only`       | Skip 5-bool score probes (curl ~2-5s); ~0.18s total |
+| `--since <version>`    | Hide rules `since > <version>` (CI migration aid)   |
+| `--quiet`              | Skip the human suggestion block (JSON unaffected)   |
 
-Suggestions can be silenced via `proxyctl doctor --no-suggest`. Agents
-should **not** use this flag — instead filter by `severity` or `id`.
+Suggestions can also be silenced per-id via
+`~/.config/proxyctl/suggestions.ignore` (one id/fingerprint per line,
+`#`-prefixed comments). Env override `PROXYCTL_SUGGEST_IGNORE_PATH`.
+
+### Fixing autostart mismatches (v0.5.0+)
+
+When doctor reports `autostart.binary_mismatch` /
+`autostart.version_mismatch` / `autostart.config_dir_mismatch`, the
+**`proxyctl autostart sync`** write-command syncs the plist/unit to the
+current PATH binary + config_dir in one shot:
+
+```bash
+proxyctl autostart inspect              # show current state
+proxyctl autostart sync --dry-run       # preview PlanStep[]
+proxyctl autostart sync --dry-run --json
+proxyctl autostart sync                 # actually apply (needs sudo on macOS)
+```
+
+The command preserves user customizations (KeepAlive, EnvironmentVariables,
+StandardOutPath, etc.). On Linux, if the unit's `ExecStart=` line is
+missing entirely, sync **refuses** to overwrite (avoid clobbering a
+heavily-customized service).
+
+`side_effects = ["process", "system", "config-write"]` when subcmd=sync;
+`[]` for inspect.
 
 ---
 

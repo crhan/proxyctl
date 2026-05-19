@@ -1652,6 +1652,11 @@ def cmd_version_print() -> None:
                 "doctor_suggestions":              True,   # 0.5.0: doctor data.suggestions[] 引导建议
                 "doctor_suggestions_v1":           True,   # 0.5.0: suggestion schema v1（未来 bump 用新 key）
                 "autostart_inspect":               True,   # 0.5.0: plist/unit binary/version/config_dir 比对
+                "autostart_sync_cmd":              True,   # 0.5.0: proxyctl autostart sync 写命令
+                "doctor_suggest_only_mode":        True,   # 0.5.0: --suggest-only fast path
+                "doctor_since_filter":             True,   # 0.5.0: --since <version> 屏蔽未来规则
+                "suggestions_ignore_file":         True,   # 0.5.0: ~/.config/proxyctl/suggestions.ignore
+                "proxy_group_dead_check":          True,   # 0.5.0: proxy_group.mostly_dead 规则
             },
         }
         _io.emit_json(_io.envelope("version", data=data))

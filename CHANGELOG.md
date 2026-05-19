@@ -86,10 +86,59 @@
 - `controller.weak_secret` advisory — secret 长度 < 16
 - `controller.public_bind` warn — external-controller bind 0.0.0.0 / 局域网 IP
 
-**引擎/数据类（2 + 1 stub）**：
+**引擎/数据/分组类（3）**：
 - `engine.outdated` info/warn — 读 `~/.cache/proxyctl/known_versions.json` 契约文件
 - `data.geo_stale` info — geoip.dat / geosite.dat mtime > 30 天
-- `proxy_group.mostly_dead` —— 推迟到 v0.5.1（需要调 mihomo `/proxies` API，复杂度独立处理）
+- `proxy_group.mostly_dead` warn — 调 mihomo `/proxies` API（本地 HTTP，
+  timeout 0.5s，0 外网）。单组 ≥ 70% 节点 delay==0 即报；多组同时挂分别
+  输出独立 suggestion（fingerprint 含 group_name，agent 可分别跟踪）
+
+### Added — Fingerprint 升级（支持 evidence 关键字段）
+
+`FINGERPRINT_EVIDENCE_KEYS` 表：每条规则可显式声明哪些 evidence 字段
+进 fingerprint hash。proxy_group.mostly_dead 用 group_name —— 多组同时
+挂得到独立指纹，agent 可分别跟踪。抖动字段（百分比、剩余天数）禁止
+列入，否则跨次去重失效。`_compute_fingerprint()` 同时接受 dict（推荐）
+和 id 字符串（向后兼容 v0.5.0-rc 旧调用方式）。
+
+### Added — Doctor UX 三件套
+
+- **`--suggest-only`**：跳过 5 项 score 探测（curl connectivity 累计 2-5s）,
+  仅跑 suggestion 引擎。实测 0.18s。data 中 5 项布尔 + score/healthy
+  全置 null，agent 据 `data.doctor_mode` 字段识别。DOCTOR_V2 schema
+  对应放宽（boolean → ["boolean","null"]），不破坏 required 列表。
+- **`--since <version>`**：屏蔽 `since > <version>` 的规则。例：
+  `proxyctl doctor --since 0.4.7` 让老 CI 平滑迁移到 0.5.0 时不爆红。
+  inclusive 语义：since=0.5.0 保留 since=0.5.0 规则。
+- **`~/.config/proxyctl/suggestions.ignore`**：用户级屏蔽文件。
+  一行一个 id 或 fingerprint，# 开头注释。env var
+  `PROXYCTL_SUGGEST_IGNORE_PATH` 覆盖（测试用）。agent 可显式
+  `ignore_set=` 参数传规则绕过/叠加。
+
+### Added — `proxyctl autostart` 写命令
+
+新子命令组：
+- `proxyctl autostart` / `inspect` —— 只读，展示 plist/unit 现状
+- `proxyctl autostart sync` —— **写命令**：plist/unit 中 binary +
+  config_dir 同步到 PATH 当前值。当 doctor 报 autostart.binary_mismatch /
+  version_mismatch / config_dir_mismatch 时，agent 或用户一键修复，
+  不必手动编辑 plist + bootout + bootstrap。
+
+macOS：plistlib.load → in-place 改 ProgramArguments → plistlib.dumps
+（保留 KeepAlive / RunAtLoad / EnvironmentVariables 等用户已有定制）。
+Linux：正则替换 ExecStart= 整行；ExecStart 缺失时**拒绝**执行
+（unit 被改得面目全非时不冒险覆盖）。
+
+完整 plan/exec 合约：
+- macOS：launchctl bootout → fs_write_atomic plist → launchctl bootstrap
+- Linux：systemctl stop → fs_write_atomic unit → daemon-reload →
+  systemctl start
+
+`--dry-run` 输出 PlanStep[] 含 sudo 标记。`side_effects` 标
+`process / system / config-write`，`exit_codes` 含 8 (LOCKED) /
+10 (DEPENDENCY_MISSING，PATH 中找不到 binary 时)。
+
+相应 explain topic 的 `edit` 段加入 "proxyctl autostart sync" 一键修复指引。
 
 ### Added — 8 个 doctor 集成点
 
@@ -116,13 +165,18 @@
 ```json
 "supported_features": {
   ...
-  "doctor_suggestions": true,        // 0.5.0
-  "doctor_suggestions_v1": true,     // schema v1（未来 bump 用新 key）
-  "autostart_inspect": true          // 0.5.0
+  "doctor_suggestions":         true,   // 0.5.0
+  "doctor_suggestions_v1":      true,   // schema v1（未来 bump 用新 key）
+  "autostart_inspect":          true,   // 0.5.0
+  "autostart_sync_cmd":         true,   // 0.5.0
+  "doctor_suggest_only_mode":   true,   // 0.5.0 --suggest-only
+  "doctor_since_filter":        true,   // 0.5.0 --since <ver>
+  "suggestions_ignore_file":    true,   // 0.5.0 用户屏蔽文件
+  "proxy_group_dead_check":     true    // 0.5.0 proxy_group.mostly_dead
 }
 ```
 
-agent 据此决定要不要解析 `data.suggestions[]`。
+agent 据此决定要不要解析 `data.suggestions[]` / 用新 flag。
 
 ### Refactor — 单一事实源（消除 status/doctor 文案漂移）
 
@@ -139,10 +193,14 @@ agent 据此决定要不要解析 `data.suggestions[]`。
 
 ### 验证
 
-- `pytest`：655 passed（39 新测试覆盖 21 规则 + 框架 + 集成）
-- 实地跑 `proxyctl doctor` 在哥本机立刻发现两个真问题：
+- `pytest`：**683 passed**（含 39+ 新 doctor/suggest/autostart 测试）
+- 实地跑 `proxyctl doctor` 在哥本机一次性发现：
   Clash API secret 长度 14 < 16（advisory）+
-  geoip.dat / geosite.dat 57 天没更新（info）
+  geoip.dat / geosite.dat 57 天没更新（info）+
+  proxy_group.mostly_dead 某组节点全挂（warn）
+- 实地跑 `proxyctl doctor --suggest-only` 0.18s 出 suggestions（vs full 模式
+  含 curl 2-5s）
+- 实地跑 `proxyctl autostart sync --dry-run` 哥本机 in-sync → no-op 路径触发
 
 ### 设计文档参考
 
