@@ -40,10 +40,17 @@ proxy engine (mihomo / sing-box):
 - fix / recover (heal)
 - dns-lock / dns-unlock / daemon (auxiliary processes)
 
-**It does not edit user rules, nodes, or subscriptions.** Those live in the
-engine's own config file (`~/.config/mihomo/config.yaml` etc.). proxyctl
-points agents to where to edit (`proxyctl explain rules`); it does not
-proxy the edit itself.
+**It does not edit user rules, nodes, or fetch subscriptions.** Those live
+in the engine's own config file (`~/.config/mihomo/config.yaml` etc.) or
+user scripts. proxyctl points agents to where to edit (`proxyctl explain
+rules`); it does not proxy the edit itself.
+
+**Since v0.4.4, proxyctl reads (but never writes) a subscription status
+contract file** at `~/.config/proxyctl/subscription.json` and surfaces it
+through `proxyctl status --json | jq .data.subscription` and the
+`SUBSCRIPTION` section of `proxyctl status`. The user's subscription
+refresh script writes this file; proxyctl performs zero network calls. See
+`proxyctl explain subscription` for the schema.
 
 ---
 

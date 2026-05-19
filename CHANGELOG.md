@@ -5,6 +5,66 @@
 
 ## [Unreleased]
 
+## [0.4.5] — 2026-05-19
+
+> v0.4.4 收尾补丁：补齐 agent 自描述链路对订阅显示能力的发现性。
+> 0.4.4 把能力做了、`supported_features.status_subscription` 探针埋了，
+> 但 `agent-guide` / `explain subscription` / `commands --json` 里仍是
+> 旧措辞「proxyctl 不管订阅」，造成 agent 拿到 capability flag 也无从
+> 路由到使用文档。本版统一双重立场：**不更新订阅 + 显示订阅状态**。
+> 零行为变更、零 schema 变更。
+
+### Changed — `explain subscription` topic 重写
+
+旧版只讲「proxyctl 不更新订阅」立场。新版分两段：
+- (1) **不更新订阅** —— 由用户脚本或引擎自身 proxy-providers 负责（旧立场不变）
+- (2) **显示订阅状态** —— 通过 `~/.config/proxyctl/subscription.json` 契约文件
+  读取（v0.4.4+），关键字段 + 写入方约定全列出，最后给 agent 消费命令
+  （`proxyctl status --json | jq .data.subscription`）
+
+### Added — `agent-guide` 新增 `Subscription Status` 段
+
+`proxyctl agent-guide --list-sections` 现在返回 **16 个段**（v0.4.4 是 15）：
+新增 `subscription-status`，覆盖：
+- agent 怎么消费 `data.subscription` 与 `envelope.hints[]`
+- 风险阈值表（warn ≤ 7d expire / ≥ 80% traffic；critical = 已过期 / 100% / fetch fail）
+- 谁来写契约文件（用户脚本，参考 `update-subscription.sh`）
+- capability 探测（`supported_features.status_subscription`）
+
+### Changed — `agent-guide` 措辞统一
+
+- 顶部一句话：原「不改订阅」→「不更新订阅」；并补充 v0.4.4 起 proxyctl
+  显示订阅状态，引导到新段
+- `Exclusions` 段订阅条目：精确化为「不更新订阅」+ 反向指向 `Subscription Status` 段
+- `_t_nodes` topic 顺手统一：从「不管订阅更新」→「不发起订阅拉取；但显示订阅状态」
+
+### Changed — `commands --json` status 命令元数据
+
+```diff
+- summary: "系统状态面板"
++ summary: "系统状态面板（含订阅状态：到期/流量/拉取健康度，v0.4.4+）"
+  examples: [
+    "proxyctl status",
+    "proxyctl status --json",
++   "proxyctl status --json | jq .data.subscription"
+  ]
+```
+
+agent 用 `commands --json` 探测能力时直接看到例子，不必再去 explain。
+
+### Changed — `AGENTS.md` 仓库协议文档
+
+原「does not edit user rules, nodes, or subscriptions」→「does not edit
+user rules, nodes, or **fetch** subscriptions」+ 新增一段明确说 v0.4.4+
+读契约文件显示订阅状态。
+
+### Test stats
+
+- 总测试数 546 → **547**（+1：`test_agent_guide_sections.py` 的 parametrize
+  测试自动覆盖新增的 `subscription-status` section，断言 `--section
+  subscription-status` 输出非空 markdown 且 `envelope.ok=True`）。
+- 现有 23 个 `subscription.py` 测试全部继续通过。
+
 ## [0.4.4] — 2026-05-18
 
 > `status` 显示订阅状态（到期日 / 剩余流量 / 拉取状态）。proxyctl 自己不

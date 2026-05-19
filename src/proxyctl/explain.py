@@ -74,15 +74,16 @@ def _t_rules(backend, config) -> TopicCard:
 def _t_nodes(backend, config) -> TopicCard:
     return {
         "topic": "nodes",
-        "summary": "代理节点（线路）— 出口节点和分组定义；订阅由 mihomo/sing-box 自身管理。",
+        "summary": "代理节点（线路）— 出口节点和分组定义；订阅由 mihomo/sing-box 或用户脚本管理（详见 explain subscription）。",
         "file": f"{backend.config_file}  [proxies: / proxy-providers: / proxy-groups: 段]",
         "edit": (
             "  # 添加单个节点：在 proxies: 段加 entry，再加到 proxy-groups: 的某个组\n"
-            "  # 订阅源：用 mihomo 自身的 proxy-providers: + url + path + interval\n"
-            "  # proxyctl 不管订阅更新；用 mihomo 的 'proxy-providers' 热更新机制"
+            "  # 订阅源：用 mihomo 自身的 proxy-providers: + url + path + interval；\n"
+            "  #        或用户脚本拉订阅写 config + 写 ~/.config/proxyctl/subscription.json（v0.4.4+）\n"
+            "  # proxyctl 不发起订阅拉取；但显示订阅状态（见 explain subscription）"
         ),
         "verify": "proxyctl bench <group>   # 测节点延迟",
-        "next_commands": ["bench", "explain engine"],
+        "next_commands": ["bench", "explain subscription", "explain engine"],
     }
 
 
@@ -281,26 +282,51 @@ def _t_subscription(backend, config) -> TopicCard:
     return {
         "topic": "subscription",
         "summary": (
-            "节点订阅更新边界：proxyctl 不更新订阅。"
-            "订阅由 mihomo / sing-box 自身的 proxy-providers 管，"
-            "或用户用 Clash API 主动 PUT 触发。"
+            "订阅边界（双重立场）："
+            "(1) proxyctl 不更新订阅 — 拉新节点由用户脚本或引擎自身的 proxy-providers 负责。"
+            "(2) v0.4.4 起 proxyctl 显示订阅状态（到期日 / 已用流量 / 拉取健康度）— "
+            "通过读取 ~/.config/proxyctl/subscription.json 契约文件，"
+            "由用户脚本每次拉订阅后写入。proxyctl 自身不发起任何网络请求。"
         ),
-        "file": f"{backend.config_file}  [proxy-providers: 段]",
+        "file": (
+            f"{backend.config_file}  [节点 / 订阅源仍由用户管]\n"
+            f"~/.config/proxyctl/subscription.json  [订阅状态契约文件，proxyctl 读、用户脚本写]"
+        ),
         "edit": (
-            "  # mihomo / sing-box 内置：\n"
+            "  # === 拉订阅 / 加节点（proxyctl 不做）===\n"
+            "  # 选项 A: 写用户脚本 cron 拉订阅，参考仓库 update-subscription.sh\n"
+            "  # 选项 B: 用 mihomo / sing-box 内置 proxy-providers:\n"
             "  #   proxy-providers:\n"
             "  #     myprovider:\n"
             "  #       type: http\n"
             "  #       url: https://...\n"
-            "  #       interval: 86400          # 自动每 24h 更新\n"
+            "  #       interval: 86400\n"
+            "  # 选项 C: 手动 Clash API PUT 触发刷新:\n"
+            "  #   curl -X PUT -H 'Authorization: Bearer <api_secret>' \\\n"
+            "  #        http://127.0.0.1:9090/providers/proxies/myprovider\n"
             "  #\n"
-            "  # 手动触发：\n"
-            "  #   curl -X PUT \\\n"
-            "  #        -H 'Authorization: Bearer <api_secret>' \\\n"
-            "  #        http://127.0.0.1:9090/providers/proxies/myprovider"
+            "  # === 让 proxyctl 显示订阅状态（v0.4.4+）===\n"
+            "  # 用户脚本拉完订阅后写入契约文件：\n"
+            "  #   ~/.config/proxyctl/subscription.json (schema v1)\n"
+            "  # 关键字段 (全部可选，缺失 → None):\n"
+            "  #   fetch_ok / fetch_http_status / fetch_error\n"
+            "  #   expire_at / expire_days_left\n"
+            "  #   traffic_used_bytes / traffic_total_bytes / traffic_used_pct\n"
+            "  #   info_nodes / node_count\n"
+            "  # 详细 schema 见 proxyctl.subscription 模块 docstring。\n"
+            "  # 失败时也要写（fetch_ok=false + fetch_error），让 proxyctl 能区分\n"
+            "  # 「过期」vs「网络挂」vs「订阅服务方挂」。"
         ),
-        "verify": "proxyctl bench  # 看新节点是否参与测速",
-        "next_commands": ["bench", "explain nodes", "log --tail 50 --no-follow"],
+        "verify": (
+            "proxyctl status                        # 末尾 SUBSCRIPTION 段显示\n"
+            "proxyctl status --json | jq .data.subscription   # agent 消费"
+        ),
+        "next_commands": [
+            "status",
+            "status --json | jq .data.subscription",
+            "bench",
+            "explain nodes",
+        ],
     }
 
 
@@ -644,9 +670,11 @@ def _build_agent_guide(backend, config) -> str:
     lock_dir = os.path.join(os.path.expanduser("~"), ".config", "proxyctl")
     return f"""# proxyctl — Agent 接入指南（runtime / v0.3）
 
-> 一句话：proxyctl 是 macOS（含 Linux 部分支持）的代理 *生命周期管理* CLI。
+> 一句话：proxyctl 是 macOS + Linux 的代理 *生命周期管理* CLI。
 > 它管「启停 / 状态 / 健康检查 / DNS 防护 / 配置切换」，**不装 mihomo、
-> 不改规则、不改订阅** —— 这些去引擎自己的配置文件里改。
+> 不改规则、不更新订阅** —— 这些去引擎自己的配置文件里改。
+> v0.4.4 起，proxyctl **显示**订阅状态（到期日 / 已用流量 / 拉取健康度），
+> 通过用户脚本写入的契约文件读取 —— 详见下方 `Subscription Status` 段。
 >
 > 本文档由 `proxyctl agent-guide` 在运行时输出，含当前 backend/路径/端口。
 > 仓库视角（开发/贡献协议）见仓库根 `AGENTS.md`。
@@ -680,11 +708,52 @@ Step 6  proxyctl explain <topic>          # 深入概念（topic 见下）
 ## Exclusions — 不能做什么（去别处改）
 
 - 添加 / 修改 / 删除分流规则 → 编辑 `{mcfg}` 的 `rules:` 段
-- 添加节点 / 改订阅 → 编辑 `{mcfg}` 的 `proxies:` / `proxy-providers:` 段
-- 触发订阅刷新 → mihomo `proxy-providers.interval` 自动 / Clash API 手动；
-  proxyctl **不管订阅更新**（见 `proxyctl explain subscription`）
+- 添加节点 / 改订阅源 → 编辑 `{mcfg}` 的 `proxies:` / `proxy-providers:` 段
+- **更新订阅 / 拉新节点** → mihomo `proxy-providers.interval` 自动 / Clash API 手动 /
+  用户自己写脚本（参考仓库 `update-subscription.sh`）；proxyctl 自己不发起网络拉取。
+  **但 proxyctl 会显示订阅状态**（v0.4.4+），见 `Subscription Status` 段。
 - 安装 mihomo / sing-box → `brew install mihomo` 等
 - 重启第三方应用 → 浏览器 / Slack / VSCode 需用户自己重启读 system proxy
+
+## Subscription Status — 订阅状态展示（v0.4.4+）
+
+proxyctl **不更新订阅**，但 **会显示订阅状态**——通过读取契约文件
+`~/.config/proxyctl/subscription.json`（schema v1）。
+
+### Agent 怎么用
+
+```bash
+proxyctl status --json | jq .data.subscription
+# 关键字段（全部可选）：
+#   fetch_ok / fetch_http_status / fetch_error      （拉取健康度）
+#   expire_at / expire_days_left                     （套餐到期）
+#   traffic_used_bytes / traffic_total_bytes / traffic_used_pct   （流量）
+#   info_nodes / node_count / url_host
+
+proxyctl status --json | jq .hints
+# 风险摘要也会进 envelope.hints[]：
+#   过期 ≤ 7 天     → "subscription expires in Nd ..."
+#   过期已发生      → "subscription EXPIRED Nd ago ..."  (critical)
+#   流量 ≥ 80%      → "subscription traffic at X% ..."
+#   流量 ≥ 100%     → "subscription traffic exhausted ..." (critical)
+#   fetch_ok=false  → "subscription fetch failed: <error>" (critical)
+```
+
+### 谁来写契约文件
+
+**用户脚本**（不是 proxyctl）。proxyctl 自己不发起任何网络请求 / 不解析订阅 URL。
+本仓库 `update-subscription.sh` 是参考实现：拉两个订阅 → 解析 Subscription-Userinfo
+HTTP header → 写出 subscription.json。**任何符合 schema v1 的脚本都行**。
+
+成功或失败都要写：fetch_ok=false 时也填出 fetch_error / fetch_http_status，
+proxyctl 才能区分「过期 / 网络挂 / 订阅服务方挂」。
+
+### 探测 capability
+
+`proxyctl --version --json` → `data.supported_features.status_subscription = true`
+（0.4.4+）。`false` 或缺失字段表示老版本，agent 应忽略 `data.subscription`。
+
+详见 `proxyctl explain subscription`。
 
 ## Concept Map — "想改 X 去哪"
 
@@ -883,10 +952,13 @@ COMMANDS_META: list[dict] = [
      "examples": ["proxyctl restart-clean",
                   "proxyctl restart-clean --dry-run"]},
     # diagnostic
-    {"name": "status", "group": "diagnostic", "summary": "系统状态面板",
+    {"name": "status", "group": "diagnostic",
+     "summary": "系统状态面板（含订阅状态：到期/流量/拉取健康度，v0.4.4+）",
      "args": [], "supports_json": True, "side_effects": [],
      "needs_sudo": False, "interactive": False, "exit_codes": [0, 5],
-     "examples": ["proxyctl status", "proxyctl status --json"]},
+     "examples": ["proxyctl status",
+                  "proxyctl status --json",
+                  "proxyctl status --json | jq .data.subscription"]},
     {"name": "doctor", "group": "diagnostic", "summary": "极简 5 项健康打分（最快）",
      "args": [], "supports_json": True, "side_effects": [],
      "needs_sudo": False, "interactive": False, "exit_codes": [0, 5],
