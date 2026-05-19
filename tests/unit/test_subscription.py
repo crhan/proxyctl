@@ -188,3 +188,111 @@ def test_updated_at_human_hours():
 def test_updated_at_human_bad_input():
     assert subscription.updated_at_human({"updated_at": "not-a-date"}) is None
     assert subscription.updated_at_human({}) is None
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# to_suggestions() — v0.5.0+ 结构化 Suggestion 派生
+# ────────────────────────────────────────────────────────────────────────────
+
+def _ids(suggestions) -> list[str]:
+    return [s["id"] for s in suggestions]
+
+
+def test_to_suggestions_none_returns_missing():
+    out = subscription.to_suggestions(None)
+    assert _ids(out) == ["subscription.missing"]
+    s = out[0]
+    assert s["severity"] == "info"
+    assert s["actor"] == "user"
+    assert s["doc"] == "suggestion:subscription.missing"
+
+
+def test_to_suggestions_ok_sub_returns_empty():
+    assert subscription.to_suggestions(_ok_sub()) == []
+
+
+def test_to_suggestions_fetch_failed_short_circuits():
+    sub = _ok_sub(fetch_ok=False, fetch_error="HTTP 404",
+                  expire_days_left=-3, traffic_used_pct=99.0)
+    out = subscription.to_suggestions(sub)
+    assert _ids(out) == ["subscription.last_fetch_error"]
+    s = out[0]
+    assert s["severity"] == "warn"
+    assert s["actor"] == "cron"
+    assert s["evidence"]["fetch_error"] == "HTTP 404"
+
+
+def test_to_suggestions_expired():
+    out = subscription.to_suggestions(_ok_sub(expire_days_left=-3))
+    assert "subscription.expired" in _ids(out)
+    s = [x for x in out if x["id"] == "subscription.expired"][0]
+    assert s["severity"] == "warn"
+    assert s["evidence"]["days_left"] == -3
+
+
+def test_to_suggestions_expiring_soon():
+    out = subscription.to_suggestions(_ok_sub(expire_days_left=5))
+    assert "subscription.expiring_soon" in _ids(out)
+    s = [x for x in out if x["id"] == "subscription.expiring_soon"][0]
+    assert s["severity"] == "advisory"
+    assert s["evidence"]["days_left"] == 5
+
+
+def test_to_suggestions_expire_8d_not_triggered():
+    out = subscription.to_suggestions(_ok_sub(expire_days_left=8))
+    assert not any(i.startswith("subscription.expir") for i in _ids(out))
+
+
+def test_to_suggestions_traffic_high_advisory_at_70pct():
+    out = subscription.to_suggestions(_ok_sub(traffic_used_pct=75.0))
+    s = [x for x in out if x["id"] == "subscription.traffic_high"][0]
+    assert s["severity"] == "advisory"
+
+
+def test_to_suggestions_traffic_warn_at_90pct():
+    out = subscription.to_suggestions(_ok_sub(traffic_used_pct=92.5))
+    s = [x for x in out if x["id"] == "subscription.traffic_warn"][0]
+    assert s["severity"] == "warn"
+
+
+def test_to_suggestions_traffic_exhausted_at_100pct():
+    out = subscription.to_suggestions(_ok_sub(traffic_used_pct=101.0))
+    s = [x for x in out if x["id"] == "subscription.traffic_exhausted"][0]
+    assert s["severity"] == "warn"
+
+
+def test_to_suggestions_stale_when_updated_long_ago():
+    past = (datetime.now(timezone.utc) - timedelta(hours=30)).astimezone()
+    out = subscription.to_suggestions(_ok_sub(updated_at=past.isoformat()))
+    s = [x for x in out if x["id"] == "subscription.stale"][0]
+    assert s["severity"] == "info"
+    assert s["evidence"]["age_hours"] >= 30
+
+
+def test_to_suggestions_multiple_simultaneously():
+    """同时触发：expire 5d + traffic 85% → 两条独立 suggestion。"""
+    out = subscription.to_suggestions(
+        _ok_sub(expire_days_left=5, traffic_used_pct=85.0))
+    ids = _ids(out)
+    assert "subscription.expiring_soon" in ids
+    assert "subscription.traffic_high" in ids
+
+
+def test_to_suggestions_bad_updated_at_no_crash():
+    """updated_at 解析失败时不应 crash，只跳过 stale 规则。"""
+    out = subscription.to_suggestions(_ok_sub(updated_at="not-a-date"))
+    assert "subscription.stale" not in _ids(out)
+
+
+def test_summarize_hints_still_derives_from_to_suggestions():
+    """向后兼容：summarize_hints 输出应与 v0.4.x 文案一致。"""
+    sub = _ok_sub(expire_days_left=-3)
+    hints = subscription.summarize_hints(sub)
+    assert any("EXPIRED 3d ago" in h for h in hints)
+
+
+def test_summarize_hints_skips_info_level_stale():
+    """stale 是 info 级，不进 hints[]（hints 仅含 warn/critical）。"""
+    past = (datetime.now(timezone.utc) - timedelta(hours=30)).astimezone()
+    hints = subscription.summarize_hints(_ok_sub(updated_at=past.isoformat()))
+    assert hints == []

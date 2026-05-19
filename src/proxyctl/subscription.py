@@ -104,25 +104,183 @@ def severity(sub: dict[str, Any]) -> str:
     return "ok"
 
 
-def summarize_hints(sub: dict[str, Any]) -> list[str]:
-    """给 envelope.hints 拼短句。无问题返回 []。"""
-    out: list[str] = []
+def to_suggestions(sub: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """从订阅状态推导结构化 Suggestion 列表（v0.5.0+ 单一事实源）。
+
+    summarize_hints() 和 doctor.suggest 都基于此函数，避免文案漂移。
+    sub 为 None 时返回 [subscription.missing] 提示（仅当调用方明确传 None）；
+    无 sub 时由调用方决定是否调用本函数。
+
+    Suggestion 字段集见 src/proxyctl/suggest.py 的 Schema v1 文档。
+    本函数只填充 id/severity/actor/title/evidence/inspect_command/doc/since，
+    不填 fingerprint/first_seen（由 suggest.py 统一计算）。
+    """
+    out: list[dict[str, Any]] = []
+    if sub is None:
+        out.append({
+            "id": "subscription.missing",
+            "severity": "info",
+            "actor": "user",
+            "title": "未配置订阅快照，状态未知",
+            "evidence": {},
+            "inspect_command": "proxyctl explain doc subscription",
+            "doc": "suggestion:subscription.missing",
+            "since": "0.5.0",
+        })
+        return out
+
+    host = sub.get("url_host") or "?"
+
+    # fetch 失败：短路输出，过期/流量数据不可信
     if not sub.get("fetch_ok", True):
         err = sub.get("fetch_error") or "unknown error"
-        out.append(f"subscription fetch failed: {err}")
+        out.append({
+            "id": "subscription.last_fetch_error",
+            "severity": "warn",
+            "actor": "cron",
+            "title": f"最近一次订阅拉取失败：{err}",
+            "evidence": {
+                "fetch_error": err,
+                "fetch_http_status": sub.get("fetch_http_status"),
+                "url_host": host,
+            },
+            "inspect_command": "proxyctl explain doc subscription",
+            "doc": "suggestion:subscription.last_fetch_error",
+            "since": "0.5.0",
+        })
         return out
+
+    # 过期判定（expired 优先于 expiring_soon）
     days = sub.get("expire_days_left")
     if days is not None:
         if days < 0:
-            out.append(f"subscription EXPIRED {abs(days)}d ago — renew at {sub.get('url_host', '?')}")
+            out.append({
+                "id": "subscription.expired",
+                "severity": "warn",
+                "actor": "user",
+                "title": f"订阅已过期 {abs(days)} 天",
+                "evidence": {
+                    "expire_at": sub.get("expire_at"),
+                    "days_left": days,
+                    "url_host": host,
+                },
+                "inspect_command": "proxyctl status --json",
+                "doc": "suggestion:subscription.expired",
+                "since": "0.5.0",
+            })
         elif days <= 7:
-            out.append(f"subscription expires in {days}d — consider renewing")
+            out.append({
+                "id": "subscription.expiring_soon",
+                "severity": "advisory",
+                "actor": "user",
+                "title": f"订阅 {days} 天内到期",
+                "evidence": {
+                    "expire_at": sub.get("expire_at"),
+                    "days_left": days,
+                    "url_host": host,
+                },
+                "inspect_command": "proxyctl status --json",
+                "doc": "suggestion:subscription.expiring_soon",
+                "since": "0.5.0",
+            })
+
+    # 流量判定（traffic_exhausted > traffic_warn > traffic_high）
     pct = sub.get("traffic_used_pct")
     if pct is not None:
         if pct >= 100.0:
+            out.append({
+                "id": "subscription.traffic_exhausted",
+                "severity": "warn",
+                "actor": "user",
+                "title": f"套餐流量已用尽（{pct:.1f}%）",
+                "evidence": {"used_pct": pct, "url_host": host},
+                "inspect_command": "proxyctl status --json",
+                "doc": "suggestion:subscription.traffic_exhausted",
+                "since": "0.5.0",
+            })
+        elif pct >= 90.0:
+            out.append({
+                "id": "subscription.traffic_warn",
+                "severity": "warn",
+                "actor": "user",
+                "title": f"流量已用 {pct:.1f}%",
+                "evidence": {"used_pct": pct, "url_host": host},
+                "inspect_command": "proxyctl status --json",
+                "doc": "suggestion:subscription.traffic_warn",
+                "since": "0.5.0",
+            })
+        elif pct >= 70.0:
+            out.append({
+                "id": "subscription.traffic_high",
+                "severity": "advisory",
+                "actor": "user",
+                "title": f"流量已用 {pct:.1f}%",
+                "evidence": {"used_pct": pct, "url_host": host},
+                "inspect_command": "proxyctl status --json",
+                "doc": "suggestion:subscription.traffic_high",
+                "since": "0.5.0",
+            })
+
+    # stale 判定：快照超过 24h 未更新（机场脚本断了）
+    updated_at = sub.get("updated_at")
+    if updated_at:
+        try:
+            dt = datetime.fromisoformat(updated_at)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            age_sec = (datetime.now(timezone.utc) - dt).total_seconds()
+            if age_sec > 24 * 3600:
+                hours = int(age_sec // 3600)
+                out.append({
+                    "id": "subscription.stale",
+                    "severity": "info",
+                    "actor": "cron",
+                    "title": f"订阅快照 {hours}h 未更新",
+                    "evidence": {
+                        "updated_at": updated_at,
+                        "age_hours": hours,
+                    },
+                    "inspect_command": "proxyctl explain doc subscription",
+                    "doc": "suggestion:subscription.stale",
+                    "since": "0.5.0",
+                })
+        except ValueError:
+            pass
+
+    return out
+
+
+def summarize_hints(sub: dict[str, Any]) -> list[str]:
+    """给 envelope.hints 拼短句（向后兼容包装）。
+
+    v0.5.0+ 实现委托给 to_suggestions() 派生短文案；
+    保留独立函数签名是为了 status.py 现有调用不破坏。
+    """
+    out: list[str] = []
+    for s in to_suggestions(sub):
+        # fetch 失败：保留 "subscription fetch failed: <err>" 历史格式
+        if s["id"] == "subscription.last_fetch_error":
+            err = s["evidence"].get("fetch_error", "unknown error")
+            out.append(f"subscription fetch failed: {err}")
+            continue
+        if s["id"] == "subscription.expired":
+            days = abs(s["evidence"].get("days_left", 0))
+            host = s["evidence"].get("url_host", "?")
+            out.append(f"subscription EXPIRED {days}d ago — renew at {host}")
+            continue
+        if s["id"] == "subscription.expiring_soon":
+            days = s["evidence"].get("days_left", 0)
+            out.append(f"subscription expires in {days}d — consider renewing")
+            continue
+        if s["id"] == "subscription.traffic_exhausted":
+            pct = s["evidence"].get("used_pct", 0.0)
             out.append(f"subscription traffic exhausted ({pct:.1f}%)")
-        elif pct >= 80.0:
+            continue
+        if s["id"] in ("subscription.traffic_warn", "subscription.traffic_high"):
+            pct = s["evidence"].get("used_pct", 0.0)
             out.append(f"subscription traffic at {pct:.1f}%")
+            continue
+        # stale / missing 等 info 级不进 hints（保持 0.4.x 行为：hints 仅含 warn/critical）
     return out
 
 
