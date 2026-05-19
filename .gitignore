@@ -73,3 +73,6 @@ claude-proxy.log
 htmlcov/
 coverage.xml
 junit.xml
+
+# release.yml 抽取 CHANGELOG section 用的临时文件（CI 跑完会删）
+.release-notes*.md
