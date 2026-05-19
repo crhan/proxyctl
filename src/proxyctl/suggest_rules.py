@@ -109,7 +109,18 @@ def _is_public_bind(host: str | None) -> bool:
 
 
 def controller_rules(cfg: dict[str, Any]) -> list[dict[str, Any]]:
-    """3 条 controller 规则。cfg 来自 inspect_engine_config。"""
+    """controller 规则 — v0.5.1 修复复合判定 bug。
+
+    哥 2026-05-19 指出的设计问题："只有本机才能访问为什么还要看密钥复杂度？"
+
+    旧逻辑（v0.5.0）独立判断 empty_secret / weak_secret / public_bind，
+    导致 bind=127.0.0.1 + secret 短也会触发 weak_secret advisory ——
+    但本地 attack surface 不存在，规则属于误报。
+
+    新逻辑（v0.5.1）：以 attack surface 为单一判定轴。
+      bind 127.0.0.1 → 任何 secret（含空）都不报
+      bind public    → 视 secret 强度报 warn / advisory，public_bind 永远 warn
+    """
     if not cfg.get("config_exists"):
         return []
     out: list[dict[str, Any]] = []
@@ -117,42 +128,59 @@ def controller_rules(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     port = cfg.get("controller_port")
     secret = cfg.get("controller_secret")
 
-    # empty_secret —— 空字符串或字段不存在但 controller 已配置
-    if (host or port) and (secret == "" or secret is None):
-        # 仅在 controller 已经配置时报告（避免完全没用 API 的用户被打扰）
+    # controller 未配置时整组规则跳过
+    if not (host or port):
+        return out
+
+    public = _is_public_bind(host)
+
+    # 127.0.0.1 / ::1 → attack surface 不存在，secret 强度不评估
+    if not public:
+        return out
+
+    # ── 以下分支仅当 bind 暴露给非本机时触发 ─────────────────────────
+
+    # public_bind 本身永远报 warn（明确告诉用户"你的 API 暴露给了外面"）
+    out.append({
+        "id": "controller.public_bind",
+        "severity": "warn",
+        "actor": "user",
+        "title": f"Clash API bind 到非环回地址：{host}",
+        "evidence": {"controller_host": host, "controller_port": port},
+        "doc": "suggestion:controller.public_bind",
+        "since": "0.5.0",
+    })
+
+    if secret == "" or secret is None:
+        # 公网 bind + 无认证 = 任何人可控制代理 → warn
         out.append({
             "id": "controller.empty_secret",
             "severity": "warn",
             "actor": "user",
-            "title": "Clash API secret 为空",
+            "title": f"Clash API bind 公网（{host}）但 secret 为空",
             "evidence": {
                 "controller_host": host,
                 "controller_port": port,
                 "secret_set": False,
             },
-            "fix_command": "proxyctl explain subscription",
+            "fix_command": "proxyctl explain suggestion:controller.empty_secret",
             "doc": "suggestion:controller.empty_secret",
             "since": "0.5.0",
         })
-    elif secret and len(secret) < 16:
+    elif len(secret) < 16:
+        # 公网 bind + 弱 secret = 易爆破 → advisory（有 secret 总比无好，
+        # 但应该升级）
         out.append({
             "id": "controller.weak_secret",
             "severity": "advisory",
             "actor": "user",
-            "title": f"Clash API secret 过短（长度 {len(secret)} < 16）",
-            "evidence": {"secret_length": len(secret)},
+            "title": (f"Clash API bind 公网（{host}）且 secret 仅 "
+                      f"{len(secret)} 字符（< 16）"),
+            "evidence": {
+                "controller_host": host,
+                "secret_length": len(secret),
+            },
             "doc": "suggestion:controller.weak_secret",
-            "since": "0.5.0",
-        })
-
-    if _is_public_bind(host):
-        out.append({
-            "id": "controller.public_bind",
-            "severity": "warn",
-            "actor": "user",
-            "title": f"Clash API bind 到非环回地址：{host}",
-            "evidence": {"controller_host": host, "controller_port": port},
-            "doc": "suggestion:controller.public_bind",
             "since": "0.5.0",
         })
     return out

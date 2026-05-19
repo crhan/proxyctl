@@ -74,44 +74,79 @@ def _ctrl_cfg(**overrides) -> dict:
 
 
 def test_controller_rules_no_issues():
+    """bind 127.0.0.1 + 强 secret → 无任何规则触发。"""
     assert suggest_rules.controller_rules(_ctrl_cfg()) == []
 
 
-def test_controller_empty_secret_triggers_warn():
-    out = suggest_rules.controller_rules(_ctrl_cfg(controller_secret=""))
-    s = [x for x in out if x["id"] == "controller.empty_secret"][0]
-    assert s["severity"] == "warn"
-    assert s["evidence"]["secret_set"] is False
+# ── v0.5.1：复合判定（bind 127.0.0.1 时 secret 强度无关，不报）─────────
+
+def test_controller_localhost_weak_secret_NOT_reported():
+    """bind 127.0.0.1 + 短 secret → 不报。哥 2026-05-19 提出的设计问题。"""
+    out = suggest_rules.controller_rules(
+        _ctrl_cfg(controller_host="127.0.0.1", controller_secret="short1"))
+    assert out == [], f"expected []，实际: {_ids(out)}"
 
 
-def test_controller_missing_secret_treated_as_empty():
-    out = suggest_rules.controller_rules(_ctrl_cfg(controller_secret=None))
+def test_controller_localhost_empty_secret_NOT_reported():
+    """bind 127.0.0.1 + 空 secret → 不报。"""
+    out = suggest_rules.controller_rules(
+        _ctrl_cfg(controller_host="127.0.0.1", controller_secret=""))
+    assert out == []
+
+
+def test_controller_loopback_v6_weak_secret_NOT_reported():
+    out = suggest_rules.controller_rules(
+        _ctrl_cfg(controller_host="::1", controller_secret="x"))
+    assert out == []
+
+
+# ── public bind 才进入 secret 评估 ──────────────────────────────────
+
+def test_controller_public_bind_strong_secret_only_warns_about_bind():
+    """0.0.0.0 + 强 secret → 仅 public_bind warn，无 weak/empty。"""
+    out = suggest_rules.controller_rules(
+        _ctrl_cfg(controller_host="0.0.0.0",
+                  controller_secret="a-very-long-strong-secret-1234567890"))
+    assert _ids(out) == ["controller.public_bind"]
+    assert out[0]["severity"] == "warn"
+
+
+def test_controller_public_bind_empty_secret_double_warn():
+    """0.0.0.0 + 空 secret → public_bind warn + empty_secret warn。"""
+    out = suggest_rules.controller_rules(
+        _ctrl_cfg(controller_host="0.0.0.0", controller_secret=""))
+    ids = _ids(out)
+    assert "controller.public_bind" in ids
+    assert "controller.empty_secret" in ids
+    empty = [x for x in out if x["id"] == "controller.empty_secret"][0]
+    assert empty["severity"] == "warn"
+
+
+def test_controller_public_bind_missing_secret_double_warn():
+    """0.0.0.0 + 缺失 secret 字段 → 同空 secret。"""
+    out = suggest_rules.controller_rules(
+        _ctrl_cfg(controller_host="0.0.0.0", controller_secret=None))
     assert "controller.empty_secret" in _ids(out)
 
 
-def test_controller_weak_secret_triggers_advisory():
-    out = suggest_rules.controller_rules(_ctrl_cfg(controller_secret="short1"))
-    s = [x for x in out if x["id"] == "controller.weak_secret"][0]
-    assert s["severity"] == "advisory"
-    assert s["evidence"]["secret_length"] == 6
-
-
-def test_controller_public_bind_triggers_warn():
-    out = suggest_rules.controller_rules(_ctrl_cfg(controller_host="0.0.0.0"))
-    s = [x for x in out if x["id"] == "controller.public_bind"][0]
-    assert s["severity"] == "warn"
-
-
-def test_controller_localhost_no_public_bind():
-    out = suggest_rules.controller_rules(_ctrl_cfg(controller_host="127.0.0.1"))
-    assert "controller.public_bind" not in _ids(out)
-    out = suggest_rules.controller_rules(_ctrl_cfg(controller_host="::1"))
-    assert "controller.public_bind" not in _ids(out)
+def test_controller_public_bind_weak_secret_advisory():
+    """0.0.0.0 + 短 secret → public_bind warn + weak_secret advisory。"""
+    out = suggest_rules.controller_rules(
+        _ctrl_cfg(controller_host="0.0.0.0", controller_secret="short1"))
+    ids = _ids(out)
+    assert "controller.public_bind" in ids
+    assert "controller.weak_secret" in ids
+    weak = [x for x in out if x["id"] == "controller.weak_secret"][0]
+    assert weak["severity"] == "advisory"
+    assert weak["evidence"]["secret_length"] == 6
 
 
 def test_controller_lan_ip_treated_as_public():
-    out = suggest_rules.controller_rules(_ctrl_cfg(controller_host="192.168.1.10"))
+    out = suggest_rules.controller_rules(
+        _ctrl_cfg(controller_host="192.168.1.10",
+                  controller_secret="short"))
     assert "controller.public_bind" in _ids(out)
+    assert "controller.weak_secret" in _ids(out)
 
 
 def test_controller_no_controller_no_rules():

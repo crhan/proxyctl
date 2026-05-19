@@ -1949,24 +1949,33 @@ _SUGGESTION_DOCS: dict[str, dict] = {
     # ── Controller / Engine / Data 5 条 ────────────────────────────────
     "controller.empty_secret": {
         "summary": (
-            "Clash API secret 为空字符串。本地连接没影响，但若 controller bind "
-            "到非环回地址（见 controller.public_bind），任何人都能调你的 API。"
+            "Clash API bind 公网（0.0.0.0 或局域网 IP）且 secret 为空——"
+            "**任何人都能调你的 API**：切换节点、读取节点列表、改路由。"
+            "v0.5.1+ 此规则仅在公网 bind 时触发；127.0.0.1 + 空 secret 不报。"
         ),
         "edit": (
-            "  # 在 mihomo config.yaml 加：\n"
-            "  secret: <一段 >= 16 字符的随机字符串，用 openssl rand -hex 16 生成>"
+            "  # 优先：把 bind 改回环回（推荐，本机用够了）\n"
+            "  #   external-controller: 127.0.0.1:9090\n"
+            "  # 或：配强 secret\n"
+            "  #   secret: <用 openssl rand -hex 24 生成>"
         ),
-        "verify": "grep -E '^secret:' ~/.config/mihomo/config.yaml",
-        "next_commands": ["explain subscription"],
+        "verify": "grep -E '^secret:|^external-controller:' ~/.config/mihomo/config.yaml",
+        "next_commands": ["explain suggestion:controller.public_bind"],
     },
     "controller.weak_secret": {
         "summary": (
-            "Clash API secret 长度 < 16。本地用没事，但若不慎暴露到局域网，"
-            "短 secret 容易爆破。"
+            "Clash API bind 公网（0.0.0.0 或局域网 IP）且 secret < 16 字符 → "
+            "暴露面 + 弱认证 = 易爆破。**v0.5.1+ 此规则仅在公网 bind 时触发**；"
+            "bind 127.0.0.1 时 secret 强度无意义（attack surface 不存在），不报。"
         ),
-        "edit": "  # 用 openssl rand -hex 24 重新生成一段强 secret",
-        "verify": "grep -E '^secret:' ~/.config/mihomo/config.yaml",
-        "next_commands": ["explain suggestion:controller.empty_secret"],
+        "edit": (
+            "  # 优先：bind 改回环回\n"
+            "  #   external-controller: 127.0.0.1:9090\n"
+            "  # 或：升级 secret\n"
+            "  #   secret: <用 openssl rand -hex 24 生成的强 secret>"
+        ),
+        "verify": "grep -E '^secret:|^external-controller:' ~/.config/mihomo/config.yaml",
+        "next_commands": ["explain suggestion:controller.public_bind"],
     },
     "controller.public_bind": {
         "summary": (

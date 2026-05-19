@@ -5,6 +5,41 @@
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-05-19
+
+> 修 v0.5.0 controller_rules 的**设计 bug**（哥 2026-05-19 跑 doctor
+> 时立刻指出的反馈："只有本机才能访问为什么还要看密钥复杂度？
+> 这是设计问题吧"）。
+
+### Fixed — controller 规则改为复合判定（以 attack surface 为单一判定轴）
+
+旧逻辑（v0.5.0）：empty_secret / weak_secret / public_bind 各自独立判断，
+导致 `bind=127.0.0.1` + `secret 长度 < 16` 也会触发 weak_secret advisory。
+但本机回环根本不存在 attack surface，规则纯属噪音。
+
+新逻辑（v0.5.1）：
+
+| bind             | secret            | 行为                                |
+|------------------|-------------------|-------------------------------------|
+| `127.0.0.1`/`::1`| 任意（含空）      | **不报**                            |
+| `0.0.0.0`/LAN IP | 强（≥ 16）        | 仅 `public_bind` warn              |
+| `0.0.0.0`/LAN IP | 弱（< 16 但非空） | `public_bind` warn + `weak_secret` advisory |
+| `0.0.0.0`/LAN IP | 空                | `public_bind` warn + `empty_secret` warn |
+
+文案也更新：empty_secret / weak_secret title 中明确写"bind 公网（X）且
+secret ..."，避免用户继续疑惑"我 bind 127.0.0.1 你提它干嘛"。
+
+### Updated — controller 三个 explain topic
+
+每条 topic 的 summary 段加入 "v0.5.1+ 此规则仅在公网 bind 时触发" 声明；
+`edit` 段把"改回 127.0.0.1 bind"作为**首选修复路径**（而不是首推升级 secret，
+因为对大多数本机用户来说收回 bind 比生成新 secret 简单且更安全）。
+
+### 验证
+
+pytest 全 suite：683+ passed（含新 6 个复合判定测试）。
+实地：哥本机 `doctor` 不再报 weak_secret（bind=127.0.0.1 + secret 14 字符）。
+
 ## [0.5.0] — 2026-05-19
 
 > doctor 长期只是"5 项布尔健康分"，但 proxyctl 周边已经积累了一堆**值得提示**
