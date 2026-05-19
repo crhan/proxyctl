@@ -266,16 +266,17 @@ def get_engine_version(backend_name: str) -> dict | None:
         dict 或 None（binary 找不到 / -v 失败 / 解析失败）:
             {
               "binary":     "/opt/homebrew/bin/mihomo",
-              "version":    "1.19.25",
+              "version":    "1.19.25",           # 始终不带 v 前缀（规范化）
               "platform":   "darwin arm64",
               "go_version": "1.26.3",
-              "build_date": "2026-05-16",
+              "build_date": "2026-05-16",        # ISO 取日期段；非 ISO 保留原样
               "raw":        "Mihomo Meta 1.19.25 darwin arm64 with go1.26.3 2026-05-16T14:37:07Z",
             }
 
-    mihomo -v 输出范本:
-        Mihomo Meta 1.19.25 darwin arm64 with go1.26.3 2026-05-16T14:37:07Z
-        Use tags: with_gvisor
+    mihomo -v 输出在不同构建里有两种格式（v0.5.2 起两种都兼容）:
+        1) ISO 风：    Mihomo Meta 1.19.25 darwin arm64 with go1.26.3 2026-05-16T14:37:07Z
+        2) v 前缀 + Unix `date` 风：
+                       Mihomo Meta v1.19.10 linux amd64 with go1.24.3 Sat May 31 07:51:30 UTC 2025
 
     sing-box version 输出范本 (供后续扩展):
         sing-box version 1.10.0
@@ -298,16 +299,25 @@ def get_engine_version(backend_name: str) -> dict | None:
         return None
     raw = out.split("\n", 1)[0].strip()
     info: dict = {"binary": binary, "raw": raw}
-    # 匹配 mihomo: "Mihomo Meta 1.19.25 darwin arm64 with go1.26.3 2026-05-16T14:37:07Z"
+    # 匹配两种 mihomo -v 格式（详见 docstring）。build_date 用 (.+)$ 贪婪到行尾，
+    # 容纳 Unix `date` 的 "Sat May 31 07:51:30 UTC 2025" 多字段写法。
     m = re.match(
-        r"^\S+\s+\S+\s+(\S+)\s+(\S+\s+\S+)\s+with\s+go(\S+)\s+(\S+)",
+        r"^\S+\s+\S+\s+(\S+)\s+(\S+\s+\S+)\s+with\s+go(\S+)\s+(.+)$",
         raw,
     )
     if m:
-        info["version"] = m.group(1)
+        # version 规范化：剥掉可能的 v 前缀，避免渲染层重复加 v（→ "vv1.19.10"）
+        info["version"] = m.group(1).lstrip("v")
         info["platform"] = m.group(2)
         info["go_version"] = m.group(3)
-        info["build_date"] = m.group(4).split("T")[0]
+        date_raw = m.group(4).strip()
+        # ISO 8601 时间戳（YYYY-MM-DDTHH:MM:SS...）取日期段；
+        # Unix `date` 多字段格式（如 "Sat May 31 07:51:30 UTC 2025"）保留原样。
+        # 必须正则强校验：不能用 "T" in date_raw，否则 "UTC" 会被误判 → 截断。
+        if re.match(r"^\d{4}-\d{2}-\d{2}T", date_raw):
+            info["build_date"] = date_raw.split("T")[0]
+        else:
+            info["build_date"] = date_raw
     else:
         # 兜底：能拿到 raw 就行，version 字段留空让 agent 自己处理
         info["version"] = None
