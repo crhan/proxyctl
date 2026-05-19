@@ -1,16 +1,16 @@
-"""proxyctl.suggest_rules — 安全/引擎/数据类规则（v0.5.0+）。
+"""proxyctl.suggest_rules — 安全/引擎/数据/分组类规则（v0.5.0+）。
 
-容纳 controller / engine / data 三组规则的纯函数：
+容纳 controller / engine / data / proxy_group 四组规则的纯函数：
   controller.empty_secret      — external-controller secret == ""
   controller.weak_secret       — secret 长度 < 16
   controller.public_bind       — external-controller bind 到 0.0.0.0 / 公网
   engine.outdated              — 当前版本 < known_versions.json 的 safe_min
   data.geo_stale               — geoip.dat / geosite.dat mtime > 30 天
+  proxy_group.mostly_dead      — 单组 ≥ 70% 节点 delay==0（多组各自指纹）
 
 每条规则都是纯函数：输入预解析过的字典，输出 Suggestion list。
-读 mihomo config / known_versions.json / geo 文件 mtime 的副作用统一在 inspect_*。
-
-注：proxy_group.mostly_dead 需要调 mihomo /proxies API，复杂度高，留待 v0.5.1。
+读 mihomo config / known_versions.json / geo 文件 mtime / /proxies API
+的副作用统一在 inspect_* / fetch_*。
 """
 
 from __future__ import annotations
@@ -236,6 +236,119 @@ def engine_rules(current_version: str | None,
             "since": "0.5.0",
         }]
     return []
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# data.geo_stale — GeoIP / GeoSite 文件 mtime
+# ────────────────────────────────────────────────────────────────────────────
+
+# ────────────────────────────────────────────────────────────────────────────
+# proxy_group.mostly_dead — 调 mihomo /proxies API
+# ────────────────────────────────────────────────────────────────────────────
+
+# 哪些 group 类型纳入判定：自动选/手动选/降级/负载/Smart
+DEAD_CHECK_GROUP_TYPES = ("URLTest", "Selector", "Fallback", "LoadBalance",
+                          "Smart")
+
+# 节点数少于此值的组不报告（小组本来就容易脏）
+MIN_GROUP_SIZE_FOR_DEAD_CHECK = 3
+
+# 死率阈值（≥70% 节点 delay==0 即报）
+DEAD_PCT_THRESHOLD = 70.0
+
+
+def fetch_proxies(api_base: str, api_secret: str = "", *,
+                  timeout: float = 0.5) -> dict[str, Any] | None:
+    """调 mihomo `/proxies` API，本地 HTTP，0 外网。
+
+    失败（API 不通 / 鉴权失败 / 超时 / JSON 损坏）静默返回 None ——
+    doctor 不能因为 API 暂时不可达就死。
+
+    Args:
+        api_base: 如 'http://127.0.0.1:9090'
+        api_secret: Bearer token；空字符串表示未配
+        timeout: 短超时，本地 API 通常 <50ms
+    """
+    if not api_base:
+        return None
+    import json as _json
+    import urllib.error
+    import urllib.request
+    url = f"{api_base.rstrip('/')}/proxies"
+    headers = {}
+    if api_secret:
+        headers["Authorization"] = f"Bearer {api_secret}"
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read()
+        data = _json.loads(raw)
+    except (urllib.error.URLError, OSError, _json.JSONDecodeError,
+            UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def proxy_group_rules(proxies_payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """proxy_group.mostly_dead 规则。
+
+    每个挂掉的组输出**独立**一条 suggestion（fingerprint 含 group_name），
+    agent 可分别跟踪。
+
+    Args:
+        proxies_payload: fetch_proxies() 返回；None 表示跳过整组
+    """
+    if not proxies_payload:
+        return []
+    proxies = proxies_payload.get("proxies")
+    if not isinstance(proxies, dict):
+        return []
+    out: list[dict[str, Any]] = []
+    for name, info in proxies.items():
+        if not isinstance(info, dict):
+            continue
+        if info.get("type") not in DEAD_CHECK_GROUP_TYPES:
+            continue
+        members = info.get("all") or []
+        if not isinstance(members, list) or len(members) < MIN_GROUP_SIZE_FOR_DEAD_CHECK:
+            continue
+        dead = 0
+        for m in members:
+            node = proxies.get(m)
+            if not isinstance(node, dict):
+                # 拿不到节点信息时算"未知"，不计入死亡
+                continue
+            history = node.get("history") or []
+            if not history:
+                dead += 1
+                continue
+            last = history[-1] if isinstance(history[-1], dict) else {}
+            if last.get("delay", 0) == 0:
+                dead += 1
+        dead_pct = (dead / len(members)) * 100.0
+        if dead_pct >= DEAD_PCT_THRESHOLD:
+            out.append({
+                "id": "proxy_group.mostly_dead",
+                "severity": "warn",
+                "actor": "user",
+                "title": (f"代理组 {name} 中 {dead}/{len(members)} 节点不可达 "
+                          f"({dead_pct:.0f}%)"),
+                "evidence": {
+                    "group_name": name,            # 进 fingerprint 的稳定字段
+                    "group_type": info.get("type"),
+                    "dead_count": dead,
+                    "total_count": len(members),
+                    # dead_pct 不进 fingerprint（抖动字段），仅供人看
+                    "dead_pct_at_check": round(dead_pct, 1),
+                },
+                "inspect_command": "proxyctl check --json | jq .data.stages.groups",
+                "fix_command": "proxyctl bench  # 重测延迟，必要时切换订阅",
+                "doc": "suggestion:proxy_group.mostly_dead",
+                "since": "0.5.0",
+            })
+    return out
 
 
 # ────────────────────────────────────────────────────────────────────────────

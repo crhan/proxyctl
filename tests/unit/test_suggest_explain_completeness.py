@@ -30,12 +30,13 @@ EXPECTED_IDS = [
     "autostart.placeholder_unrendered",
     "autostart.disabled",
     "autostart.flapping",
-    # controller / engine / data（src/proxyctl/suggest_rules.py）
+    # controller / engine / data / proxy_group（src/proxyctl/suggest_rules.py）
     "controller.empty_secret",
     "controller.weak_secret",
     "controller.public_bind",
     "engine.outdated",
     "data.geo_stale",
+    "proxy_group.mostly_dead",
 ]
 
 

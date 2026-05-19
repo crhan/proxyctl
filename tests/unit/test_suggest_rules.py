@@ -230,3 +230,110 @@ def test_geo_rules_partial_stale(tmp_path):
     out = suggest_rules.geo_rules(str(tmp_path))
     names = [e["name"] for e in out[0]["evidence"]["stale_files"]]
     assert names == ["geosite.dat"]
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# proxy_group_rules — mihomo /proxies API 派生
+# ────────────────────────────────────────────────────────────────────────────
+
+def _mk_node(delay: int) -> dict:
+    return {
+        "type": "Shadowsocks",
+        "history": [{"time": "2026-05-19T00:00:00Z", "delay": delay}],
+    }
+
+
+def _mk_group(name: str, members: list[str], group_type: str = "URLTest") -> dict:
+    return {"type": group_type, "all": members, "now": members[0] if members else ""}
+
+
+def test_proxy_group_rules_skip_when_no_payload():
+    assert suggest_rules.proxy_group_rules(None) == []
+    assert suggest_rules.proxy_group_rules({}) == []
+    assert suggest_rules.proxy_group_rules({"proxies": None}) == []
+
+
+def test_proxy_group_rules_healthy_group_no_suggestion():
+    payload = {"proxies": {
+        "GROUP1": _mk_group("GROUP1", ["n1", "n2", "n3", "n4"]),
+        "n1": _mk_node(200), "n2": _mk_node(180),
+        "n3": _mk_node(250), "n4": _mk_node(220),
+    }}
+    assert suggest_rules.proxy_group_rules(payload) == []
+
+
+def test_proxy_group_rules_mostly_dead_triggers():
+    payload = {"proxies": {
+        "GROUP1": _mk_group("GROUP1", ["n1", "n2", "n3", "n4"]),
+        "n1": _mk_node(0), "n2": _mk_node(0),    # 死
+        "n3": _mk_node(0), "n4": _mk_node(180),  # 1/4 活
+    }}
+    out = suggest_rules.proxy_group_rules(payload)
+    assert len(out) == 1
+    s = out[0]
+    assert s["id"] == "proxy_group.mostly_dead"
+    assert s["severity"] == "warn"
+    assert s["evidence"]["group_name"] == "GROUP1"
+    assert s["evidence"]["dead_count"] == 3
+    assert s["evidence"]["total_count"] == 4
+
+
+def test_proxy_group_rules_small_group_skipped():
+    """< 3 节点的组不报（误报率高）。"""
+    payload = {"proxies": {
+        "GROUP1": _mk_group("GROUP1", ["n1", "n2"]),
+        "n1": _mk_node(0), "n2": _mk_node(0),
+    }}
+    assert suggest_rules.proxy_group_rules(payload) == []
+
+
+def test_proxy_group_rules_non_dispatch_type_skipped():
+    """Shadowsocks 直接节点不参与分发，不该被判定为'组'。"""
+    payload = {"proxies": {
+        "n1": _mk_node(0), "n2": _mk_node(0), "n3": _mk_node(0),
+    }}
+    assert suggest_rules.proxy_group_rules(payload) == []
+
+
+def test_proxy_group_rules_empty_history_counts_as_dead():
+    payload = {"proxies": {
+        "GROUP1": _mk_group("GROUP1", ["n1", "n2", "n3", "n4"]),
+        "n1": {"type": "Shadowsocks", "history": []},  # 无历史 = 死
+        "n2": {"type": "Shadowsocks", "history": []},
+        "n3": {"type": "Shadowsocks", "history": []},
+        "n4": _mk_node(180),
+    }}
+    out = suggest_rules.proxy_group_rules(payload)
+    assert len(out) == 1
+    assert out[0]["evidence"]["dead_count"] == 3
+
+
+def test_proxy_group_rules_multiple_groups_separate_suggestions():
+    """两个组各自挂掉 → 两条独立 suggestion，fingerprint 不同。"""
+    payload = {"proxies": {
+        "GROUP_A": _mk_group("GROUP_A", ["a1", "a2", "a3"]),
+        "a1": _mk_node(0), "a2": _mk_node(0), "a3": _mk_node(0),
+        "GROUP_B": _mk_group("GROUP_B", ["b1", "b2", "b3", "b4"]),
+        "b1": _mk_node(0), "b2": _mk_node(0),
+        "b3": _mk_node(0), "b4": _mk_node(100),
+    }}
+    out = suggest_rules.proxy_group_rules(payload)
+    assert len(out) == 2
+    group_names = {s["evidence"]["group_name"] for s in out}
+    assert group_names == {"GROUP_A", "GROUP_B"}
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# fetch_proxies — HTTP 静默降级
+# ────────────────────────────────────────────────────────────────────────────
+
+def test_fetch_proxies_unreachable_returns_none(tmp_path):
+    """API 不通时返回 None，不抛异常。"""
+    out = suggest_rules.fetch_proxies("http://127.0.0.1:1",  # 几乎不可能的端口
+                                       api_secret="", timeout=0.1)
+    assert out is None
+
+
+def test_fetch_proxies_no_api_base_returns_none():
+    assert suggest_rules.fetch_proxies("", "") is None
+    assert suggest_rules.fetch_proxies(None, "") is None

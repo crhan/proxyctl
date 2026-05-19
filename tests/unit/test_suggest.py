@@ -240,3 +240,60 @@ def test_build_sort_warn_before_advisory_across_groups(_state):
     )
     assert out[0]["severity"] == "warn"
     assert out[0]["id"] == "autostart.unit_missing"
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# fingerprint 升级：evidence 关键字段进 hash（多实例同 id 独立指纹）
+# ────────────────────────────────────────────────────────────────────────────
+
+def test_fingerprint_dict_form_with_evidence(_state):
+    """proxy_group.mostly_dead 不同 group_name 应得不同 fingerprint。"""
+    fp_a = suggest._compute_fingerprint({
+        "id": "proxy_group.mostly_dead",
+        "evidence": {"group_name": "GROUP_A", "dead_count": 3},
+    })
+    fp_b = suggest._compute_fingerprint({
+        "id": "proxy_group.mostly_dead",
+        "evidence": {"group_name": "GROUP_B", "dead_count": 3},
+    })
+    assert fp_a != fp_b
+    assert len(fp_a) == 12 and len(fp_b) == 12
+
+
+def test_fingerprint_dict_ignores_jitter_evidence(_state):
+    """同 group_name 下，dead_count / dead_pct 抖动不影响 fingerprint。"""
+    fp1 = suggest._compute_fingerprint({
+        "id": "proxy_group.mostly_dead",
+        "evidence": {"group_name": "GROUP_A", "dead_count": 3},
+    })
+    fp2 = suggest._compute_fingerprint({
+        "id": "proxy_group.mostly_dead",
+        "evidence": {"group_name": "GROUP_A", "dead_count": 5},
+    })
+    assert fp1 == fp2
+
+
+def test_fingerprint_legacy_str_api_still_works(_state):
+    """v0.5.0-rc 旧调用方式（传 id 字符串）保持兼容。"""
+    fp_old = suggest._compute_fingerprint("subscription.expired")
+    fp_new = suggest._compute_fingerprint({"id": "subscription.expired",
+                                            "evidence": {}})
+    assert fp_old == fp_new
+
+
+def test_proxy_group_multiple_groups_distinct_fingerprints(_state):
+    """两个 mostly_dead 组在 build_suggestions 中各自独立。"""
+    payload = {"proxies": {
+        "GROUP_A": {"type": "URLTest", "all": ["a1", "a2", "a3"]},
+        "a1": {"history": [{"delay": 0}]},
+        "a2": {"history": [{"delay": 0}]},
+        "a3": {"history": [{"delay": 0}]},
+        "GROUP_B": {"type": "URLTest", "all": ["b1", "b2", "b3"]},
+        "b1": {"history": [{"delay": 0}]},
+        "b2": {"history": [{"delay": 0}]},
+        "b3": {"history": [{"delay": 0}]},
+    }}
+    out = suggest.build_suggestions(sub=None, proxies_payload=payload)
+    assert len(out) == 2
+    fps = {s["fingerprint"] for s in out}
+    assert len(fps) == 2  # 两个独立指纹

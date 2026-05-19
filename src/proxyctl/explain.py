@@ -1593,6 +1593,17 @@ def _build_doctor_suggestions(backend, config, engine_ver) -> list:
     except Exception:
         known_versions = None
 
+    # mihomo /proxies API — 仅在引擎在线时拉，本地 HTTP，timeout 0.5s
+    proxies_payload = None
+    try:
+        api_base = config.get("api_base", "http://127.0.0.1:9090")
+        api_secret = config.get("api_secret", "") or ""
+        # 复用 doctor 已检测过的 engine_up（外部传入会更优雅，但本函数无该参数；
+        # fetch_proxies 自身已 timeout + 静默降级，调一次也无害）
+        proxies_payload = _rules.fetch_proxies(api_base, api_secret, timeout=0.5)
+    except Exception:
+        proxies_payload = None
+
     return _suggest.build_suggestions(
         sub=sub,
         autostart_inspect=autostart_inspect,
@@ -1602,6 +1613,7 @@ def _build_doctor_suggestions(backend, config, engine_ver) -> list:
         engine_config_inspect=eng_cfg_inspect,
         known_versions=known_versions,
         engine_config_dir=expected_cfg_dir,
+        proxies_payload=proxies_payload,
     )
 
 
@@ -1928,6 +1940,22 @@ _SUGGESTION_DOCS: dict[str, dict] = {
         ),
         "verify": "stat -f '%m %N' ~/.config/mihomo/geo*.dat",
         "next_commands": ["restart"],
+    },
+    "proxy_group.mostly_dead": {
+        "summary": (
+            "单个代理组中 ≥ 70% 节点延迟为 0（已挂或测速失败）。组类型限于"
+            "URLTest / Selector / Fallback / LoadBalance / Smart——只有这些会被"
+            "用户分流到。多组同时挂会输出多条独立 suggestion（fingerprint 含"
+            "group_name，agent 可分别跟踪）。"
+        ),
+        "edit": (
+            "  # 1. 跑 proxyctl bench 重测延迟（部分节点可能临时失活）\n"
+            "  # 2. 检查机场订阅是否过期（proxyctl status --json | jq .data.subscription）\n"
+            "  # 3. 切换备用订阅源 / 联系机场\n"
+            "  # 4. 如果只是少量节点，url-test 组会自动避开，无须干预"
+        ),
+        "verify": "proxyctl check --json | jq '.data.stages.groups'",
+        "next_commands": ["bench", "check", "status"],
     },
 }
 

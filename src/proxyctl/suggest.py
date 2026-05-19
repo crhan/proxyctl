@@ -53,13 +53,37 @@ def state_file_path() -> str:
     return os.environ.get("PROXYCTL_SUGGEST_STATE_PATH") or _STATE_FILE
 
 
-def _compute_fingerprint(suggestion_id: str) -> str:
-    """v0.5.0：fingerprint = sha1(id)[:12]。
+# 规则级声明：哪些 evidence 字段进 fingerprint hash。
+# 默认空（仅 hash id）。需要"多实例同类问题分别去重"的规则（如多个 proxy_group
+# 同时挂掉），在此列出 evidence 中的稳定关键字。**抖动字段（百分比、时间戳、
+# 剩余天数）禁止列入**，否则 agent 跨次调用看不到稳定 fingerprint。
+FINGERPRINT_EVIDENCE_KEYS: dict[str, tuple[str, ...]] = {
+    "proxy_group.mostly_dead": ("group_name",),
+}
+
+
+def _compute_fingerprint(suggestion_or_id) -> str:
+    """v0.5.0：fingerprint = sha1(id [+ stable evidence keys])[:12]。
 
     抖动字段（百分比、剩余天数）不进 hash —— 让 agent 在"同一问题还没解决"
-    场景下能稳定去重。未来若需更细粒度可加 evidence 关键字段。
+    场景下能稳定去重。需要更细粒度（如多 group 各自指纹）通过
+    FINGERPRINT_EVIDENCE_KEYS 显式声明。
+
+    Args:
+        suggestion_or_id: 可以是 suggestion dict（推荐）或纯 id 字符串
+            （兼容 v0.5.0-rc 旧调用方式）。
     """
-    return hashlib.sha1(suggestion_id.encode("utf-8")).hexdigest()[:12]
+    if isinstance(suggestion_or_id, str):
+        sid = suggestion_or_id
+        ev: dict = {}
+    else:
+        sid = suggestion_or_id.get("id", "")
+        ev = suggestion_or_id.get("evidence", {}) or {}
+    keys = FINGERPRINT_EVIDENCE_KEYS.get(sid, ())
+    parts = [sid]
+    for k in keys:
+        parts.append(f"{k}={ev.get(k, '')}")
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
 def _now_iso() -> str:
@@ -125,7 +149,7 @@ def _decorate(raw: list[dict[str, Any]], *,
         sid = s.get("id", "")
         if not sid:
             continue
-        fp = _compute_fingerprint(sid)
+        fp = _compute_fingerprint(s)  # v0.5.0+ 传 dict 让 evidence 关键字进 hash
         first = state.get(fp)
         if first is None:
             first = now
@@ -162,6 +186,7 @@ def build_suggestions(*, sub: dict[str, Any] | None = None,
                       engine_config_inspect: dict[str, Any] | None = None,
                       known_versions: dict[str, Any] | None = None,
                       engine_config_dir: str | None = None,
+                      proxies_payload: dict[str, Any] | None = None,
                       persist_state: bool = True,
                       _extra_raw: list[dict[str, Any]] | None = None,
                       ) -> list[dict[str, Any]]:
@@ -212,6 +237,10 @@ def build_suggestions(*, sub: dict[str, Any] | None = None,
     if engine_config_dir:
         from proxyctl import suggest_rules as _rules
         raw.extend(_rules.geo_rules(engine_config_dir))
+
+    if proxies_payload is not None:
+        from proxyctl import suggest_rules as _rules
+        raw.extend(_rules.proxy_group_rules(proxies_payload))
 
     if _extra_raw:
         raw.extend(_extra_raw)
