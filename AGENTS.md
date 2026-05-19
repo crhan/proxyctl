@@ -247,11 +247,65 @@ inspect what they would do.
 ## Commit / PR
 
 - Conventional-ish: `feat:` / `fix:` / `refactor:` / `docs:` / `test:`.
-- Update `CHANGELOG.md` under the `## [Unreleased]` section, with the
-  `### Breaking` / `### Agent-facing` / `### Added` / `### Fixed` subheads
-  used in 0.3.0.
+- Update `CHANGELOG.md` under the `## [Unreleased]` section, then move
+  it to the new version section when the release is cut.
 - Keep `man/proxyctl.1` in sync when adding/renaming commands or flags.
 - Bumping `pyproject.toml` version also requires bumping `cli.VERSION`.
+
+---
+
+## CHANGELOG / Release notes style
+
+**`CHANGELOG.md` 直接驱动 GitHub release notes**：`.github/workflows/release.yml`
+的 `Extract release notes from CHANGELOG.md` 步骤会抽对应版本 section 写
+`gh release create --notes-file`。**CHANGELOG section 质量 = release notes 质量**。
+Release notes 是写给**用户**看的，不是写给维护者复盘用的。
+
+### 必须 — 结果导向
+
+每个版本段按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)
+子分类组织：
+
+| Subhead | 内容 |
+|---|---|
+| `### Added` | 新增的命令 / flag / 字段 / 文件 / 配置项 |
+| `### Changed` | 已有行为变化（用户能感知到的） |
+| `### Fixed` | 修了什么用户感知 bug（**直接描述症状 + 修复结果**，不写"哥发现的过程"）|
+| `### Removed` | 删了什么（破坏性，配 `### Breaking`）|
+| `### Breaking` | 破坏性变更清单 + 迁移指引 |
+| `### Compatibility` | 向后兼容承诺、schema 不变性、老消费者影响 |
+
+每条 bullet 用**用户视角**："X 命令现在支持 Y" / "Z 字段类型从 A 改为 B" /
+"`feature` 在 `condition` 时不再 error"。
+
+### 禁止 — 过程叙事
+
+CHANGELOG **不写**以下内容（这些归 commit message / PR description /
+源码 docstring，**不进 release notes**）：
+
+- **反馈引用**：`> "哥 2026-05-19 跑 status 时一眼看到 ..."` 这类 blockquote
+- **场景叙事**：`实地跑 X 在哥本机 ...` / `调试 TUIC 栽过的坑 ...`
+- **过程追溯**：`v0.4.7 引入的 X 在 v0.5.0 出问题 ... 修复过程 ...`
+- **未来设想**：`未来若再有人引入 ... CI 立即抓住`
+- **元复盘**：`Backstory` / `复盘` / `Audit 结果总结` / `Meta — 元模式` /
+  `Known tech debt` / `Test stats` / `红线` 收尾段
+- **审查过程引用**：`UX review 指出 80% 太晚 ...`
+- **维护者内部讨论**：`P0 / P1 / P2 优先级` / `留 backlog`
+
+写完一段 CHANGELOG 自检：删掉它，用户还能不能知道这个版本**做了什么、能用什么、要注意什么**？如果能 → 保留。如果不能 → 没必要写。
+
+### 参考好样本
+
+- v0.5.1 / v0.5.0 / v0.4.7 / v0.4.4 entries —— 结果导向典范
+- 反面教材 (重写前的版本) 可看 `git log` `docs(CHANGELOG): 重写 ... 结果导向`
+  系列 commit 的 `git show <sha>` diff
+
+### `release.yml` 行为
+
+- `push tag v*.*.*` 触发 → CI 抽 CHANGELOG 中对应 `## [<version>]` section →
+  `gh release create --notes-file .release-notes.md`
+- 找不到对应 section 直接 `::error::` + exit 1（强约束：tag 前必须更新 CHANGELOG）
+- 历史 release notes 漏写补法：`gh release edit v<x.y.z> --notes-file <抽出的内容>`
 
 ---
 
