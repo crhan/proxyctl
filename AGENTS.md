@@ -54,6 +54,102 @@ refresh script writes this file; proxyctl performs zero network calls. See
 
 ---
 
+## Doctor suggestions (v0.5.0+)
+
+`proxyctl doctor` returns two **independent** signals:
+
+1. **Score** — 5 boolean health checks (`engine_up / port_listen / dns_ok /
+   system_proxy_ok / connectivity_ok`). Controls `exit code` and `data.healthy`.
+2. **Suggestions** (`data.suggestions[]`) — structured "things worth doing"
+   that don't constitute failures. **Never affect exit code.**
+
+### Suggestion schema v1
+
+```jsonc
+{
+  "id":              "autostart.version_mismatch",  // stable enum "<area>.<situation>"
+  "severity":        "info | advisory | warn",      // no "error" — errors live in envelope.hints[]
+  "actor":           "user | agent | cron | engine", // who fixes — agent decides "DIY vs ask user"
+  "title":           "...",                          // one-line human text
+  "evidence":        { /* structured facts */ },     // agent does NOT regex title
+  "inspect_command": "proxyctl status --json | ...", // read-only diagnosis, runnable
+  "fix_command":     null,                           // write-op, may need sudo
+  "auto_fixable":    false,                          // whether agent may run fix_command unattended
+  "doc":             "suggestion:autostart.version_mismatch",  // `proxyctl explain <doc>` always works
+  "fingerprint":     "abc123def456",                 // sha1(id)[:12] — stable across calls
+  "first_seen":      "2026-05-19T10:23:00Z",         // persisted in ~/.cache/proxyctl/suggestions_state.json
+  "since":           "0.5.0"
+}
+```
+
+### Contract guarantees for agents
+
+- **Severity is three-tier**, no `error` / `critical`. Errors go through
+  `envelope.hints[]` with `ok=false` and non-zero exit code; suggestions are
+  always advisory.
+- **Sort order is fixed**: `severity desc (warn > advisory > info), id asc`.
+  Agents can stable-diff two `doctor --json` outputs without sorting.
+- **`fingerprint` is the deduplication key.** Same id across calls returns
+  the same fingerprint regardless of evidence fluctuation (e.g. traffic
+  73% → 88%). Track "this problem is still unresolved" by fingerprint.
+- **`first_seen` is monotonic** while the fingerprint keeps appearing. Use
+  it to escalate after N hours of an unresolved suggestion.
+- **`doc` is always `proxyctl explain <doc>`-routable.** CI enforces every
+  suggestion id has a corresponding explain topic.
+- **Adding suggestions is non-breaking.** New `severity` / `actor` enum
+  values, new fields → bumps `supported_features.doctor_suggestions_v<N>`
+  to a new bool key. v1 keys never disappear.
+- **Schema additions to `data.suggestions[].*`** never remove fields;
+  agents using only the v1 keys are forward-compatible.
+
+### Severity vs actor — decision matrix for agents
+
+| severity   | actor   | Suggested agent behavior                           |
+|------------|---------|----------------------------------------------------|
+| `warn`     | `user`  | Surface to the user, suggest the fix              |
+| `warn`     | `cron`  | Surface; recommend user check the cron job        |
+| `warn`     | `agent` | Take action if `auto_fixable=true`, else surface  |
+| `advisory` | any     | Mention if user asked "anything to improve?"      |
+| `info`     | any     | Don't volunteer; surface only if user queries     |
+
+### Reading suggestions
+
+```bash
+# All suggestions including info-level
+proxyctl doctor --json | jq '.data.suggestions[]'
+
+# Only actionable (warn + advisory)
+proxyctl doctor --json | jq '.data.suggestions[] | select(.severity != "info")'
+
+# Specific group (autostart-related)
+proxyctl doctor --json | jq '.data.suggestions[] | select(.id | startswith("autostart."))'
+
+# Per-id detail
+proxyctl explain suggestion:autostart.version_mismatch
+```
+
+### Coverage (v0.5.0)
+
+- **Subscription (7)**: expired / expiring_soon / traffic_high|warn|exhausted /
+  last_fetch_error / stale / missing
+- **Autostart (8)**: unit_missing / binary_missing / binary_mismatch /
+  version_mismatch / config_dir_mismatch / placeholder_unrendered /
+  disabled / flapping
+- **Security (3)**: controller.{empty,weak}_secret / public_bind
+- **Engine/Data (2)**: engine.outdated (reads
+  `~/.cache/proxyctl/known_versions.json` contract file) /
+  data.geo_stale (geoip.dat / geosite.dat mtime > 30d)
+
+`proxy_group.mostly_dead` is reserved for v0.5.1 (requires polling
+mihomo `/proxies` API).
+
+### Reading suggestions disables — for users only
+
+Suggestions can be silenced via `proxyctl doctor --no-suggest`. Agents
+should **not** use this flag — instead filter by `severity` or `id`.
+
+---
+
 ## Repository layout
 
 ```

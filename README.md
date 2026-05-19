@@ -56,7 +56,9 @@ agent 会：自描述协议 → 读取本机现状 → 用 dry-run 演示要做�
 4. 健康打底
    - `proxyctl check --json` —— 任一 stage 失败时 envelope.hints
      已聚合真凶摘要（v0.4.3+），不必挖 stages.*.ok
-   - `proxyctl doctor --json` —— 5 项快速打分
+   - `proxyctl doctor --json` —— 5 项快速打分 + `data.suggestions[]`
+     引导建议（v0.5.0+ 含 21 条：订阅过期 / autostart plist 与 PATH 版本不一致 /
+     weak API secret / geoip 数据过期 等）
    - `proxyctl audit 7 --json` —— 扫近 7 天访问日志，找走代理但落地国内的域名
 
 5. 给我可执行的改进列表
@@ -81,7 +83,8 @@ proxyctl --version --json            # schema_version + supported_features 探�
 proxyctl commands --json             # 全部命令元数据（机读）
 proxyctl commands --schema           # 上面 JSON 的 JSON Schema
 proxyctl explain                     # "我想改 X 去哪？" 速查
-proxyctl doctor --json               # 5 项健康打分 + healthy 布尔字段
+proxyctl doctor --json               # 5 项健康打分 + data.suggestions[] 引导建议
+proxyctl explain suggestion:<id>     # v0.5.0+ 每条 suggestion 都有详情 topic
 PROXYCTL_AGENT=1 proxyctl <cmd>      # 一键 --json + 关色 + 非交互
 ```
 
@@ -98,6 +101,12 @@ PROXYCTL_AGENT=1 proxyctl <cmd>      # 一键 --json + 关色 + 非交互
 - **CI 层 contract test**（`tests/integration/test_plan_exec_contract.py`）
   保证 plan ↔ exec **永不漂移**
 - **错误带可执行 hints + explain topic**：agent 可路由下一步而不需要规则匹配
+- **doctor suggestions（v0.5.0+）**：与 score 解耦的引导维度。21 条规则覆盖
+  订阅 / autostart plist 路径与版本一致性 / Clash API 安全 / GeoIP 数据时效。
+  每条带稳定 `id` + `fingerprint` + `first_seen`，agent 可跨次去重。
+  `severity` 三档（info/advisory/warn）永不影响 exit code，按
+  `severity desc, id asc` 固定排序。详见 [AGENTS.md](AGENTS.md)
+  的 "Doctor suggestions" 段
 - **`audit/check` 支持 `--plain` TSV**：4 行 stage/ok/detail，agent 友好的备选
 - **`proxyctl help <cmd>` 与 `<cmd> --help` 同源**
 - **非 TTY 自动关色 / 不读 stdin / 不 prompt / 写操作 fcntl.flock 互斥**
