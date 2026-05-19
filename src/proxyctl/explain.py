@@ -1435,36 +1435,66 @@ def _resolve_dot_key(d: dict, key: str):
 # ── 主入口 5: doctor ──────────────────────────────────────────────────────
 
 def cmd_doctor(args: list, backend, config) -> None:
-    """proxyctl doctor [--json] [--no-suggest] — 健康打分 + 引导建议。
+    """proxyctl doctor [--json] [--no-suggest] [--suggest-only] [--since <ver>]
+        — 健康打分 + 引导建议。
 
-    score 仍只数核心 5 项布尔（≤500ms 网络探测），不计建议入分。
+    Flags:
+      --no-suggest         关闭建议引擎，恢复 v0.4.x 极简 5 项布尔
+      --suggest-only       跳过 5 项 score 探测，仅跑建议引擎（最快 < 100ms）
+                           data 中 5 项布尔置 null，agent 据 doctor_mode 字段识别
+      --since <version>    屏蔽 since > 此版本的规则（老 CI 平滑迁移）
+
     suggestions 默认显示 warn+advisory（上限 3 条，info 仅 --json），
-    永不影响 exit code。`--no-suggest` 关闭整个建议引擎（恢复 v0.4.x 极简体验）。
+    永不影响 exit code。--quiet 完全跳过 suggestion 块（人类输出）。
     """
     as_json = GLOBAL_FLAGS_REF().get("json", False)
     quiet = GLOBAL_FLAGS_REF().get("quiet", False)
-    no_suggest = "--no-suggest" in (args or [])
+    argv = list(args or [])
+    no_suggest = "--no-suggest" in argv
+    suggest_only = "--suggest-only" in argv
+    since_filter: str | None = None
+    if "--since" in argv:
+        try:
+            si = argv.index("--since")
+            if si + 1 < len(argv):
+                since_filter = argv[si + 1]
+        except ValueError:
+            pass
 
     # 从 cli.py 复用 service_running，但为避免循环 import 在这里独立判断
     from proxyctl.cli import service_running, get_mode, get_engine_version
     port = config.get("proxy_port", 7890)
     api_base = config.get("api_base", "http://127.0.0.1:9090")
 
-    engine_up = bool(service_running(backend))
-    port_listen = _tcp_open("127.0.0.1", port)
-    dns_ok = _dns_points_to_loopback()
-    system_proxy_ok = _system_proxy_points_to_loopback(port)
-    connectivity_ok = _quick_connectivity(api_base, port) if engine_up else False
-
-    flags = {
-        "engine_up": engine_up,
-        "port_listen": port_listen,
-        "dns_ok": dns_ok,
-        "system_proxy_ok": system_proxy_ok,
-        "connectivity_ok": connectivity_ok,
-    }
-    score = sum(1 for v in flags.values() if v)
-    hint = _doctor_hint(flags)
+    if suggest_only:
+        # Fast path：跳过所有 5 项 score 探测（最慢可累计 5-10s）
+        engine_up = None
+        port_listen = None
+        dns_ok = None
+        system_proxy_ok = None
+        connectivity_ok = None
+        flags_for_human = {
+            "engine_up": None, "port_listen": None, "dns_ok": None,
+            "system_proxy_ok": None, "connectivity_ok": None,
+        }
+        score = None
+        hint = None
+    else:
+        engine_up = bool(service_running(backend))
+        port_listen = _tcp_open("127.0.0.1", port)
+        dns_ok = _dns_points_to_loopback()
+        system_proxy_ok = _system_proxy_points_to_loopback(port)
+        connectivity_ok = (_quick_connectivity(api_base, port)
+                           if engine_up else False)
+        flags_for_human = {
+            "engine_up": engine_up,
+            "port_listen": port_listen,
+            "dns_ok": dns_ok,
+            "system_proxy_ok": system_proxy_ok,
+            "connectivity_ok": connectivity_ok,
+        }
+        score = sum(1 for v in flags_for_human.values() if v)
+        hint = _doctor_hint(flags_for_human)
 
     # informational extra（不计分）
     try:
@@ -1483,15 +1513,24 @@ def cmd_doctor(args: list, backend, config) -> None:
     suggestions: list = []
     if not no_suggest:
         try:
-            suggestions = _build_doctor_suggestions(backend, config, engine_ver)
+            suggestions = _build_doctor_suggestions(
+                backend, config, engine_ver, since_filter=since_filter)
         except Exception:
             # 建议引擎绝不能阻塞 doctor 主流程；任何意外都静默降级为空建议
             suggestions = []
 
-    healthy = (score == len(flags))
+    if suggest_only:
+        healthy = None
+        max_val: int | None = None
+        code = OK  # suggest_only 不参与健康分判定
+    else:
+        healthy = (score == len(flags_for_human))
+        max_val = len(flags_for_human)
+        code = OK if healthy else ENGINE_DOWN
+
     data = {
-        **flags,
-        "score": score, "max": len(flags),
+        **flags_for_human,
+        "score": score, "max": max_val,
         "healthy": healthy,        # 0.3.3：agent 不必自己算 score == max
         "hint": hint,
         # informational fields (W15 in 0.3.0):
@@ -1505,8 +1544,9 @@ def cmd_doctor(args: list, backend, config) -> None:
         "lock_path": lock_path_map,
         # v0.5.0+：与 score 解耦的引导建议列表；--json 总是输出（含 info 级）
         "suggestions": suggestions,
+        # v0.5.0+：doctor 运行模式（默认 'full'；--suggest-only 时 'suggest_only'）
+        "doctor_mode": "suggest_only" if suggest_only else "full",
     }
-    code = OK if healthy else ENGINE_DOWN
 
     if as_json:
         emit_json(envelope("doctor", data=data, ok=healthy,
@@ -1516,17 +1556,22 @@ def cmd_doctor(args: list, backend, config) -> None:
     icon = lambda b: f"{GREEN}✓{NC}" if b else f"{RED}✗{NC}"
     ev = engine_ver or {}
     ev_tag = f" v{ev['version']}" if ev.get("version") else ""
-    print(f"{BOLD}proxyctl doctor{NC}  ({score}/{len(flags)})  "
-          f"{DIM}engine={backend.name}{ev_tag} mode={mode_str} port={port}{NC}")
-    print(f"  {icon(engine_up)}  engine_up        ({backend.name} 服务运行中)")
-    print(f"  {icon(port_listen)}  port_listen      (127.0.0.1:{port})")
-    print(f"  {icon(dns_ok)}  dns_ok           (系统 DNS 含 127.0.0.1)")
-    print(f"  {icon(system_proxy_ok)}  system_proxy_ok  (macOS HTTP/HTTPS proxy)")
-    print(f"  {icon(connectivity_ok)}  connectivity_ok  (https://www.google.com via proxy)")
-    if held:
-        print(f"  {DIM}lock_held: {', '.join(held)}{NC}")
-    if hint:
-        print(f"{CYAN}next:{NC} {hint}")
+    if suggest_only:
+        print(f"{BOLD}proxyctl doctor{NC}  {DIM}(suggest-only mode){NC}  "
+              f"{DIM}engine={backend.name}{ev_tag} mode={mode_str} port={port}{NC}")
+        print(f"  {DIM}5 项 score 探测被跳过；仅跑 suggestion 引擎{NC}")
+    else:
+        print(f"{BOLD}proxyctl doctor{NC}  ({score}/{max_val})  "
+              f"{DIM}engine={backend.name}{ev_tag} mode={mode_str} port={port}{NC}")
+        print(f"  {icon(engine_up)}  engine_up        ({backend.name} 服务运行中)")
+        print(f"  {icon(port_listen)}  port_listen      (127.0.0.1:{port})")
+        print(f"  {icon(dns_ok)}  dns_ok           (系统 DNS 含 127.0.0.1)")
+        print(f"  {icon(system_proxy_ok)}  system_proxy_ok  (macOS HTTP/HTTPS proxy)")
+        print(f"  {icon(connectivity_ok)}  connectivity_ok  (https://www.google.com via proxy)")
+        if held:
+            print(f"  {DIM}lock_held: {', '.join(held)}{NC}")
+        if hint:
+            print(f"{CYAN}next:{NC} {hint}")
 
     # ── suggestions 人类输出块 ─────────────────────────────────────────
     # 规则：默认仅显 warn + advisory，上限 3 条；info 仅 --json
@@ -1554,7 +1599,8 @@ def cmd_doctor(args: list, backend, config) -> None:
     sys.exit(code)
 
 
-def _build_doctor_suggestions(backend, config, engine_ver) -> list:
+def _build_doctor_suggestions(backend, config, engine_ver, *,
+                              since_filter: str | None = None) -> list:
     """采集所有 suggestion 输入并调 build_suggestions。
 
     所有 inspect_* 调用都独立 try-except，任一失败不影响其他维度。
@@ -1614,6 +1660,8 @@ def _build_doctor_suggestions(backend, config, engine_ver) -> list:
         known_versions=known_versions,
         engine_config_dir=expected_cfg_dir,
         proxies_payload=proxies_payload,
+        since=since_filter,
+        apply_user_ignore=True,
     )
 
 

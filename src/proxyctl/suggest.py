@@ -46,11 +46,58 @@ SEVERITY_ENUM = ("info", "advisory", "warn")
 
 _STATE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "proxyctl")
 _STATE_FILE = os.path.join(_STATE_DIR, "suggestions_state.json")
+_IGNORE_FILE = os.path.join(os.path.expanduser("~"), ".config", "proxyctl",
+                            "suggestions.ignore")
 
 
 def state_file_path() -> str:
     """state 文件路径。允许 PROXYCTL_SUGGEST_STATE_PATH 覆盖（测试用）。"""
     return os.environ.get("PROXYCTL_SUGGEST_STATE_PATH") or _STATE_FILE
+
+
+def ignore_file_path() -> str:
+    """suggestions.ignore 文件路径。允许 PROXYCTL_SUGGEST_IGNORE_PATH 覆盖（测试用）。
+
+    文件格式（每行）：
+      <id>           或      <fingerprint>
+      # 注释行
+      空行也允许
+
+    示例：
+      # 我知道 weak_secret，本机不暴露所以无所谓
+      controller.weak_secret
+      # 屏蔽某个具体死组（按 fingerprint，agent 跑过 doctor --json 拿到）
+      bb60eec32908
+    """
+    return os.environ.get("PROXYCTL_SUGGEST_IGNORE_PATH") or _IGNORE_FILE
+
+
+def load_ignore() -> set[str]:
+    """读 ignore 列表，返回 id / fingerprint 集合。文件不存在返回空 set。
+
+    任何 id 或 fingerprint 命中即过滤。
+    """
+    path = ignore_file_path()
+    if not os.path.isfile(path):
+        return set()
+    out: set[str] = set()
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                out.add(line)
+    except OSError:
+        return set()
+    return out
+
+
+def _parse_version_tuple(v: str) -> tuple:
+    """'0.5.0' → (0, 5, 0)；不规范返回 (0, 0, 0)。"""
+    import re as _re
+    parts = _re.findall(r"\d+", v or "")
+    return tuple(int(p) for p in parts[:3]) + (0,) * (3 - min(len(parts), 3))
 
 
 # 规则级声明：哪些 evidence 字段进 fingerprint hash。
@@ -187,6 +234,9 @@ def build_suggestions(*, sub: dict[str, Any] | None = None,
                       known_versions: dict[str, Any] | None = None,
                       engine_config_dir: str | None = None,
                       proxies_payload: dict[str, Any] | None = None,
+                      since: str | None = None,
+                      ignore_set: set[str] | None = None,
+                      apply_user_ignore: bool = True,
                       persist_state: bool = True,
                       _extra_raw: list[dict[str, Any]] | None = None,
                       ) -> list[dict[str, Any]]:
@@ -245,4 +295,19 @@ def build_suggestions(*, sub: dict[str, Any] | None = None,
     if _extra_raw:
         raw.extend(_extra_raw)
 
-    return _decorate(raw, persist_state=persist_state)
+    # `--since <ver>`：屏蔽 since > 输入版本的规则（老 CI 平滑迁移）
+    if since:
+        cutoff = _parse_version_tuple(since)
+        raw = [s for s in raw
+               if _parse_version_tuple(s.get("since", "0.0.0")) <= cutoff]
+
+    decorated = _decorate(raw, persist_state=persist_state)
+
+    # ignore 过滤：在 decorate 后做，因为 fingerprint 也可作为 ignore key
+    ignore = set(ignore_set or ())
+    if apply_user_ignore:
+        ignore |= load_ignore()
+    if ignore:
+        decorated = [s for s in decorated
+                     if s["id"] not in ignore and s["fingerprint"] not in ignore]
+    return decorated

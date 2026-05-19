@@ -281,6 +281,99 @@ def test_fingerprint_legacy_str_api_still_works(_state):
     assert fp_old == fp_new
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# --since 过滤
+# ────────────────────────────────────────────────────────────────────────────
+
+def test_since_filter_drops_newer_rules(_state):
+    """since=0.4.7 屏蔽所有 0.5.0 引入的规则。"""
+    out = suggest.build_suggestions(
+        sub=_ok_sub(expire_days_left=-1),  # 触发 subscription.expired (since=0.5.0)
+        since="0.4.7",
+    )
+    assert out == []
+
+
+def test_since_filter_keeps_eligible_rules(_state):
+    """since=0.5.0 不过滤 0.5.0 规则。"""
+    out = suggest.build_suggestions(
+        sub=_ok_sub(expire_days_left=-1),
+        since="0.5.0",
+    )
+    assert any(s["id"] == "subscription.expired" for s in out)
+
+
+def test_since_filter_keeps_same_version_inclusive(_state):
+    """since=<X> 是 inclusive：规则 since=X 保留。"""
+    out = suggest.build_suggestions(
+        sub=_ok_sub(expire_days_left=-1),
+        since="0.5.0",
+        _extra_raw=[{
+            "id": "future.thing", "severity": "warn", "actor": "user",
+            "title": "future", "evidence": {},
+            "doc": "suggestion:future.thing", "since": "0.6.0",
+        }],
+    )
+    ids = [s["id"] for s in out]
+    assert "subscription.expired" in ids
+    assert "future.thing" not in ids
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# suggestions.ignore 屏蔽
+# ────────────────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def _ignore_file(tmp_path, monkeypatch):
+    p = tmp_path / "suggestions.ignore"
+    monkeypatch.setenv("PROXYCTL_SUGGEST_IGNORE_PATH", str(p))
+    return p
+
+
+def test_ignore_file_filters_by_id(_state, _ignore_file):
+    _ignore_file.write_text(
+        "# 注释\n"
+        "subscription.expired\n"
+        "\n"
+        "# 另一条\n",
+        encoding="utf-8",
+    )
+    out = suggest.build_suggestions(sub=_ok_sub(expire_days_left=-1))
+    assert all(s["id"] != "subscription.expired" for s in out)
+
+
+def test_ignore_file_filters_by_fingerprint(_state, _ignore_file):
+    fp = suggest._compute_fingerprint("subscription.expired")
+    _ignore_file.write_text(f"{fp}\n", encoding="utf-8")
+    out = suggest.build_suggestions(sub=_ok_sub(expire_days_left=-1))
+    assert all(s["fingerprint"] != fp for s in out)
+
+
+def test_ignore_file_missing_no_crash(_state, _ignore_file):
+    """文件不存在时不报错。"""
+    assert not _ignore_file.exists()
+    out = suggest.build_suggestions(sub=_ok_sub(expire_days_left=-1))
+    assert any(s["id"] == "subscription.expired" for s in out)
+
+
+def test_ignore_set_inline_overrides(_state, _ignore_file):
+    """显式 ignore_set 参数也生效。"""
+    out = suggest.build_suggestions(
+        sub=_ok_sub(expire_days_left=-1),
+        ignore_set={"subscription.expired"},
+    )
+    assert all(s["id"] != "subscription.expired" for s in out)
+
+
+def test_apply_user_ignore_off_bypasses_file(_state, _ignore_file):
+    _ignore_file.write_text("subscription.expired\n", encoding="utf-8")
+    out = suggest.build_suggestions(
+        sub=_ok_sub(expire_days_left=-1),
+        apply_user_ignore=False,
+    )
+    assert any(s["id"] == "subscription.expired" for s in out)
+
+
 def test_proxy_group_multiple_groups_distinct_fingerprints(_state):
     """两个 mostly_dead 组在 build_suggestions 中各自独立。"""
     payload = {"proxies": {

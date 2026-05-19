@@ -100,15 +100,18 @@ DOCTOR_V2 = {
     # 老 agent（v0.4.x）按 required 列表读取的代码不受影响。
     "additionalProperties": True,
     "properties": {
-        "engine_up": {"type": "boolean"},
-        "port_listen": {"type": "boolean"},
-        "dns_ok": {"type": "boolean"},
-        "system_proxy_ok": {"type": "boolean"},
-        "connectivity_ok": {"type": "boolean"},
-        "score": {"type": "integer"},
-        "max": {"type": "integer"},
-        "healthy": {"type": "boolean"},
+        # v0.5.0+ 放宽：--suggest-only 模式下 5 项布尔 / score / healthy / hint
+        # 全置 null，agent 据顶层 data.doctor_mode 字段识别。
+        "engine_up": {"type": ["boolean", "null"]},
+        "port_listen": {"type": ["boolean", "null"]},
+        "dns_ok": {"type": ["boolean", "null"]},
+        "system_proxy_ok": {"type": ["boolean", "null"]},
+        "connectivity_ok": {"type": ["boolean", "null"]},
+        "score": {"type": ["integer", "null"]},
+        "max": {"type": ["integer", "null"]},
+        "healthy": {"type": ["boolean", "null"]},
         "hint": {"type": ["string", "null"]},
+        "doctor_mode": {"enum": ["full", "suggest_only"]},
         # v0.5.0+ 新增字段（非 required，老 agent 可忽略）
         "suggestions": {
             "type": "array",
