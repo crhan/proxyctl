@@ -119,7 +119,9 @@ def _t_engine(backend, config) -> TopicCard:
         "topic": "engine",
         "summary": (
             f"代理引擎（后端）。当前：{backend.name}。"
-            "支持 mihomo / sing-box；通过 proxyctl engine <name> 切换后端，"
+            "支持 mihomo（首发，端到端验证）/ sing-box（预留，未端到端验证 — "
+            "类 / 路径 / audit / trace 解析已实现，但完整启停闭环未跑过生产）；"
+            "通过 proxyctl engine <name> 切换后端，"
             "通过 proxyctl mode <tun|proxy> 切换流量入站方式。"
         ),
         "file": f"{backend.config_file}",
@@ -997,7 +999,7 @@ COMMANDS_META: list[dict] = [
      "supports_json": False, "side_effects": ["config-write"],
      "supports_dry_run": True,
      "needs_sudo": True, "interactive": False,
-     "exit_codes": [0, 1, 2, 4, 6, 8],
+     "exit_codes": [0, 1, 2],
      "examples": ["proxyctl mode tun", "proxyctl mode tun --dry-run"]},
     {"name": "engine", "group": "config", "summary": "切换代理引擎后端",
      "args": [{"name": "target", "choices": ["mihomo", "singbox"], "required": False}],

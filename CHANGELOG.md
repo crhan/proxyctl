@@ -5,6 +5,69 @@
 
 ## [Unreleased]
 
+## [0.4.6] — 2026-05-19
+
+> 全仓库矛盾审计 + 修复。0.4.5 修了订阅描述的双立场矛盾后，"举一反三"
+> 三个并发 agent 通查全仓，又找到 4 处类似的「文档说不做 / 实际做了」
+> 或「metadata 撒谎」的矛盾。零行为变更、零 schema 变更。
+
+### Fixed — ARCHITECTURE.md 9 处死引用（P0）
+
+整篇文档基于早已不存在的 `bin/proxyctl` + `lib/engine/` 目录结构写作，
+但项目早就重构为 PEP 517 / `src/proxyctl/` 布局。9 处死引用一次清理：
+
+- 三层架构图：`CLI 层 (bin/)` → `CLI 层 (src/proxyctl/cli.py)`；
+  `工具层 (lib/)` → `工具层 (src/proxyctl/*.py)`
+- 后端抽象代码示例：`# lib/engine/base.py` → `# src/proxyctl/engine/base.py`
+- 目录结构图：整段重写，含 `src/proxyctl/` 全部子模块（_io / subscription /
+  explain / completion / builtin_plugins / core / engine）+ tests / systemd /
+  launchdaemons / man / config.yaml.example / pyproject.toml / uv.lock 等
+- 「添加新后端 / 添加新命令」开发指南：路径全更新（含 dispatcher 表
+  `_DISPATCH` 注册 + COMMANDS_META metadata 字段说明 + supported_features
+  flag 流程）
+- 测试段：`python3 bin/proxyctl status` → `uv run proxyctl status`
+
+### Fixed — `explain engine` sing-box 立场对齐（P0，复刻 0.4.5 模式）
+
+`explain.py:122` `_t_engine` topic 仍说"支持 mihomo / sing-box"——与
+README v0.4.4 / config.yaml.example 已经明确的"sing-box 预留 / 未端到端
+验证"打架，agent 看到这条立场会以为 sing-box 完整可用。
+
+```diff
+- "支持 mihomo / sing-box；..."
++ "支持 mihomo（首发，端到端验证）/ sing-box（预留，未端到端验证 —
++  类 / 路径 / audit / trace 解析已实现，但完整启停闭环未跑过生产）；..."
+```
+
+### Fixed — `mode` 命令 exit_codes metadata 撒谎（P1）
+
+`explain.py:1000` 的 COMMANDS_META 里 `mode` 命令声称 `exit_codes:
+[0, 1, 2, 4, 6, 8]`，但 `cmd_mode` 实际只可能返回 `[0, 1, 2]`（仅
+`_io.fail(code=_io.USAGE)` 一处 fail 路径）。`4 CONFIG_ERR / 6 PERMISSION
+/ 8 LOCKED` 都没有任何代码路径产生。agent 用 metadata 做错误分类会按
+不可能的 code 路由。修正为 `[0, 1, 2]`。
+
+### Fixed — README 版本示例号过期（P1，流程问题）
+
+`README.md:167` 还是 `# → proxyctl v0.4.3`，实际跟随发版号应是当前最新。
+本版更新到 `v0.4.6`。每次发版后需要 grep README 里的版本号 example，
+**记入 release-process backlog**。
+
+### Audit 结果总结
+
+3 个并发 agent 扫了 6 个方向，验证后真实矛盾：4 条（P0 × 2 + P1 × 2）。
+误判撤销：2 条（agent_guide_sections 数错 / hints 措辞瑕疵不是问题）。
+P2 留 backlog：`recover` exit_codes NOT_FOUND(3) 缺漏、`daemon`
+needs_sudo 不区分子命令、Backend 双胞胎类。
+
+### Meta — 元模式总结（非代码变更）
+
+矛盾的结构性根因：同一立场散落在 ≥3 处（README / agent-guide / explain
+topic / COMMANDS_META / 代码 docstring），任意一处变更其他处不会自动
+同步。**3 轮（0.4.4 sub 漏 docs / 0.4.5 docs 补 / 0.4.6 engine + arch
+再补）后**仍未结构性解决，下次如再栽，考虑：(a) 集中字符串常量到
+single source；(b) 加 lint 测试 grep 关键短语在文档间一致。本版不做。
+
 ## [0.4.5] — 2026-05-19
 
 > v0.4.4 收尾补丁：补齐 agent 自描述链路对订阅显示能力的发现性。

@@ -62,30 +62,34 @@ config.yaml 不是静态文件，而是：
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    CLI 层 (bin/)                         │
-│  proxyctl - 主入口，命令解析                              │
+│              CLI 层 (src/proxyctl/cli.py)                │
+│  proxyctl - 主入口，命令解析 + dispatcher                  │
 └────────────────────┬────────────────────────────────────┘
                      │
 ┌────────────────────▼────────────────────────────────────┐
-│                  工具层 (lib/)                           │
-│  status.py  - 状态面板                                   │
-│  check.py   - 健康检查                                   │
-│  trace.py   - 链路诊断                                   │
-│  audit.py   - 配置审计                                   │
-│  engine/    - 后端抽象                                   │
+│              工具层 (src/proxyctl/*.py)                   │
+│  status.py        - 状态面板                              │
+│  check.py         - 健康检查 + bench                      │
+│  trace.py         - 链路诊断                              │
+│  audit.py         - 配置审计                              │
+│  subscription.py  - 订阅状态读取（v0.4.4+）                │
+│  explain.py       - 速查 + agent-guide 渲染                │
+│  _io.py           - envelope / 退出码 / I/O 抽象            │
+│  engine/          - 后端抽象                              │
+│  core/plugin.py   - 用户插件加载                            │
 └────────────────────┬────────────────────────────────────┘
                      │
 ┌────────────────────▼────────────────────────────────────┐
-│                 后端层 (engine/)                         │
-│  MihomoBackend   - Mihomo (Clash Meta) 实现              │
-│  SingboxBackend  - Sing-box 实现（预留）                 │
+│              后端层 (src/proxyctl/engine/)                │
+│  MihomoBackend   - Mihomo (Clash Meta) 实现 — 首发         │
+│  SingboxBackend  - Sing-box 实现（预留，未端到端验证）       │
 └─────────────────────────────────────────────────────────┘
 ```
 
 ### 后端抽象
 
 ```python
-# lib/engine/base.py
+# src/proxyctl/engine/base.py
 class Backend(ABC):
     @property
     def label(self) -> str: ...
@@ -103,39 +107,53 @@ class Backend(ABC):
 
 ### 目录结构
 
+> 以下为真实目录树（PEP 517 / `src/` layout，由 `uv build` 打包）。
+
 ```
 proxyctl/
-├── bin/
-│   └── proxyctl              # 主入口
-├── lib/
-│   ├── status.py             # 状态面板
-│   ├── check.py              # 健康检查 + bench
-│   ├── trace.py              # 链路诊断
-│   ├── audit.py              # 配置审计
-│   └── engine/               # 后端抽象
-│       ├── __init__.py
-│       ├── base.py           # Backend 接口
-│       ├── mihomo.py         # Mihomo 实现
-│       └── singbox.py        # Sing-box 实现（预留）
-├── scripts/
-│   ├── dns-watchdog          # DNS 看门狗
-│   └── stuck-snapshot        # 故障现场抓取
-├── launchdaemons/
+├── src/
+│   └── proxyctl/                 # Python 包根
+│       ├── __init__.py           # __version__（通过 importlib.metadata 动态读 pyproject）
+│       ├── cli.py                # 主入口 + dispatcher + Backend 抽象 + lifecycle/dry-run/plan
+│       ├── _io.py                # envelope v2 / 退出码 / set_no_color / extract_flags
+│       ├── status.py             # 状态面板
+│       ├── check.py              # 健康检查 + bench + _collect_fail_hints
+│       ├── trace.py              # 链路诊断
+│       ├── audit.py              # 配置审计 + apply
+│       ├── subscription.py       # 订阅状态读取（v0.4.4+）
+│       ├── explain.py            # explain topics + COMMANDS_META + agent-guide markdown
+│       ├── completion.py         # bash/zsh/fish 补全脚本生成
+│       ├── builtin_plugins/      # 内置 StatusSection / RouteHook 插件
+│       ├── core/
+│       │   └── plugin.py         # 插件加载 + 注册中心
+│       └── engine/               # 后端抽象
+│           ├── __init__.py
+│           ├── base.py           # Backend 接口
+│           ├── mihomo.py         # Mihomo 实现 — 首发
+│           └── singbox.py        # Sing-box 实现（预留，未端到端验证）
+├── tests/
+│   ├── integration/              # 端到端 + contract 测试
+│   └── unit/                     # 各模块单元测试
+├── launchdaemons/                # macOS plist（launchctl bootstrap）
 │   ├── com.mihomo.tun.plist
 │   ├── com.singbox.tun.plist
 │   └── com.proxyctl.dns-lock.plist
-├── config/
-│   └── config.yaml.example   # 配置模板
-├── docs/
-│   ├── FEATURES.md           # 功能清单
-│   └── INSTALL.md            # 安装指南
-├── install.sh                # 安装脚本
-├── uninstall.sh              # 卸载脚本
-├── README.md                 # 使用文档
-├── AGENTS.md                 # 仓库视角的 Agent 协作约定（编辑源码时读）
-├── LLMS.md                   # 指向 AGENTS.md 与 proxyctl agent-guide 的 stub
-├── MIGRATION-0.3.md          # 0.2.x → 0.3.0 破坏点清单与迁移指南
-└── ARCHITECTURE.md           # 本文件
+├── systemd/                      # Linux user units（systemctl --user）
+│   ├── mihomo.service
+│   └── sing-box.service
+├── man/proxyctl.1                # man page
+├── scripts/                      # 辅助脚本
+├── config.yaml.example           # proxyctl 配置模板
+├── install.sh                    # 双平台安装脚本（macOS / Linux）
+├── uninstall.sh
+├── pyproject.toml                # 项目元数据 / build 配置
+├── uv.lock                       # 依赖锁
+├── README.md                     # 使用文档
+├── AGENTS.md                     # 仓库视角的 Agent 协作约定（编辑源码时读）
+├── LLMS.md                       # 指向 AGENTS.md 与 proxyctl agent-guide 的 stub
+├── MIGRATION-0.3.md              # 0.2.x → 0.3.0 破坏点清单与迁移指南
+├── CHANGELOG.md                  # 版本历史（Keep a Changelog 格式）
+└── ARCHITECTURE.md               # 本文件
 ```
 
 ## 核心工具
@@ -215,23 +233,32 @@ dns_lock_label: com.proxyctl.dns-lock
 
 ### 添加新后端
 
-1. 在 `lib/engine/` 下创建新的后端类，继承 `Backend`
-2. 实现所有抽象方法
-3. 在 `bin/proxyctl` 中注册新后端
+1. 在 `src/proxyctl/engine/` 下创建新的后端类，继承 `Backend`（见 `engine/base.py`）
+2. 实现所有抽象方法（`label / plist / config_file / cache_file / log_file / api_url / get_mode`）
+3. 在 `src/proxyctl/cli.py` 的 `get_backend()` 中加入分支注册
+4. 注：cli.py 内目前还有一份历史遗留的 `MihomoBackend / SingboxBackend` 定义（双胞胎），合并是已知 backlog
 
 ### 添加新命令
 
-1. 在 `lib/` 下创建新模块
+1. 在 `src/proxyctl/` 下扩展或新建模块（小命令直接加在 cli.py，大命令拆模块如 status.py / check.py）
 2. 实现 `cmd_*` 函数
-3. 在 `bin/proxyctl` 的 `main()` 中注册命令
+3. 在 `src/proxyctl/cli.py` 的 dispatcher 表（`_DISPATCH`）中注册 handler
+4. 在 `src/proxyctl/explain.py` 的 `COMMANDS_META` 中加 metadata（summary / args / exit_codes / examples / side_effects / needs_sudo / supports_dry_run / supports_json）
+5. 如有新能力探针，在 `cli.py` 的 `supported_features` 字典中加 flag = True
 
 ### 测试
 
 ```bash
-# 本地测试
-python3 bin/proxyctl status
+# 跑全量
+uv run pytest -q
 
-# 调试模式
+# 单独跑某模块
+uv run pytest tests/unit/test_check.py -xvs
+
+# 用本地源码版本跑命令（不需 install）
+uv run proxyctl status
+
+# 调试模式（启用更多日志）
 export PROXYCTL_DEBUG=1
 ```
 

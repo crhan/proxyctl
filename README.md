@@ -164,7 +164,7 @@ uv tool install proxyctl                # uv（推荐）
 pipx install proxyctl                   # 或 pipx
 pip install --user proxyctl             # 或 pip
 
-proxyctl --version                      # → proxyctl v0.4.3
+proxyctl --version                      # → proxyctl v0.4.6
 proxyctl --help
 ```
 
