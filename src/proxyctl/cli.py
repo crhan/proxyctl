@@ -6,6 +6,7 @@
                mode|audit|trace|bench|dns-lock|dns-unlock]
 """
 
+import functools
 import json
 import os
 import platform
@@ -248,6 +249,69 @@ def run_out(cmd: list, *, sudo: bool = False) -> str:
     """执行命令，返回 stdout；失败返回空字符串。"""
     r = run(cmd, sudo=sudo, capture=True)
     return r.stdout.strip() if r.returncode == 0 else ""
+
+
+@functools.lru_cache(maxsize=4)
+def get_engine_version(backend_name: str) -> dict | None:
+    """运行 `<backend> -v` 解析引擎版本信息。
+
+    proxyctl 是引擎生命周期管理器，但之前没在任何 status 里显示引擎版本——
+    导致 debug TUIC / DNS 问题时无法快速判定"是不是引擎版本 regression"。
+    本函数填补此缺陷（v0.4.7+）。
+
+    Args:
+        backend_name: "mihomo" / "singbox" / 等等。
+
+    Returns:
+        dict 或 None（binary 找不到 / -v 失败 / 解析失败）:
+            {
+              "binary":     "/opt/homebrew/bin/mihomo",
+              "version":    "1.19.25",
+              "platform":   "darwin arm64",
+              "go_version": "1.26.3",
+              "build_date": "2026-05-16",
+              "raw":        "Mihomo Meta 1.19.25 darwin arm64 with go1.26.3 2026-05-16T14:37:07Z",
+            }
+
+    mihomo -v 输出范本:
+        Mihomo Meta 1.19.25 darwin arm64 with go1.26.3 2026-05-16T14:37:07Z
+        Use tags: with_gvisor
+
+    sing-box version 输出范本 (供后续扩展):
+        sing-box version 1.10.0
+        Environment: go1.22.5 darwin/arm64
+        Tags: ...
+
+    LRU cache 4 项：避免每次 status 都跑 subprocess（同进程内常量）。
+    """
+    import shutil
+    import re
+    binary = shutil.which(backend_name)
+    if not binary:
+        return None
+    try:
+        r = subprocess.run([binary, "-v"], capture_output=True, text=True, timeout=3)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    out = (r.stdout or "").strip()
+    if not out or r.returncode != 0:
+        return None
+    raw = out.split("\n", 1)[0].strip()
+    info: dict = {"binary": binary, "raw": raw}
+    # 匹配 mihomo: "Mihomo Meta 1.19.25 darwin arm64 with go1.26.3 2026-05-16T14:37:07Z"
+    m = re.match(
+        r"^\S+\s+\S+\s+(\S+)\s+(\S+\s+\S+)\s+with\s+go(\S+)\s+(\S+)",
+        raw,
+    )
+    if m:
+        info["version"] = m.group(1)
+        info["platform"] = m.group(2)
+        info["go_version"] = m.group(3)
+        info["build_date"] = m.group(4).split("T")[0]
+    else:
+        # 兜底：能拿到 raw 就行，version 字段留空让 agent 自己处理
+        info["version"] = None
+    return info
 
 
 def wait_port(port: int, timeout: float = 10.0) -> bool:
@@ -1584,6 +1648,7 @@ def cmd_version_print() -> None:
                 "lifecycle_dry_run":       True,   # 0.4.2: start/stop/restart/recover --dry-run
                 "version_subcommand":      True,   # 0.4.2: `proxyctl version` 子命令
                 "status_subscription":     True,   # 0.4.4: status envelope.data.subscription
+                "engine_version":          True,   # 0.4.7: status/doctor data.engine_version (mihomo -v)
             },
         }
         _io.emit_json(_io.envelope("version", data=data))

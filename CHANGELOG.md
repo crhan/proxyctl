@@ -5,6 +5,91 @@
 
 ## [Unreleased]
 
+## [0.4.7] — 2026-05-19
+
+> proxyctl 是引擎生命周期管理 CLI，但**之前任何位置都不显示引擎版本号**——
+> debug TUIC / DNS 等引擎层问题时无法快速定位"是否引擎版本 regression"。
+> 本版填补此缺陷：`status` / `doctor` 人类与 JSON 输出全部带 mihomo 版本。
+> 零行为变更、零 schema 变更（envelope.data 新增字段不破坏 v2）。
+
+### Added — `get_engine_version()` helper
+
+`src/proxyctl/cli.py` 新增：
+
+```python
+@functools.lru_cache(maxsize=4)
+def get_engine_version(backend_name: str) -> dict | None:
+    """运行 `<backend> -v` 解析引擎版本信息。
+
+    Returns dict 或 None（binary 找不到 / -v 失败 / 解析失败）：
+        {
+          "binary":     "/opt/homebrew/bin/mihomo",
+          "version":    "1.19.25",
+          "platform":   "darwin arm64",
+          "go_version": "1.26.3",
+          "build_date": "2026-05-16",
+          "raw":        "Mihomo Meta 1.19.25 darwin arm64 with go1.26.3 ...",
+        }
+    """
+```
+
+设计要点：
+- `shutil.which(name)` 找 binary，跑 `<binary> -v`，3s timeout
+- 解析 mihomo `Mihomo Meta <ver> <platform> with go<ver> <ISO-date>` 格式
+- 解析失败时仍返回 dict（含 raw），`version=None` —— agent 可拿原文兜底
+- `@functools.lru_cache(maxsize=4)` 同进程内常量缓存，避免 status 每次都跑 subprocess
+
+### Added — `status` 显示引擎版本
+
+人类模式首行：
+
+```
+引擎  mihomo v1.19.25 (2026-05-16, go1.26.3) · proxy
+```
+
+`status --json` envelope.data.engine 新增 `version` 子字段（完整 dict）。
+
+### Added — `doctor` 显示引擎版本
+
+人类模式打分行：
+
+```
+proxyctl doctor  (5/5)  engine=mihomo v1.19.25 mode=proxy port=7890
+```
+
+`doctor --json` envelope.data 新增 `engine_version` 字段（完整 dict）。
+
+### Added — `supported_features.engine_version = true`
+
+agent 探测 0.4.7+ 可直接消费 `engine_version`，无需 fallback。
+
+### Added — 测试覆盖 6 个
+
+`tests/unit/test_cli_helpers.py` 新增：
+- happy parse（标准 mihomo -v 输出）
+- binary not found → None
+- 非 0 退出码 → None
+- 解析失败但保留 raw（version=None）
+- LRU cache 命中（删 binary 后第二次仍拿到结果）
+- 必要字段集合烟雾测
+
+### Backstory
+
+今天 debug TUIC 全死时，最初没意识到 mihomo 版本（1.19.24）才升级到了 4 月底。
+直到我自己跑 `mihomo -v` 才发现版本，绕了几圈才把"升级 mihomo 看看"
+列入诊断方向。`status` 本来就该一眼看到——本来是 1 句话的诊断变成了几轮探索。
+
+### Known: TUIC 当前仍 21/21 死
+
+mihomo 1.19.24 → 1.19.25 升级**未解决** TUIC dial 不发包问题。HTTP 节点 21/21
+全活，实际使用无影响（mihomo Fallback 自动路由 proxy → proxy-http）。
+深入修 TUIC 留 backlog（可能要试 `udp-relay-mode: native` / `reduce-rtt: false`
+/ 或者 mihomo TUIC client 实现 bug 上游 issue）。
+
+### Test stats
+
+总测试数 547 → **553**（+6 engine version helper）。
+
 ## [0.4.6] — 2026-05-19
 
 > 全仓库矛盾审计 + 修复。0.4.5 修了订阅描述的双立场矛盾后，"举一反三"

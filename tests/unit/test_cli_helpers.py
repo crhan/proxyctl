@@ -195,3 +195,91 @@ def test_cli_get_mode_singbox_tun(tmp_path: Path):
 def test_cli_get_mode_missing_file(tmp_path: Path):
     b = SimpleNamespace(name="mihomo", config_file=str(tmp_path / "nope.yaml"))
     assert cli.get_mode(b) == "unknown"
+
+
+# ─────────────────────────────────────────────────────────────
+# get_engine_version (v0.4.7+) — 跑 `<backend> -v` 解析引擎版本
+# ─────────────────────────────────────────────────────────────
+
+def _make_fake_binary(tmp_path: Path, name: str, stdout: str,
+                     returncode: int = 0) -> Path:
+    """构造一个可执行 shell 脚本，假装是引擎 binary。"""
+    p = tmp_path / name
+    p.write_text(f"#!/bin/sh\ncat <<'EOF'\n{stdout}\nEOF\nexit {returncode}\n")
+    p.chmod(0o755)
+    return p
+
+
+def _isolate_path(monkeypatch, *binary_paths: Path):
+    """把 PATH 限到只含给定 binary 所在目录 + 必要系统路径，避免命中真 mihomo。"""
+    dirs = list({str(p.parent) for p in binary_paths})
+    cli.get_engine_version.cache_clear()
+    monkeypatch.setenv("PATH", ":".join(dirs) + ":/usr/bin:/bin")
+
+
+def test_get_engine_version_mihomo_parse_happy(tmp_path: Path, monkeypatch):
+    """mihomo -v 标准输出能完整解析 version / platform / go_version / build_date。"""
+    bin_ = _make_fake_binary(tmp_path, "mihomo",
+        "Mihomo Meta 1.19.25 darwin arm64 with go1.26.3 2026-05-16T14:37:07Z\n"
+        "Use tags: with_gvisor")
+    _isolate_path(monkeypatch, bin_)
+
+    info = cli.get_engine_version("mihomo")
+    assert info is not None
+    assert info["version"] == "1.19.25"
+    assert info["platform"] == "darwin arm64"
+    assert info["go_version"] == "1.26.3"
+    assert info["build_date"] == "2026-05-16"
+    assert info["binary"].endswith("/mihomo")
+    assert "Mihomo Meta 1.19.25" in info["raw"]
+
+
+def test_get_engine_version_binary_not_found(monkeypatch):
+    """binary 找不到 → 返回 None，不抛异常。"""
+    cli.get_engine_version.cache_clear()
+    monkeypatch.setenv("PATH", "/nonexistent/dir/only")
+    assert cli.get_engine_version("nope-engine-xyz") is None
+
+
+def test_get_engine_version_nonzero_returncode(tmp_path: Path, monkeypatch):
+    """binary 存在但 -v 退出非 0 → 返回 None。"""
+    bin_ = _make_fake_binary(tmp_path, "weird-engine", "some output", returncode=2)
+    _isolate_path(monkeypatch, bin_)
+    assert cli.get_engine_version("weird-engine") is None
+
+
+def test_get_engine_version_unparseable_output_keeps_raw(tmp_path: Path, monkeypatch):
+    """输出格式不认得 → 返回 dict 但 version=None，raw 保留。
+
+    设计意图：让 agent 能拿到原始字符串，不至于解析失败丢失全部信息。
+    """
+    bin_ = _make_fake_binary(tmp_path, "exotic-engine", "completely different format")
+    _isolate_path(monkeypatch, bin_)
+    info = cli.get_engine_version("exotic-engine")
+    assert info is not None
+    assert info["version"] is None
+    assert "completely different" in info["raw"]
+
+
+def test_get_engine_version_lru_cache_reuses_result(tmp_path: Path, monkeypatch):
+    """走 lru_cache，第二次不重跑 subprocess（避免 status 浪费）。"""
+    bin_ = _make_fake_binary(tmp_path, "mihomo",
+        "Mihomo Meta 9.9.9 linux x86_64 with go1.99.0 2099-01-01T00:00:00Z")
+    _isolate_path(monkeypatch, bin_)
+
+    first = cli.get_engine_version("mihomo")
+    bin_.unlink()  # 删 binary，第二次仍应命中缓存
+    second = cli.get_engine_version("mihomo")
+    assert first == second
+    assert second["version"] == "9.9.9"
+
+
+def test_get_engine_version_returns_dict_when_called(tmp_path: Path, monkeypatch):
+    """烟雾测：返回 dict 含必要字段。"""
+    bin_ = _make_fake_binary(tmp_path, "mihomo",
+        "Mihomo Meta 1.0.0 darwin arm64 with go1.20.0 2024-01-01T00:00:00Z")
+    _isolate_path(monkeypatch, bin_)
+    info = cli.get_engine_version("mihomo")
+    assert info is not None
+    for k in ("binary", "raw", "version", "platform", "go_version", "build_date"):
+        assert k in info, f"missing key {k}"

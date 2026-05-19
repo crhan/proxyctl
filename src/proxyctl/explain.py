@@ -1443,7 +1443,7 @@ def cmd_doctor(args: list, backend, config) -> None:
     as_json = GLOBAL_FLAGS_REF().get("json", False)
 
     # 从 cli.py 复用 service_running，但为避免循环 import 在这里独立判断
-    from proxyctl.cli import service_running, get_mode
+    from proxyctl.cli import service_running, get_mode, get_engine_version
     port = config.get("proxy_port", 7890)
     api_base = config.get("api_base", "http://127.0.0.1:9090")
 
@@ -1482,6 +1482,7 @@ def cmd_doctor(args: list, backend, config) -> None:
         "hint": hint,
         # informational fields (W15 in 0.3.0):
         "engine": backend.name,
+        "engine_version": get_engine_version(backend.name),  # v0.4.7+, None 即未知
         "mode": mode_str,
         "port": port,
         "config_path": _io_proxyctl_config_path(),
@@ -1497,8 +1498,10 @@ def cmd_doctor(args: list, backend, config) -> None:
         sys.exit(code)
 
     icon = lambda b: f"{GREEN}✓{NC}" if b else f"{RED}✗{NC}"
+    ev = data.get("engine_version") or {}
+    ev_tag = f" v{ev['version']}" if ev.get("version") else ""
     print(f"{BOLD}proxyctl doctor{NC}  ({score}/{len(flags)})  "
-          f"{DIM}engine={backend.name} mode={mode_str} port={port}{NC}")
+          f"{DIM}engine={backend.name}{ev_tag} mode={mode_str} port={port}{NC}")
     print(f"  {icon(engine_up)}  engine_up        ({backend.name} 服务运行中)")
     print(f"  {icon(port_listen)}  port_listen      (127.0.0.1:{port})")
     print(f"  {icon(dns_ok)}  dns_ok           (系统 DNS 含 127.0.0.1)")

@@ -16,6 +16,7 @@ GREEN  = "\033[0;32m"
 YELLOW = "\033[0;33m"
 CYAN   = "\033[0;36m"
 BOLD   = "\033[1m"
+DIM    = "\033[2m"
 NC     = "\033[0m"
 
 from proxyctl._io import maybe_disable_module_colors as _pc_maybe_disable
@@ -68,7 +69,10 @@ def _ifconfig_ip(iface: str) -> str:
 # ── 数据采集函数（可并发） ────────────────────────────────────────────────────
 
 def _gather_engine(engine) -> dict:
-    """采集引擎进程信息：PID、运行次数、运行时间。"""
+    """采集引擎进程信息：PID、运行次数、运行时间、版本（v0.4.7+）。"""
+    from proxyctl.cli import get_engine_version
+    version_info = get_engine_version(engine.name)  # None / dict
+
     if IS_LINUX:
         # systemd --user：用 systemctl show 获取 PID
         r = subprocess.run(
@@ -83,7 +87,8 @@ def _gather_engine(engine) -> dict:
             r2 = subprocess.run(["ps", "-o", "etime=", "-p", pid],
                                 capture_output=True, text=True)
             etime = r2.stdout.strip()
-        return {"pid": pid, "runs": runs, "daemon_up": daemon_up, "etime": etime}
+        return {"pid": pid, "runs": runs, "daemon_up": daemon_up,
+                "etime": etime, "version": version_info}
 
     # macOS: launchctl
     pid   = _launchctl_pid(engine.label)
@@ -94,7 +99,8 @@ def _gather_engine(engine) -> dict:
         r = subprocess.run(["ps", "-o", "etime=", "-p", pid],
                            capture_output=True, text=True)
         etime = r.stdout.strip()
-    return {"pid": pid, "runs": runs, "daemon_up": daemon_up, "etime": etime}
+    return {"pid": pid, "runs": runs, "daemon_up": daemon_up,
+            "etime": etime, "version": version_info}
 
 
 def _gather_ports(claude_proxy_label: str,
@@ -312,7 +318,14 @@ def _print_engine(engine, mode: str, d_engine: dict, d_ports: dict):
     else:
         mode_tag = f"{YELLOW}{mode}{NC}"
 
-    print(f"{BOLD}引擎{NC}  {GREEN}{engine.name}{NC} · {mode_tag}")
+    # 引擎名 + 模式 + 版本号（v0.4.7+，引擎 binary 找不到时只显示名字）
+    ver = d_engine.get("version") or {}
+    ver_str = ""
+    if ver.get("version"):
+        ver_str = f" {DIM}v{ver['version']}{NC}"
+        if ver.get("build_date"):
+            ver_str += f" {DIM}({ver['build_date']}, go{ver.get('go_version','?')}){NC}"
+    print(f"{BOLD}引擎{NC}  {GREEN}{engine.name}{NC}{ver_str} · {mode_tag}")
 
     if d_engine["daemon_up"]:
         runs_str = (f"  {YELLOW}runs={d_engine['runs']}{NC}"
