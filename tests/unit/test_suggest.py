@@ -193,3 +193,50 @@ def test_idempotent_calls_same_output(_state):
     out2 = suggest.build_suggestions(sub=sub)
     # first_seen 相同 → 整体输出相同
     assert out1 == out2
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# autostart 接入
+# ────────────────────────────────────────────────────────────────────────────
+
+def _autostart_inspect_unit_missing() -> dict:
+    return {
+        "platform": "darwin",
+        "unit_path": "/Library/LaunchDaemons/com.mihomo.tun.plist",
+        "unit_exists": False,
+        "binary": None,
+        "binary_exists": False,
+        "config_dir": None,
+        "placeholder_unrendered": False,
+        "raw_snippet": "",
+        "errors": [],
+    }
+
+
+def test_build_combines_subscription_and_autostart(_state):
+    sub = _ok_sub(expire_days_left=5)
+    out = suggest.build_suggestions(
+        sub=sub,
+        autostart_inspect=_autostart_inspect_unit_missing(),
+    )
+    ids = [s["id"] for s in out]
+    assert "subscription.expiring_soon" in ids
+    assert "autostart.unit_missing" in ids
+
+
+def test_build_autostart_none_skips_group(_state):
+    out = suggest.build_suggestions(
+        sub=_ok_sub(),
+        autostart_inspect=None,
+    )
+    assert out == []
+
+
+def test_build_sort_warn_before_advisory_across_groups(_state):
+    """autostart.unit_missing (warn) 排在 subscription.expiring_soon (advisory) 前。"""
+    out = suggest.build_suggestions(
+        sub=_ok_sub(expire_days_left=5),
+        autostart_inspect=_autostart_inspect_unit_missing(),
+    )
+    assert out[0]["severity"] == "warn"
+    assert out[0]["id"] == "autostart.unit_missing"

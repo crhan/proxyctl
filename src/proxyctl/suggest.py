@@ -155,6 +155,10 @@ def _decorate(raw: list[dict[str, Any]], *,
 
 def build_suggestions(*, sub: dict[str, Any] | None = None,
                       sub_explicit_missing: bool = False,
+                      autostart_inspect: dict[str, Any] | None = None,
+                      path_binary: str | None = None,
+                      path_version: str | None = None,
+                      expected_config_dir: str | None = None,
                       persist_state: bool = True,
                       _extra_raw: list[dict[str, Any]] | None = None,
                       ) -> list[dict[str, Any]]:
@@ -165,13 +169,19 @@ def build_suggestions(*, sub: dict[str, Any] | None = None,
         sub_explicit_missing: True 才输出 subscription.missing；False 时 None 静默
             （doctor 调用方期望"未配置订阅 = 静默"是默认；用户主动跑 --hint-missing
              才显示）
+        autostart_inspect: autostart.inspect_static / inspect_runtime 返回；
+            None 表示跳过整组（如非首发平台）
+        path_binary: shutil.which(backend_name) 结果（用于 autostart.binary_mismatch）
+        path_version: PATH binary 的版本（来自 cli.get_engine_version）
+        expected_config_dir: backend 期望的 config_dir
+            （用于 autostart.config_dir_mismatch）
         persist_state: 是否写 state 文件（测试可关）
         _extra_raw: 测试/未来扩展注入额外 raw suggestions（不经过 subscription）
 
     Returns:
         排序后的 suggestion 列表，每条含完整 schema v1 字段。
     """
-    from proxyctl import subscription
+    from proxyctl import subscription, autostart as _autostart
 
     raw: list[dict[str, Any]] = []
 
@@ -180,10 +190,15 @@ def build_suggestions(*, sub: dict[str, Any] | None = None,
     elif sub is not None:
         raw.extend(subscription.to_suggestions(sub))
 
-    # autostart / security / engine_data 等规则模块在 commit 2/3 接入：
-    # raw.extend(autostart.to_suggestions(...))
-    # raw.extend(security.to_suggestions(...))
-    # raw.extend(engine_data.to_suggestions(...))
+    if autostart_inspect is not None:
+        raw.extend(_autostart.to_suggestions(
+            autostart_inspect,
+            path_binary=path_binary,
+            path_version=path_version,
+            expected_config_dir=expected_config_dir,
+        ))
+
+    # security / engine_data 等规则模块在 commit 3 接入
 
     if _extra_raw:
         raw.extend(_extra_raw)
