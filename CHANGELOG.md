@@ -7,63 +7,62 @@
 
 ## [0.5.1] — 2026-05-19
 
-> 修 v0.5.0 controller_rules 的**设计 bug**（哥 2026-05-19 跑 doctor
-> 时立刻指出的反馈："只有本机才能访问为什么还要看密钥复杂度？
-> 这是设计问题吧"）。
+### Fixed
 
-### Fixed — controller 规则改为复合判定（以 attack surface 为单一判定轴）
+- `controller.empty_secret` / `controller.weak_secret` 不再在 bind
+  `127.0.0.1` / `::1` 时触发。Attack surface 是单一前置条件：本机回环
+  时 secret 强度无意义，规则跳过。
 
-旧逻辑（v0.5.0）：empty_secret / weak_secret / public_bind 各自独立判断，
-导致 `bind=127.0.0.1` + `secret 长度 < 16` 也会触发 weak_secret advisory。
-但本机回环根本不存在 attack surface，规则纯属噪音。
+  | bind | secret | 行为 |
+  |---|---|---|
+  | `127.0.0.1` / `::1` | 任意（含空） | 不报 |
+  | `0.0.0.0` / LAN IP | ≥ 16 字符 | 仅 `public_bind` warn |
+  | `0.0.0.0` / LAN IP | 非空 < 16 字符 | `public_bind` warn + `weak_secret` advisory |
+  | `0.0.0.0` / LAN IP | 空 | `public_bind` warn + `empty_secret` warn |
 
-新逻辑（v0.5.1）：
-
-| bind             | secret            | 行为                                |
-|------------------|-------------------|-------------------------------------|
-| `127.0.0.1`/`::1`| 任意（含空）      | **不报**                            |
-| `0.0.0.0`/LAN IP | 强（≥ 16）        | 仅 `public_bind` warn              |
-| `0.0.0.0`/LAN IP | 弱（< 16 但非空） | `public_bind` warn + `weak_secret` advisory |
-| `0.0.0.0`/LAN IP | 空                | `public_bind` warn + `empty_secret` warn |
-
-文案也更新：empty_secret / weak_secret title 中明确写"bind 公网（X）且
-secret ..."，避免用户继续疑惑"我 bind 127.0.0.1 你提它干嘛"。
-
-### Updated — controller 三个 explain topic
-
-每条 topic 的 summary 段加入 "v0.5.1+ 此规则仅在公网 bind 时触发" 声明；
-`edit` 段把"改回 127.0.0.1 bind"作为**首选修复路径**（而不是首推升级 secret，
-因为对大多数本机用户来说收回 bind 比生成新 secret 简单且更安全）。
-
-### 验证
-
-pytest 全 suite：683+ passed（含新 6 个复合判定测试）。
-实地：哥本机 `doctor` 不再报 weak_secret（bind=127.0.0.1 + secret 14 字符）。
+- `controller.empty_secret` / `weak_secret` 的 `title` 段明确标注 bind
+  地址，避免误读。
+- `proxyctl explain suggestion:controller.*` 三个 topic 的修复路径
+  把"改回 127.0.0.1 bind"列为首选。
 
 ## [0.5.0] — 2026-05-19
 
-> doctor 长期只是"5 项布尔健康分"，但 proxyctl 周边已经积累了一堆**值得提示**
-> 的状态信号——订阅快到期、autostart plist 指向的 mihomo 与 PATH 里的不是一个、
-> GeoIP 数据库 30 天没更新、Clash API secret 太短。这些都不算 "broken"，
-> 但 agent 跑 doctor 时应该一并暴露出来，不必让用户/agent 自己挖。
->
-> 本版加入 `data.suggestions[]` 维度（与 5 项布尔 score 完全解耦），
-> 首发 **21 条规则**覆盖订阅 / autostart / 安全 / 引擎 / 数据五类。
-> 永不影响 exit code，老 agent 透明忽略（字段追加 + additionalProperties=true）。
+### Added — Doctor 引导建议（`data.suggestions[]`）
 
-### 关键诉求来源（哥的原话）
+`proxyctl doctor` 在 5 项布尔健康分之外，新增结构化建议列表，覆盖**值得做但没做**
+的事——订阅快到期、自动启动指向旧二进制、GeoIP 过期、API 配置不安全、代理组挂掉。
+与 score 解耦，永不影响 exit code。
 
-> "doctor 能不能做的更多，比如订阅更新？还有什么功能之类的可以做一个引导提示"
-> "自动启动依赖的是什么有没有管理比如 macos 用 launchdaemon，
->  然后 launch daemon 里面使用的 mihomo 是什么路径什么版本是不是也应该有检测"
+```text
+proxyctl doctor  (5/5)  engine=mihomo v1.19.25 mode=proxy port=7890
+  ✓  engine_up        ...
+  ✓  port_listen      ...
+  ...
 
-第二条是关键：之前调试 TUIC 时栽过的坑—— PATH 装了 v1.20 但 plist 还指向 v1.15
-旧 binary，`mihomo -v` 看到新版实际服务跑老版。0.4.7 加了 engine_version 但
-只看 PATH binary，本版补齐 autostart binary 对比。
+suggestions (2/3):
+  [!] proxy_group.mostly_dead   代理组 proxy-tuic 中 21/21 节点不可达 (100%)
+  [*] subscription.expiring_soon  订阅 5 天内到期 · n2ray.dev
+  ...and 1 more (use --json)
+```
 
-### Added — Suggestion Schema v1
+**21 条规则**：
 
-每条 suggestion 字段（写进 `tests/unit/test_json_schemas.py::DOCTOR_V2`）：
+- **订阅（7）**：`subscription.expired` / `expiring_soon` /
+  `traffic_high|warn|exhausted`（70 / 90 / 100% 三档）/ `last_fetch_error` /
+  `stale` / `missing`
+- **自动启动（8）**：`autostart.unit_missing` / `binary_missing` /
+  `binary_mismatch` / `version_mismatch` / `config_dir_mismatch` /
+  `placeholder_unrendered` / `disabled` / `flapping`
+- **安全（3）**：`controller.empty_secret` / `weak_secret` / `public_bind`
+- **引擎/数据（2）**：`engine.outdated`（读 `~/.cache/proxyctl/known_versions.json`
+  契约文件）/ `data.geo_stale`（`geoip.dat` / `geosite.dat` mtime > 30 天）
+- **代理组（1）**：`proxy_group.mostly_dead`（mihomo `/proxies` API，单组
+  ≥ 70% 节点延迟为 0 即报；多组同时挂分别输出独立 suggestion，fingerprint
+  含 `group_name`）
+
+### Added — Suggestion schema v1
+
+每条 suggestion 字段：
 
 ```json
 {
@@ -82,166 +81,107 @@ pytest 全 suite：683+ passed（含新 6 个复合判定测试）。
 }
 ```
 
-设计立场：
-- **severity 三档**：info / advisory / warn —— 没有 error / critical
-  （错误走 `envelope.hints[]`，suggestion 永远是"该做的事"不是"出了事"）
-- **actor 四档**：user / agent / cron / engine —— agent 据此决策"自己干 vs 问用户"
-- **evidence 是结构化 dict**——agent 不必 regex title 拼凑事实
-- **inspect_command ≠ fix_command**：拆开避免歧义
-- **fingerprint = sha1(id)[:12]**：跨次 doctor 调用稳定去重的唯一字段，
-  抖动字段（百分比、剩余天数）不进 hash
-- **first_seen**：从 `~/.cache/proxyctl/suggestions_state.json` 读，
-  CLI 维护，agent 不必碰；持续问题不重置时间戳
-- **排序契约**：`severity desc, id asc`（写进 AGENTS.md，agent 可稳定 diff）
+- **严重度 3 档**：`info` / `advisory` / `warn`（错误走 `envelope.hints[]`）
+- **Actor 4 档**：`user` / `agent` / `cron` / `engine`，agent 据此决定
+  "自己修 vs 问用户"
+- **`evidence` 结构化**：agent 不必 regex `title` 拼凑事实
+- **`inspect_command` ≠ `fix_command`** 拆开
+- **`fingerprint`** 跨次调用稳定（默认 `sha1(id)[:12]`；规则可在
+  `FINGERPRINT_EVIDENCE_KEYS` 显式声明 evidence 关键字段，
+  如 `proxy_group.mostly_dead` 用 `group_name` 做多实例去重）
+- **`first_seen`** 持续问题不重置（持久化到
+  `~/.cache/proxyctl/suggestions_state.json`）
+- **排序**：固定 `severity desc, id asc`
 
-### Added — 首批 21 条规则
+### Added — Doctor 新 flag
 
-**订阅类（7）** —— `src/proxyctl/subscription.py::to_suggestions`：
-- `subscription.expired` warn — `expire_days_left < 0`
-- `subscription.expiring_soon` advisory — `0 ≤ days ≤ 7`
-- `subscription.traffic_exhausted` warn — `used_pct ≥ 100`
-- `subscription.traffic_warn` warn — `90 ≤ used_pct < 100`
-- `subscription.traffic_high` advisory — `70 ≤ used_pct < 90`（UX review 指出 80% 太晚，改成 70/90 两级）
-- `subscription.last_fetch_error` warn — `fetch_ok=false`
-- `subscription.stale` info — `now - updated_at > 24h`
-- `subscription.missing` info — `engine_up` 但快照不存在（仅 `--hint-missing` 触发）
+- `--suggest-only` — 跳过 5 项 score 探测，仅跑建议引擎。实测 0.18s
+  （默认含 curl 探测 2-5s）。`data` 中 5 项布尔 + `score` / `healthy`
+  置 `null`，agent 据 `data.doctor_mode`（`"full" | "suggest_only"`）识别。
+- `--since <version>` — 屏蔽 `since > <version>` 的规则。
+  `proxyctl doctor --since 0.4.7` 让老 CI 平滑迁移到 0.5.0 不爆红。
+- `--no-suggest` — 关闭建议引擎，恢复 v0.4.x 极简体验。
+- `--quiet` — 跳过 suggestion 人类输出块（`--json` 仍输出）。
 
-**Autostart 类（8）** —— 哥主动加的维度，`src/proxyctl/autostart.py`：
-- `autostart.unit_missing` warn — plist / unit 文件不存在（短路其他规则）
-- `autostart.binary_missing` warn — plist 引用的 binary 不存在
-- `autostart.binary_mismatch` advisory — plist binary ≠ `which mihomo`
-- `autostart.version_mismatch` advisory — plist binary `-v` ≠ PATH binary `-v`
-- `autostart.config_dir_mismatch` warn — plist `-d` ≠ `backend.config_dir`
-- `autostart.placeholder_unrendered` warn — plist 含 `yourname` 字面量未替换
-- `autostart.disabled` info — plist 存在但未 bootstrap / unit 未 enable
-- `autostart.flapping` warn — launchctl LastExitStatus≠0 / systemctl is-failed
+### Added — `proxyctl autostart [inspect|sync]`
 
-**安全配置类（3）** —— `src/proxyctl/suggest_rules.py`：
-- `controller.empty_secret` warn — Clash API secret == ""
-- `controller.weak_secret` advisory — secret 长度 < 16
-- `controller.public_bind` warn — external-controller bind 0.0.0.0 / 局域网 IP
+新写命令组。`sync` 把 plist / systemd unit 中的 binary 路径 + config 目录
+同步到当前 PATH 值，一键修复 `autostart.binary_mismatch` /
+`version_mismatch` / `config_dir_mismatch`：
 
-**引擎/数据/分组类（3）**：
-- `engine.outdated` info/warn — 读 `~/.cache/proxyctl/known_versions.json` 契约文件
-- `data.geo_stale` info — geoip.dat / geosite.dat mtime > 30 天
-- `proxy_group.mostly_dead` warn — 调 mihomo `/proxies` API（本地 HTTP，
-  timeout 0.5s，0 外网）。单组 ≥ 70% 节点 delay==0 即报；多组同时挂分别
-  输出独立 suggestion（fingerprint 含 group_name，agent 可分别跟踪）
+```bash
+proxyctl autostart                # 展示当前状态
+proxyctl autostart inspect --json # 结构化输出
+proxyctl autostart sync --dry-run # 预览 PlanStep[]
+proxyctl autostart sync           # 写入（macOS 需 sudo）
+```
 
-### Added — Fingerprint 升级（支持 evidence 关键字段）
+- **macOS**：`plistlib` 原地修改，保留 `KeepAlive` / `RunAtLoad` /
+  `EnvironmentVariables` 等用户已有字段
+- **Linux**：正则替换 `ExecStart=` 整行；unit 中无 `ExecStart=` 时**拒绝
+  执行**（防止覆盖被改造的 unit）
+- `side_effects`：`sync` 时 `[process, system, config-write]`，
+  `inspect` 时 `[]`
+- `exit_codes`：含 `8` (LOCKED) / `10` (DEPENDENCY_MISSING：PATH 找不到
+  binary)
 
-`FINGERPRINT_EVIDENCE_KEYS` 表：每条规则可显式声明哪些 evidence 字段
-进 fingerprint hash。proxy_group.mostly_dead 用 group_name —— 多组同时
-挂得到独立指纹，agent 可分别跟踪。抖动字段（百分比、剩余天数）禁止
-列入，否则跨次去重失效。`_compute_fingerprint()` 同时接受 dict（推荐）
-和 id 字符串（向后兼容 v0.5.0-rc 旧调用方式）。
+### Added — 用户级屏蔽文件 `~/.config/proxyctl/suggestions.ignore`
 
-### Added — Doctor UX 三件套
+一行一个 `id` 或 `fingerprint`，`#` 开头注释。
 
-- **`--suggest-only`**：跳过 5 项 score 探测（curl connectivity 累计 2-5s）,
-  仅跑 suggestion 引擎。实测 0.18s。data 中 5 项布尔 + score/healthy
-  全置 null，agent 据 `data.doctor_mode` 字段识别。DOCTOR_V2 schema
-  对应放宽（boolean → ["boolean","null"]），不破坏 required 列表。
-- **`--since <version>`**：屏蔽 `since > <version>` 的规则。例：
-  `proxyctl doctor --since 0.4.7` 让老 CI 平滑迁移到 0.5.0 时不爆红。
-  inclusive 语义：since=0.5.0 保留 since=0.5.0 规则。
-- **`~/.config/proxyctl/suggestions.ignore`**：用户级屏蔽文件。
-  一行一个 id 或 fingerprint，# 开头注释。env var
-  `PROXYCTL_SUGGEST_IGNORE_PATH` 覆盖（测试用）。agent 可显式
-  `ignore_set=` 参数传规则绕过/叠加。
+```text
+# 我知道，本机能接受
+controller.weak_secret
+# 屏蔽某个具体死组（按 fingerprint）
+bb60eec32908
+```
 
-### Added — `proxyctl autostart` 写命令
+Env var `PROXYCTL_SUGGEST_IGNORE_PATH` 覆盖。Agent 可通过 `ignore_set=`
+参数传规则绕过或叠加。
 
-新子命令组：
-- `proxyctl autostart` / `inspect` —— 只读，展示 plist/unit 现状
-- `proxyctl autostart sync` —— **写命令**：plist/unit 中 binary +
-  config_dir 同步到 PATH 当前值。当 doctor 报 autostart.binary_mismatch /
-  version_mismatch / config_dir_mismatch 时，agent 或用户一键修复，
-  不必手动编辑 plist + bootout + bootstrap。
+### Added — `proxyctl explain suggestion:<id>`
 
-macOS：plistlib.load → in-place 改 ProgramArguments → plistlib.dumps
-（保留 KeepAlive / RunAtLoad / EnvironmentVariables 等用户已有定制）。
-Linux：正则替换 ExecStart= 整行；ExecStart 缺失时**拒绝**执行
-（unit 被改得面目全非时不冒险覆盖）。
+21 条规则各自有 explain topic，含触发条件、修复路径、`verify` 命令。
+CI 强校验完备性（`tests/unit/test_suggest_explain_completeness.py`）：
+每个 id 必须有对应 topic；无孤儿 topic。
 
-完整 plan/exec 合约：
-- macOS：launchctl bootout → fs_write_atomic plist → launchctl bootstrap
-- Linux：systemctl stop → fs_write_atomic unit → daemon-reload →
-  systemctl start
-
-`--dry-run` 输出 PlanStep[] 含 sudo 标记。`side_effects` 标
-`process / system / config-write`，`exit_codes` 含 8 (LOCKED) /
-10 (DEPENDENCY_MISSING，PATH 中找不到 binary 时)。
-
-相应 explain topic 的 `edit` 段加入 "proxyctl autostart sync" 一键修复指引。
-
-### Added — 8 个 doctor 集成点
-
-`src/proxyctl/explain.py::cmd_doctor`：
-- 新增 `--no-suggest` flag，关闭整个建议引擎（恢复 v0.4.x 极简体验）
-- `data.suggestions[]` 字段输出全部（含 info 级，`--json` 必现）
-- 人类输出新增 suggestions 块：仅显 warn + advisory，上限 3 条，
-  超出折叠为 `...and N more (use --json)`
-- `--quiet` 完全跳过 suggestion 块（修复历史 quiet 不抑制 print 的潜在 bug）
-- 符号：`[!] warn` / `[*] advisory` / `[i] info`（纯 ASCII）
-- 调用所有 inspect_* 都独立 try-except：建议引擎绝不能阻塞 doctor 主流程
-
-### Added — 21 个 explain topics
-
-每条 suggestion id 都注册了 `proxyctl explain suggestion:<id>`：
-- 用户/agent 看到 doctor 输出后能一键跳到详情
-- CI 强校验 (`tests/unit/test_suggest_explain_completeness.py`)：
-  - 每个规则 id 必须有对应 explain topic
-  - 无孤儿 topic（规则砍了 explain 也得砍）
-
-### Added — supported_features 探测点
+### Added — `supported_features` 探测点
 
 `proxyctl --version --json`：
+
 ```json
 "supported_features": {
-  ...
-  "doctor_suggestions":         true,   // 0.5.0
-  "doctor_suggestions_v1":      true,   // schema v1（未来 bump 用新 key）
-  "autostart_inspect":          true,   // 0.5.0
-  "autostart_sync_cmd":         true,   // 0.5.0
-  "doctor_suggest_only_mode":   true,   // 0.5.0 --suggest-only
-  "doctor_since_filter":        true,   // 0.5.0 --since <ver>
-  "suggestions_ignore_file":    true,   // 0.5.0 用户屏蔽文件
-  "proxy_group_dead_check":     true    // 0.5.0 proxy_group.mostly_dead
+  "doctor_suggestions":         true,
+  "doctor_suggestions_v1":      true,
+  "autostart_inspect":          true,
+  "autostart_sync_cmd":         true,
+  "doctor_suggest_only_mode":   true,
+  "doctor_since_filter":        true,
+  "suggestions_ignore_file":    true,
+  "proxy_group_dead_check":     true
 }
 ```
 
-agent 据此决定要不要解析 `data.suggestions[]` / 用新 flag。
+### Changed — Subscription hint 单一事实源
 
-### Refactor — 单一事实源（消除 status/doctor 文案漂移）
-
-`subscription.summarize_hints()` 重构：内部委托给新的 `to_suggestions()`，
-派生 `envelope.hints[]` 字符串。status 和 doctor 共用一套规则推导逻辑，
+`subscription.summarize_hints()` 内部委托给 `to_suggestions()`，
+派生 `envelope.hints[]` 字符串。`status` 与 `doctor` 共用同一套规则，
 未来改阈值只动一处。
 
-### 红线（doctor 即使扩展也不碰的）
+### Compatibility
 
-1. doctor 不自动修复——`suggestion.fix_command` 是字符串，从不主动执行
-2. doctor 不拉网络——所有"过期"判定来自本地 `subscription.json` / `known_versions.json`
-3. suggestion 不影响 exit code——21 条 warn 全亮也是 exit 0
-4. 规则失败静默降级——任何 inspect 异常 → 那一组规则跳过，不影响其他维度
+- Envelope `schema_version` 不变；`data.suggestions[]` 是新增字段
+- `DOCTOR_V2` schema：5 项布尔 + `score` / `max` / `healthy` 改为
+  `["<type>", "null"]`（兼容 `--suggest-only` 模式），新增
+  `doctor_mode` enum 字段
+- `additionalProperties=true` 保证仅读老字段的 agent 透明忽略新字段
+- 红线：doctor 不自动修复 / 不拉外网 / 不影响 exit code
 
-### 验证
+### 文档
 
-- `pytest`：**683 passed**（含 39+ 新 doctor/suggest/autostart 测试）
-- 实地跑 `proxyctl doctor` 在哥本机一次性发现：
-  Clash API secret 长度 14 < 16（advisory）+
-  geoip.dat / geosite.dat 57 天没更新（info）+
-  proxy_group.mostly_dead 某组节点全挂（warn）
-- 实地跑 `proxyctl doctor --suggest-only` 0.18s 出 suggestions（vs full 模式
-  含 curl 2-5s）
-- 实地跑 `proxyctl autostart sync --dry-run` 哥本机 in-sync → no-op 路径触发
-
-### 设计文档参考
-
-- `src/proxyctl/suggest.py` 模块 docstring：Schema v1 完整契约
-- `src/proxyctl/autostart.py` 模块 docstring：两层 inspect 设计
-- `proxyctl explain suggestion:<id>`：每条规则的触发逻辑 + 修复路径
+- `proxyctl agent-guide` 加 Suggestion 协议段
+- `AGENTS.md` "Doctor suggestions" 完整 schema + decision matrix + jq cookbook
+- 各 `src/proxyctl/*.py` 模块 docstring 含设计立场与契约
 
 ## [0.4.7] — 2026-05-19
 
