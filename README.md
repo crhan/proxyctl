@@ -78,7 +78,7 @@ proxyctl 把 agent 友好度做成一等公民。完整接入协议见
 
 ```bash
 proxyctl agent-guide                 # Agent 入门 markdown（注入当前路径/端口）
-proxyctl agent-guide --list-sections # 15 个段，按需取小块（省 token）
+proxyctl agent-guide --list-sections # 19 个段，按需取小块（省 token）
 proxyctl --version --json            # schema_version + supported_features 探测
 proxyctl commands --json             # 全部命令元数据（机读）
 proxyctl commands --schema           # 上面 JSON 的 JSON Schema
@@ -162,6 +162,30 @@ proxyctl recover                  # 不重启引擎，热重载 + 清 fakeip + �
 proxyctl recover --dry-run        # 看 3 个 Clash API endpoint 再决定
 ```
 
+### `doctor` —— 5 项健康分 + 引导建议（v0.5.0+）
+```bash
+proxyctl doctor                   # 5 项布尔健康分 + suggestions (warn/advisory)
+proxyctl doctor --json            # data.suggestions[] 含 21 条规则的检测结果
+proxyctl doctor --suggest-only    # 跳过 score 探测，仅跑建议引擎 (~0.18s)
+proxyctl doctor --since 0.4.7     # 屏蔽指定版本后引入的规则 (CI 平滑迁移)
+proxyctl doctor --no-suggest      # 关闭建议引擎，恢复 v0.4.x 极简体验
+proxyctl explain suggestion:<id>  # 每条规则有触发条件 + 修复路径 topic
+```
+21 条规则覆盖订阅过期 / autostart binary 与 PATH 漂移 / API 安全配置 /
+GeoIP 数据时效 / 代理组健康。详见 [AGENTS.md](AGENTS.md) "Doctor suggestions" 段。
+用户屏蔽某条告警：`~/.config/proxyctl/suggestions.ignore`（一行一个 id 或 fingerprint）。
+
+### `autostart` —— 自动启动 unit 管理（v0.5.0+）
+```bash
+proxyctl autostart                # plist/unit 当前状态
+proxyctl autostart inspect --json # 结构化输出含 binary/version/enabled/config_dir
+proxyctl autostart sync --dry-run # 预览 PlanStep[]
+proxyctl autostart sync           # 同步 plist/unit 到当前 PATH binary + config_dir
+```
+当 doctor 报 `autostart.binary_mismatch` / `version_mismatch` /
+`config_dir_mismatch` 时一键修复。macOS plist 用 plistlib 原地改保留
+KeepAlive / RunAtLoad 等用户定制；Linux ExecStart 缺失时拒绝执行防误覆盖。
+
 ---
 
 ## 安装
@@ -173,7 +197,7 @@ uv tool install proxyctl                # uv（推荐）
 pipx install proxyctl                   # 或 pipx
 pip install --user proxyctl             # 或 pip
 
-proxyctl --version                      # → proxyctl v0.4.7
+proxyctl --version                      # → proxyctl v0.5.1
 proxyctl --help
 ```
 
@@ -239,13 +263,14 @@ no_proxy_extra:                         # 自 0.1.5 起追加 NO_PROXY
 | `start / stop / restart / restart-clean` | 启停引擎 + DNS/代理注入 | ✅ | ✅ |
 | `status` | 一站式系统面板 | — | ✅ |
 | `check` | 4 阶段健康检查 | — | ✅ |
-| `doctor` | 5 项健康打分 | — | ✅ |
+| `doctor` | 5 项健康打分 + 21 条引导建议 (v0.5.0+) | — | ✅ |
 | `trace <domain>` | 域名链路诊断 | — | ✅ |
 | `audit [days] [apply]` | 日志驱动配置优化 | ✅ | ✅ |
 | `bench [groups]` | 节点测速 (NDJSON) | — | ✅ |
 | `fix` | 修复 DNS / 代理 / 热重载 | ✅ | ✅ |
 | `recover` | 切网后软恢复 | ✅ | ✅ |
 | `mode tun\|proxy` | 切换 TUN / 代理模式 | ✅ | ✅ |
+| `autostart [inspect\|sync]` | 自动启动 unit 管理 (v0.5.0+) | ✅ | ✅ |
 | `dns-lock / dns-unlock` | 启停 DNS 看门狗 | ✅ | ✅ |
 | `daemon` | 管理 extra_daemons | ✅ | ✅ |
 | `agent-guide / commands / explain` | agent 自描述三件套 | — | ✅ |
@@ -261,6 +286,7 @@ no_proxy_extra:                         # 自 0.1.5 起追加 NO_PROXY
 | audit (含 apply) | ✅ | ✅ |
 | recover (切网软恢复) | ✅ | ✅ |
 | mode tun \| proxy 切换 | ✅ | ✅ |
+| autostart inspect / sync | ✅ plistlib | ✅ systemd unit ExecStart |
 | dns-lock 看门狗 | ✅ | N/A* |
 
 \* Linux 下系统 DNS 由 systemd-resolved / NetworkManager / resolvconf
@@ -299,7 +325,7 @@ sing-box JSON config 解析、`trace` 的 sing-box 日志 grep、`engine` /
 git clone https://github.com/crhan/proxyctl.git
 cd proxyctl
 uv sync --group dev                    # 装运行 + 测试依赖
-uv run pytest                          # 跑 523 个测试
+uv run pytest                          # 跑 685 个测试
 uv run proxyctl status                 # 用本地源码版本
 
 export PROXYCTL_DEBUG=1                # 调试模式
