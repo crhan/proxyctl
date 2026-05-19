@@ -283,3 +283,36 @@ def test_get_engine_version_returns_dict_when_called(tmp_path: Path, monkeypatch
     assert info is not None
     for k in ("binary", "raw", "version", "platform", "go_version", "build_date"):
         assert k in info, f"missing key {k}"
+
+
+# v0.5.2 回归：兼容两种 mihomo -v 输出格式（version v 前缀 + Unix `date` 多字段）
+# 真实 bug：
+#   - status/doctor 行渲染 `f"v{ver['version']}"`，若 version 已含 v 则输出 vv1.19.10
+#   - build_date 旧 regex 用 (\S+) 只吞第一个 token，把 "Sat May 31 ..." 截成 "Sat"
+@pytest.mark.parametrize("raw,expected", [
+    (
+        "Mihomo Meta 1.19.25 darwin arm64 with go1.26.3 2026-05-16T14:37:07Z",
+        {"version": "1.19.25", "platform": "darwin arm64",
+         "go_version": "1.26.3", "build_date": "2026-05-16"},
+    ),
+    (
+        "Mihomo Meta v1.19.10 linux amd64 with go1.24.3 Sat May 31 07:51:30 UTC 2025",
+        {"version": "1.19.10", "platform": "linux amd64",
+         "go_version": "1.24.3", "build_date": "Sat May 31 07:51:30 UTC 2025"},
+    ),
+])
+def test_get_engine_version_handles_both_mihomo_formats(
+    tmp_path: Path, monkeypatch, raw, expected,
+):
+    bin_ = _make_fake_binary(tmp_path, "mihomo", raw)
+    _isolate_path(monkeypatch, bin_)
+    info = cli.get_engine_version("mihomo")
+    assert info is not None, "parser dropped a known mihomo -v format"
+    for k, v in expected.items():
+        assert info[k] == v, (
+            f"key {k}: expected {v!r}, got {info[k]!r} (raw={raw!r})"
+        )
+    # 反向断言：version 永不携带 v 前缀（渲染层会自加 v；带前缀就 vv）
+    assert not info["version"].startswith("v"), (
+        f"version must be normalized without 'v' prefix, got {info['version']!r}"
+    )

@@ -5,6 +5,66 @@
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-05-19
+
+> 修 v0.4.7 引入的 `get_engine_version()` 解析对真实 mihomo binary 输出
+> 不兼容（哥 2026-05-19 升 0.5.1 跑 `status` 时一眼看到 `mihomo vv1.19.10`
+> + `(Sat, go1.24.3)`，双 v 前缀 + build_date 截断成星期几）。
+> 零 schema 变更（`data.engine_version.version` 字段类型不变，仅值规范化
+> 为始终不带 `v` 前缀）；agent 消费方无感升级。
+
+### Fixed — `get_engine_version()` 兼容两种 mihomo -v 输出
+
+`src/proxyctl/cli.py::get_engine_version` 原 regex 假设 mihomo 输出唯一格式
+`Mihomo Meta 1.19.25 darwin arm64 with go1.26.3 2026-05-16T14:37:07Z`，但
+实际 mihomo 在不同构建里存在两种输出：
+
+| 格式 | 样本 | 旧解析结果 |
+|---|---|---|
+| ISO 风（CHANGELOG 0.4.7 范本）| `Mihomo Meta 1.19.25 ... 2026-05-16T14:37:07Z` | ✓ 正确 |
+| **v 前缀 + Unix `date` 风** | `Mihomo Meta v1.19.10 linux amd64 with go1.24.3 Sat May 31 07:51:30 UTC 2025` | ✗ version="v1.19.10" / build_date="Sat" |
+
+后果（v0.4.7 ~ v0.5.1）：
+- **`status` / `doctor` 行**：`engine=mihomo vv1.19.10`（渲染层 `f"v{ver}"`
+  + 数据已含 v → 双 v）+ `(Sat, go1.24.3)`（build_date 被截断成星期几）
+- **`data.engine_version` JSON**：`version="v1.19.10"`，agent 用字符串比较
+  做版本判定时容易写出与 ISO-风 binary 不一致的分支
+
+修复策略（双重防御）：
+
+1. **数据层规范化**：解析时 `lstrip("v")` → `version` 永远不带 `v` 前缀，
+   渲染层统一拼 `v{version}`（与 macOS Homebrew / Linux 各种安装源对齐）。
+2. **regex 兼容**：build_date 段 `(\S+)` → `(.+)$`，吞到行尾，容纳 Unix
+   `date` 的多 token 格式。
+3. **ISO 判定收紧**：原来 `if "T" in date_raw` 会被 `UTC` 字符串中的 T
+   误判 → 截成 `'Sat May 31 07:51:30 U'`；改为正则强校验
+   `^\d{4}-\d{2}-\d{2}T` 头才裁剪。
+
+### Added — 测试覆盖两种 mihomo -v 格式（parametrize）
+
+`tests/unit/test_cli_helpers.py::test_get_engine_version_handles_both_mihomo_formats`
+新增 2 个 case：
+- ISO 风 `2026-05-16T14:37:07Z` → `build_date == "2026-05-16"`
+- v 前缀 + Unix date `Sat May 31 07:51:30 UTC 2025` →
+  `version == "1.19.10"`（不带 v）+ `build_date == "Sat May 31 07:51:30 UTC 2025"`
+  完整保留
+
+并加反向断言 `not info["version"].startswith("v")` —— 未来若再有人引入
+带 v 数据，CI 立即抓住，不必再次靠用户跑 `status` 肉眼发现。
+
+### 验证
+
+- `pytest`：**687 passed**（+1 parametrize 新增 case 中含 2 条样本）。
+- 实地跑 `proxyctl status` 在哥本机：
+  - 旧：`引擎  mihomo vv1.19.10 (Sat, go1.24.3) · proxy`
+  - 新：`引擎  mihomo v1.19.10 (Sat May 31 07:51:30 UTC 2025, go1.24.3) · proxy`
+
+### 红线
+
+- 不破坏 ISO-风构建（旧测试 `1.19.25 ... 2026-05-16T14:37:07Z` 仍全绿）
+- 不改 schema（`data.engine_version` 字段集 / 类型不变）
+- 不改 0.4.7 lru_cache 行为（同进程 4 项常量缓存仍成立）
+
 ## [0.5.1] — 2026-05-19
 
 > 修 v0.5.0 controller_rules 的**设计 bug**（哥 2026-05-19 跑 doctor
