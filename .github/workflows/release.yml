@@ -39,6 +39,50 @@ jobs:
             exit 1
           fi
 
+      # 门禁 1（防 v0.5.1 类）：CHANGELOG.md 必须有对应版本段。
+      # 抽不到 / 段太短 → fast-fail 在 PyPI 发布之前，避免 "PyPI 已发但
+      # GitHub Release notes 空" 的尴尬历史重演。
+      - name: Verify CHANGELOG.md has entry for this version
+        run: |
+          TAG="${GITHUB_REF##*/}"
+          VER="${TAG#v}"
+          python3 - <<PY
+          import re, sys
+          text = open("CHANGELOG.md").read()
+          pat = re.compile(r"## \[" + re.escape("$VER") + r"\][^\n]*\n(.*?)(?=## \[)", re.S)
+          m = pat.search(text)
+          if not m:
+              sys.stderr.write(
+                  f"::error::CHANGELOG.md 中没有 $VER 段（## [$VER] — ...）。"
+                  f"tag $TAG 推送前必须先在 CHANGELOG 写本版变更。\n")
+              sys.exit(1)
+          body = m.group(1).strip()
+          if len(body) < 20:
+              sys.stderr.write(
+                  f"::error::CHANGELOG [$VER] 段只有 {len(body)} 字符，太短。"
+                  f"补充内容后重新打 tag。\n")
+              sys.exit(1)
+          print(f"✓ CHANGELOG has [$VER] section: {len(body)} chars")
+          PY
+
+      # 门禁 2（防 v0.5.2 类）：tag commit 上的 release.yml 必须是新版
+      # （含 "Extract release notes from CHANGELOG.md" 步骤）。
+      # 常见原因：本地 rebase 后忘 `git tag -f` 重定位 tag，
+      # 推上去的 tag 仍指向旧 base commit（旧 release.yml）。
+      - name: Verify release.yml has CHANGELOG extraction step
+        run: |
+          if ! grep -q "Extract release notes from CHANGELOG.md" \
+                  .github/workflows/release.yml; then
+            TAG="${GITHUB_REF##*/}"
+            cat <<MSG >&2
+          ::error::tag $TAG 指向的 commit 上 release.yml 是旧版本
+          （未含 'Extract release notes from CHANGELOG.md' 步骤）。
+          通常是本地 rebase 后 tag 没跟着移到新 HEAD。修复：
+            git tag -f $TAG <newer-commit-sha> && git push -f origin $TAG
+          MSG
+            exit 1
+          fi
+
       - name: Build distribution
         run: uv build
 
