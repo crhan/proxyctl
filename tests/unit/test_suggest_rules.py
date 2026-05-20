@@ -359,6 +359,108 @@ def test_proxy_group_rules_multiple_groups_separate_suggestions():
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# v0.5.4 — 穿透 selector 子组到叶子节点（消除 selector-of-selectors 假阳）
+# ────────────────────────────────────────────────────────────────────────────
+
+def test_proxy_group_rules_selector_of_selectors_no_false_positive():
+    """v0.5.4：GLOBAL 含 DIRECT/REJECT + 一堆没 latency 的分流子组 + 1 个有活节点的子组。
+
+    回归用户机器实际数据：
+      GLOBAL (Selector) = [DIRECT, REJECT,
+                           '🚀 节点选择' (URLTest 含 24 活节点),
+                           '📲 电报信息', 'Steam', '苹果服务', '微软服务', ...
+                           （这些分流子组都从来没被 mihomo 测过延迟）]
+
+    v0.5.3 直接成员判定：14/15 算 dead → 触发误报
+    v0.5.4 穿透叶子判定：24 个真叶子全活 → 不触发
+    """
+    payload = {"proxies": {
+        "DIRECT": {"type": "Direct", "history": []},
+        "REJECT": {"type": "Reject", "history": []},
+        "GLOBAL": _mk_group("GLOBAL", [
+            "DIRECT", "REJECT",
+            "🚀 节点选择", "📲 电报信息", "Steam", "苹果服务",
+            "微软服务", "OpenAi", "GoogleCN", "国外媒体",
+            "全球直连", "全球拦截", "漏网之鱼"
+        ], group_type="Selector"),
+        "🚀 节点选择": _mk_group("🚀 节点选择", [f"n{i}" for i in range(1, 6)],
+                              group_type="URLTest"),
+        # 分流子组（用户从来没用过这些应用 → mihomo 没测延迟）
+        **{name: {"type": "Selector", "all": ["DIRECT"], "history": [], "now": "DIRECT"}
+           for name in ["📲 电报信息", "Steam", "苹果服务", "微软服务", "OpenAi",
+                       "GoogleCN", "国外媒体", "全球直连", "全球拦截", "漏网之鱼"]},
+        # 真节点（5 个全活）
+        **{f"n{i}": _mk_node(150 + i * 10) for i in range(1, 6)},
+    }}
+    out = suggest_rules.proxy_group_rules(payload)
+    # GLOBAL 不再误报；其他子组要么 < MIN_GROUP_SIZE 要么穿透后是 DIRECT 伪节点
+    global_warns = [s for s in out if s["evidence"]["group_name"] == "GLOBAL"]
+    assert global_warns == [], \
+        f"GLOBAL 不应误报；实际：{global_warns}"
+
+
+def test_proxy_group_rules_pseudo_nodes_excluded_from_dead_count():
+    """v0.5.4：DIRECT / REJECT 不计入 dead 也不计入 total。"""
+    payload = {"proxies": {
+        "DIRECT": {"type": "Direct", "history": []},
+        "REJECT": {"type": "Reject", "history": []},
+        "GROUP": _mk_group("GROUP", ["DIRECT", "REJECT", "n1", "n2", "n3"],
+                            group_type="Selector"),
+        "n1": _mk_node(0), "n2": _mk_node(0), "n3": _mk_node(0),
+    }}
+    out = suggest_rules.proxy_group_rules(payload)
+    assert len(out) == 1
+    ev = out[0]["evidence"]
+    assert ev["dead_count"] == 3
+    assert ev["total_count"] == 3, \
+        f"伪节点应排除；实际 total={ev['total_count']}"
+
+
+def test_proxy_group_rules_nested_selectors_penetrate_to_leaves():
+    """v0.5.4：嵌套 selector → 穿透到叶子；按叶子集合统计 dead pct。
+
+    GROUP_TOP -> [SUB_A (含 4 叶子全死), SUB_B (含 4 叶子全活)]
+    叶子总 8 个，dead 4 → 50% < 70% → 不触发
+    """
+    payload = {"proxies": {
+        "GROUP_TOP": _mk_group("GROUP_TOP", ["SUB_A", "SUB_B"],
+                                group_type="Selector"),
+        "SUB_A": _mk_group("SUB_A", ["a1", "a2", "a3", "a4"],
+                            group_type="URLTest"),
+        "SUB_B": _mk_group("SUB_B", ["b1", "b2", "b3", "b4"],
+                            group_type="URLTest"),
+        "a1": _mk_node(0), "a2": _mk_node(0), "a3": _mk_node(0), "a4": _mk_node(0),
+        "b1": _mk_node(100), "b2": _mk_node(120),
+        "b3": _mk_node(140), "b4": _mk_node(160),
+    }}
+    out = suggest_rules.proxy_group_rules(payload)
+    top_warns = [s for s in out if s["evidence"]["group_name"] == "GROUP_TOP"]
+    assert top_warns == [], "TOP 含 8 叶子 4 dead = 50% 不应触发"
+    # SUB_A 自己仍然该报（4/4 全死）
+    sub_a_warns = [s for s in out if s["evidence"]["group_name"] == "SUB_A"]
+    assert len(sub_a_warns) == 1
+    assert sub_a_warns[0]["evidence"]["dead_count"] == 4
+    assert sub_a_warns[0]["evidence"]["total_count"] == 4
+
+
+def test_proxy_group_rules_circular_reference_safe():
+    """v0.5.4：A -> B -> A 循环引用不死循环，正常返回。"""
+    payload = {"proxies": {
+        "GA": {"type": "Selector", "all": ["GB", "n1", "n2", "n3"], "now": "GB"},
+        "GB": {"type": "Selector", "all": ["GA", "n1", "n2", "n3"], "now": "n1"},
+        "n1": _mk_node(0), "n2": _mk_node(0), "n3": _mk_node(0),
+    }}
+    # 不应 RecursionError；GA/GB 的叶子集都 = {n1,n2,n3}（A → B → A 那条循环被切断）
+    out = suggest_rules.proxy_group_rules(payload)
+    # 两组各自报：3/3 全死
+    names = {s["evidence"]["group_name"]: s["evidence"] for s in out}
+    assert "GA" in names and "GB" in names
+    for ev in names.values():
+        assert ev["dead_count"] == 3
+        assert ev["total_count"] == 3
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # fetch_proxies — HTTP 静默降级
 # ────────────────────────────────────────────────────────────────────────────
 

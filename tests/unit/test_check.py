@@ -301,3 +301,25 @@ def test_collect_fail_hints_aggregates_multiple_categories():
     assert "connectivity failed" in joined
     assert "split routing" in joined
     assert "DNS" in joined
+
+
+def test_collect_fail_hints_dead_groups_listed():
+    """proxy_group.mostly_dead 在 check 失败 hints 里聚合（0.5.3）。"""
+    coll = _make_collector(connectivity=[{"name": "a", "ok": True}])
+    coll["stages"]["dead_groups"] = [
+        {"name": "GLOBAL", "dead_count": 15, "total_count": 15, "dead_pct": 100.0},
+        {"name": "AUTO", "dead_count": 8, "total_count": 10, "dead_pct": 80.0},
+    ]
+    hints = check._collect_fail_hints(coll, dns_bad=False, failed=True)
+    joined = " | ".join(hints)
+    assert "proxy groups mostly dead" in joined
+    assert "GLOBAL(15/15)" in joined
+    assert "AUTO(8/10)" in joined
+    assert "proxyctl bench" in joined
+
+
+def test_collect_fail_hints_no_dead_groups_no_hint():
+    coll = _make_collector(connectivity=[{"name": "a", "ok": False}])
+    coll["stages"]["dead_groups"] = []
+    hints = check._collect_fail_hints(coll, dns_bad=False, failed=True)
+    assert not any("mostly dead" in h for h in hints)

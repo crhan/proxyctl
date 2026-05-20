@@ -91,11 +91,48 @@ def _t_nodes(backend, config) -> TopicCard:
 def _t_config(backend, config) -> TopicCard:
     return {
         "topic": "config",
-        "summary": "proxyctl 自身配置（不是 mihomo 配置）。控制后端选择、Clash API、端口、企业 DNS 等。",
+        "summary": (
+            "proxyctl 自身配置（不是 mihomo 配置）。控制后端选择、Clash API、端口、"
+            "企业 DNS 等。**建议把整个 ~/.config/proxyctl/ 目录纳入 git 追踪**（详见 "
+            "explain config-tracking），订阅源 URL / Clash secret 等 secret 文件用 "
+            ".gitignore 排除，配置改动留得下回放历史。"
+        ),
         "file": _io_proxyctl_config_path(),
         "edit": f"$EDITOR {_io_proxyctl_config_path()}",
         "verify": "proxyctl config get <key>",
-        "next_commands": ["explain ports", "explain corp-dns", "explain extra-daemons"],
+        "next_commands": ["explain config-tracking", "explain ports",
+                          "explain corp-dns", "explain extra-daemons"],
+    }
+
+
+@topic("config-tracking")
+def _t_config_tracking(backend, config) -> TopicCard:
+    cfg_dir = os.path.join(os.path.expanduser("~"), ".config", "proxyctl")
+    return {
+        "topic": "config-tracking",
+        "summary": (
+            "用 git 追踪 ~/.config/proxyctl/ 的变化。proxyctl 自己不做版本控制，"
+            "但用户的 config.yaml / 插件 / 订阅契约文件经常被多个工具（用户、cron、"
+            "proxyctl autostart sync、update-subscription.sh、agent）改动，没有"
+            "版本历史时很难 diff 出'谁改了什么'。git 是最便宜的解法。"
+        ),
+        "file": f"{cfg_dir}/.git",
+        "edit": (
+            f"  cd {cfg_dir} && git init\n"
+            "  # .gitignore 必须排除 secret + 高频抖动文件（agent 别忘）：\n"
+            "  cat > .gitignore <<'EOF'\n"
+            "  subscription-source.env       # 订阅 URL 含 UUID secret\n"
+            "  subscription.json             # 流量/到期高频变化\n"
+            "  .lock.*                       # proxyctl 运行时锁文件\n"
+            "  .ipgeo-*                      # ipgeo 探针缓存\n"
+            "  *.bak                         # config set 自动备份\n"
+            "  EOF\n"
+            "  git add . && git commit -m 'init: 本机 proxyctl 配置基线'\n"
+            "  # 后续改 config 之前：git status 看上次留下了啥；改完 commit"
+        ),
+        "verify": f"cd {cfg_dir} && git log --oneline",
+        "next_commands": ["explain config", "explain plugins",
+                          "config get backend"],
     }
 
 
@@ -779,6 +816,31 @@ proxyctl 才能区分「过期 / 网络挂 / 订阅服务方挂」。
 - 代理端口: HTTP/SOCKS = `{port}`，Clash API = `9090`
 - 用户插件目录: `~/.config/proxyctl/plugins/*.py`
 - 锁文件目录: `{lock_dir}/.lock.{{system|config|daemon}}`
+
+## Config Tracking — 用户配置目录建议纳入 git
+
+`~/.config/proxyctl/` 是用户的私人配置目录（不是 proxyctl 项目源代码）。
+被多方写入：用户手改、`config set`、`proxyctl autostart sync`、订阅脚本、
+cron、agent。**强烈建议把它纳入 git 追踪**，让你能回放"上次配置是什么样"。
+
+```bash
+cd {lock_dir} && git init
+# .gitignore 必须排除 secret + 高频抖动文件：
+cat > .gitignore <<'EOF'
+subscription-source.env       # 订阅 URL（含 UUID secret，禁止入库）
+subscription.json             # 流量/到期高频变化
+.lock.*                       # proxyctl 运行时锁
+.ipgeo-*                      # ipgeo 探针缓存
+*.bak                         # config set 自动备份
+EOF
+git add . && git commit -m 'init: 本机 proxyctl 配置基线'
+```
+
+agent 在用户机器上首次跑 proxyctl 时，**应该提示用户是否要做这一步**
+（首次见到 `{lock_dir}` 但无 `.git` 即可提示）。proxyctl 自己不动 git——
+版本控制是用户/agent 的职责，跟拉订阅是同一类边界。
+
+详见 `proxyctl explain config-tracking`。
 
 ## Exit Codes — 退出码
 

@@ -5,6 +5,73 @@
 
 ## [Unreleased]
 
+## [0.5.3] — 2026-05-20
+
+### Fixed
+
+- **`proxy_group.mostly_dead` 规则不再对 selector-of-selectors 误报。**
+  v0.5.0 规则按"直接成员 delay==0"计数，对 mihomo 主流订阅结构
+  （GLOBAL → 一堆分流子组 + DIRECT/REJECT，其中分流子组通常无 latency
+  history）会把"没测过延迟的子组"算成 dead，触发假阳 warn。本版改为
+  穿透 selector / URLTest / Fallback / LoadBalance / Smart 子组到真叶子
+  节点（去重）后统计；伪节点（DIRECT/REJECT/Pass/Compatible）排除；
+  循环引用安全。`evidence.total_count` 现在反映叶子节点数。
+- **`autostart.version_mismatch` 不再对同一 binary 自比误报。** 0.5.2 修了
+  `cli.get_engine_version` 的 `v` 前缀 strip，但 `autostart.inspect_runtime`
+  里独立解析的 `autostart_version` 字段没同步 strip，导致即使 plist 与 PATH
+  指向同一个 mihomo 二进制，`v1.19.25 != 1.19.25` 字面比较仍触发 advisory。
+  同时显示文案出现 `vv1.19.25` 双前缀。本版两处统一 strip + 同 binary 路径
+  直接跳过版本对比（同一文件无版本差异）。
+- **`autostart_version` evidence 字段不再带 `v` 前缀**，与 `path_version`
+  对齐，agent 可稳定比较。
+
+### Added
+
+- **`proxyctl bench` 跨组去重重复线路 + 穿透 selector 子组到叶子。**
+  之前 bench 只在直接成员层去重，对 GLOBAL → 13 个分流子组的结构会把
+  子组当节点测（返回组的 now 节点延迟）；多个组共享同一子组时叶子被重复
+  探测 N 次。本版用同款 `_collect_leaves` 穿透；伪节点（DIRECT/REJECT）
+  排除；跨组全局去重。
+  - 人类模式：测速行加 `(去重省 N 次)` 提示
+  - `--json` summary 新增 `raw_count`（去重前各组叶子和）+
+    `dedup_saved`（省下的次数）字段
+  - 实测 `proxyctl bench GLOBAL "💬 OpenAi"` 从 48+ 次探测降到 24 次
+
+- **`proxyctl check` 集成 `proxy_group.mostly_dead` 判定**。doctor 早就
+  会报"GLOBAL 组 15/15 节点全挂"，但 `check` 之前只展示组明细、不参与
+  fail 判定，agent 看 `check --json` 拿到 `ok=true` 却感觉不对。本版 check
+  在 [2/4] 代理组阶段后调用与 doctor 同款的 `suggest_rules.proxy_group_rules`
+  规则，任何组 ≥70% 节点 delay==0 即：
+  - 人类模式打印红色 `✗ GROUP: dead/total 节点不可达 (pct%)` 行
+  - exit code 变 1
+  - `data.stages.dead_groups[]` 输出每组结构化事实
+  - `envelope.hints` 聚合 `proxy groups mostly dead: GLOBAL(15/15) — try \`proxyctl bench\``
+
+### Added — Agent 提示
+
+- **agent-guide 新增 `Config Tracking` 段** + **新 explain topic
+  `config-tracking`**：建议 agent 在用户机器首次见到 `~/.config/proxyctl/`
+  无 `.git` 时提示用户初始化 git 仓库追踪配置变化，含推荐 `.gitignore`
+  排除 secret 与高频抖动文件（`subscription-source.env` /
+  `subscription.json` / `.lock.*` / `.ipgeo-*` / `*.bak`）。proxyctl 自己
+  不做版本控制，跟"不拉订阅"是同一类边界——版本控制是用户/agent 职责。
+
+### Changed
+
+- **`proxyctl check` exit code 在组挂时变 1**（之前永远 0）。`--json`
+  输出 `envelope.ok=false`。`data.stages.dead_groups[]` 字段新增。
+  agent 已消费 `data.stages.*` 的需注意此 stage 新增。
+- **`proxyctl check` [2/4] 代理组输出大幅精简。** 之前 selector 会把
+  顶层成员行 + 每个子组的全部节点都列一遍，多个组共享同一子组时节点
+  列表打 N 遍（n=组数）。本版：
+  - selector / fallback 当 now 指向子组时，跳过顶层成员行（避免与子组
+    重叠的节点列表重复打印）
+  - 只展开 now 指向的那一个子组（其他子组不展开）
+  - 跨组去重：已展示过节点列表的子组再次出现时只打摘要行 + `(详见上方)`
+  - 实测用户机器从 ~50 行降到 11 行
+
+  仅人类模式输出变化；`--json` 的 `data.stages.groups[]` 结构不变。
+
 ## [0.5.2] — 2026-05-19
 
 ### Fixed

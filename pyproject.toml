@@ -1,6 +1,6 @@
 [project]
 name = "proxyctl"
-version = "0.5.2"
+version = "0.5.3"
 description = "Proxy configuration lifecycle management for macOS and Linux"
 readme = "README.md"
 requires-python = ">=3.10"

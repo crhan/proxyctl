@@ -278,11 +278,43 @@ def engine_rules(current_version: str | None,
 DEAD_CHECK_GROUP_TYPES = ("URLTest", "Selector", "Fallback", "LoadBalance",
                           "Smart")
 
+# 伪节点（DIRECT/REJECT/Pass），不参与 dead 统计——它们没有"可达性"概念
+PSEUDO_NODE_TYPES = ("Direct", "Reject", "Pass", "Compatible")
+
 # 节点数少于此值的组不报告（小组本来就容易脏）
 MIN_GROUP_SIZE_FOR_DEAD_CHECK = 3
 
 # 死率阈值（≥70% 节点 delay==0 即报）
 DEAD_PCT_THRESHOLD = 70.0
+
+
+def _collect_leaves(group_name: str, proxies: dict[str, Any],
+                    seen: set[str]) -> list[str]:
+    """穿透 selector/URLTest/Fallback 子组，递归收集所有真叶子节点。
+
+    返回去重后的叶子节点名列表。伪节点（DIRECT/REJECT）排除。
+    seen 跟踪本次调用栈访问过的组名，防止循环引用死循环。
+    """
+    if group_name in seen:
+        return []
+    seen = seen | {group_name}
+    info = proxies.get(group_name)
+    if not isinstance(info, dict):
+        return []
+    typ = info.get("type")
+    if typ in PSEUDO_NODE_TYPES:
+        return []
+    if typ not in DEAD_CHECK_GROUP_TYPES:
+        # 真叶子（Shadowsocks / Vmess / Trojan / TUIC / Hysteria / ...）
+        return [group_name]
+    leaves: list[str] = []
+    for m in info.get("all") or []:
+        if not isinstance(m, str):
+            continue
+        for leaf in _collect_leaves(m, proxies, seen):
+            if leaf not in leaves:
+                leaves.append(leaf)
+    return leaves
 
 
 def fetch_proxies(api_base: str, api_secret: str = "", *,
@@ -320,10 +352,15 @@ def fetch_proxies(api_base: str, api_secret: str = "", *,
 
 
 def proxy_group_rules(proxies_payload: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """proxy_group.mostly_dead 规则。
+    """proxy_group.mostly_dead 规则（v0.5.4 起穿透子组到叶子统计）。
 
     每个挂掉的组输出**独立**一条 suggestion（fingerprint 含 group_name），
     agent 可分别跟踪。
+
+    v0.5.4 行为变更：判定从"直接成员 delay==0"改为"穿透到叶子节点 delay==0"。
+    GLOBAL 这种 selector-of-selectors 组下的 13 个分流子组（电报/苹果/Steam
+    等）若无 latency history（mihomo 没给它们测过延迟）不再被算作 dead，
+    伪节点（DIRECT/REJECT）也排除。dead_pct 现在基于真叶子节点数。
 
     Args:
         proxies_payload: fetch_proxies() 返回；None 表示跳过整组
@@ -339,14 +376,13 @@ def proxy_group_rules(proxies_payload: dict[str, Any] | None) -> list[dict[str, 
             continue
         if info.get("type") not in DEAD_CHECK_GROUP_TYPES:
             continue
-        members = info.get("all") or []
-        if not isinstance(members, list) or len(members) < MIN_GROUP_SIZE_FOR_DEAD_CHECK:
+        leaves = _collect_leaves(name, proxies, seen=set())
+        if len(leaves) < MIN_GROUP_SIZE_FOR_DEAD_CHECK:
             continue
         dead = 0
-        for m in members:
-            node = proxies.get(m)
+        for leaf in leaves:
+            node = proxies.get(leaf)
             if not isinstance(node, dict):
-                # 拿不到节点信息时算"未知"，不计入死亡
                 continue
             history = node.get("history") or []
             if not history:
@@ -355,19 +391,19 @@ def proxy_group_rules(proxies_payload: dict[str, Any] | None) -> list[dict[str, 
             last = history[-1] if isinstance(history[-1], dict) else {}
             if last.get("delay", 0) == 0:
                 dead += 1
-        dead_pct = (dead / len(members)) * 100.0
+        dead_pct = (dead / len(leaves)) * 100.0
         if dead_pct >= DEAD_PCT_THRESHOLD:
             out.append({
                 "id": "proxy_group.mostly_dead",
                 "severity": "warn",
                 "actor": "user",
-                "title": (f"代理组 {name} 中 {dead}/{len(members)} 节点不可达 "
+                "title": (f"代理组 {name} 中 {dead}/{len(leaves)} 叶子节点不可达 "
                           f"({dead_pct:.0f}%)"),
                 "evidence": {
                     "group_name": name,            # 进 fingerprint 的稳定字段
                     "group_type": info.get("type"),
                     "dead_count": dead,
-                    "total_count": len(members),
+                    "total_count": len(leaves),
                     # dead_pct 不进 fingerprint（抖动字段），仅供人看
                     "dead_pct_at_check": round(dead_pct, 1),
                 },

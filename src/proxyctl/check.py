@@ -202,6 +202,9 @@ def _proxy_groups_section(api_base: str, api_secret: str,
         if col > 0:
             print(line.rstrip())
 
+    # 跟踪本次 check 输出已经展开过节点列表的子组（跨 print_group 调用复用）
+    expanded_subgroups: set[str] = set()
+
     def print_group(gname: str):
         """打印单个组的摘要 + 成员；若 selector 成员也是组则递归展开。"""
         g = proxies.get(gname)
@@ -248,31 +251,39 @@ def _proxy_groups_section(api_base: str, api_secret: str,
         print(f"  {CYAN}{gname}{NC}({gtype}) → {BOLD}{gnow}{NC} "
               f"{ds(gnow_d)}ms  [{count_str} of {total}]{tested_str}")
 
-        # selector/fallback 的成员如果也是组，展开子组详情
-        if g.get("type") in ("Selector", "Fallback"):
+        # v0.5.4：selector/fallback 类型 + now 指向子组时，
+        # 跳过顶层成员列表（避免跟子组节点重复），只展开 now 那一个子组。
+        # now 指向真节点时仍打印顶层成员（用户可能想看其他可选项）。
+        sub = (proxies.get(gnow) if g.get("type") in ("Selector", "Fallback")
+               else None)
+        now_is_subgroup = bool(sub and sub.get("all"))
+        if g.get("type") in ("Selector", "Fallback") and not now_is_subgroup:
             print_members(gmembers, gnow)
-            for m in gmembers:
-                sub = proxies.get(m)
-                if sub and sub.get("all"):
-                    sub_type = "url" if sub.get("type") == "URLTest" else "sel"
-                    sub_now = sub.get("now", "?")
-                    sub_now_d = get_delay(sub_now)
-                    sub_members = sub.get("all", [])
-                    s_alive = sum(1 for x in sub_members if get_delay(x) > 0)
-                    s_dead  = sum(1 for x in sub_members if get_delay(x) == 0)
-                    s_nodata = sum(1 for x in sub_members if get_delay(x) < 0)
-                    sc = []
-                    if s_alive:  sc.append(f"{GREEN}{s_alive}✓{NC}")
-                    if s_dead:   sc.append(f"{RED}{s_dead}✗{NC}")
-                    if s_nodata: sc.append(f"{YELLOW}{s_nodata}—{NC}")
-                    st = group_tested_ago(sub_members)
-                    st_str = f"  {DIM}{st}{NC}" if st else ""
-                    active = " ←" if m == gnow else ""
-                    print(f"    {CYAN}{m}{NC}({sub_type}) → {BOLD}{sub_now}{NC} "
-                          f"{ds(sub_now_d)}ms  [{'/'.join(sc)} of {len(sub_members)}]{st_str}{active}")
-                    print_members(sub_members, sub_now)
-        else:
+        elif g.get("type") not in ("Selector", "Fallback"):
             print_members(gmembers, gnow)
+        if now_is_subgroup:
+            sub_type = "url" if sub.get("type") == "URLTest" else "sel"
+            sub_now = sub.get("now", "?")
+            sub_now_d = get_delay(sub_now)
+            sub_members = sub.get("all", [])
+            s_alive = sum(1 for x in sub_members if get_delay(x) > 0)
+            s_dead  = sum(1 for x in sub_members if get_delay(x) == 0)
+            s_nodata = sum(1 for x in sub_members if get_delay(x) < 0)
+            sc = []
+            if s_alive:  sc.append(f"{GREEN}{s_alive}✓{NC}")
+            if s_dead:   sc.append(f"{RED}{s_dead}✗{NC}")
+            if s_nodata: sc.append(f"{YELLOW}{s_nodata}—{NC}")
+            st = group_tested_ago(sub_members)
+            st_str = f"  {DIM}{st}{NC}" if st else ""
+            already = gnow in expanded_subgroups
+            tail = f"  {DIM}(详见上方){NC}" if already else ""
+            print(f"    {CYAN}{gnow}{NC}({sub_type}) → {BOLD}{sub_now}{NC} "
+                  f"{ds(sub_now_d)}ms  [{'/'.join(sc)} of {len(sub_members)}]{st_str}{tail}")
+            if not already:
+                print_members(sub_members, sub_now)
+                expanded_subgroups.add(gnow)
+        # 顶层组本身展开完后也标记，避免被下层组重新展开
+        expanded_subgroups.add(gname)
 
     # 跟踪哪些组已经作为 selector 子组展开过，避免重复
     shown = set()
@@ -405,19 +416,26 @@ def cmd_bench(api: str, api_secret: str, groups: list = None,
         print(f"  {YELLOW}—{NC} API 响应解析失败")
         return
 
+    # v0.5.3：穿透 selector 子组到真叶子节点；伪节点（DIRECT/REJECT）排除
+    from proxyctl.suggest_rules import _collect_leaves, PSEUDO_NODE_TYPES
     group_members: dict = {}
+    raw_count_total = 0  # 去重前总和（用于显示"省了多少次"）
     for gname in target_groups:
         g = proxies.get(gname)
         if not g:
             if not as_json:
                 print(f"  {YELLOW}—{NC} 组 {BOLD}{gname}{NC} 不存在，跳过")
             continue
-        members = g.get("all", [])
-        if not members:
+        leaves = [
+            l for l in _collect_leaves(gname, proxies, seen=set())
+            if proxies.get(l, {}).get("type") not in PSEUDO_NODE_TYPES
+        ]
+        if not leaves:
             if not as_json:
-                print(f"  {YELLOW}—{NC} 组 {BOLD}{gname}{NC} 无成员")
+                print(f"  {YELLOW}—{NC} 组 {BOLD}{gname}{NC} 无可测叶子节点")
             continue
-        group_members[gname] = members
+        group_members[gname] = leaves
+        raw_count_total += len(leaves)
 
     if not group_members:
         if as_json:
@@ -438,9 +456,13 @@ def cmd_bench(api: str, api_secret: str, groups: list = None,
                 seen.add(m)
 
     total = len(all_nodes)
+    dedup_saved = raw_count_total - total  # 去重省掉的探测次数
     group_names = ", ".join(group_members.keys())
     if not as_json:
-        print(f"{BOLD}测速{NC}  组: {CYAN}{group_names}{NC}  节点: {BOLD}{total}{NC}")
+        dedup_note = (f"  {DIM}(去重省 {dedup_saved} 次){NC}"
+                      if dedup_saved > 0 else "")
+        print(f"{BOLD}测速{NC}  组: {CYAN}{group_names}{NC}  "
+              f"节点: {BOLD}{total}{NC}{dedup_note}")
 
     import threading
     done_count = [0]
@@ -496,6 +518,8 @@ def cmd_bench(api: str, api_secret: str, groups: list = None,
         summary = {
             "groups": list(group_members.keys()),
             "total": total,
+            "raw_count": raw_count_total,  # 去重前各组叶子数之和
+            "dedup_saved": dedup_saved,    # 重复线路省下的探测次数
             "ok_count": ok_count,
             "fail_count": total - ok_count,
             "avg_rtt_ms": (sum(rtts) // len(rtts)) if rtts else None,
@@ -574,6 +598,13 @@ def _collect_fail_hints(collector: dict, *, dns_bad: bool, failed: bool) -> list
     if dns_bad:
         # 保留旧行为：DNS 异常时引导 proxyctl fix
         hints.append("DNS unhealthy — try `proxyctl fix`")
+
+    dead = stages.get("dead_groups") or []
+    if dead:
+        names = ",".join(
+            f"{d.get('name','?')}({d.get('dead_count')}/{d.get('total_count')})"
+            for d in dead if isinstance(d, dict))
+        hints.append(f"proxy groups mostly dead: {names} — try `proxyctl bench`")
 
     return hints
 
@@ -859,6 +890,26 @@ def cmd_check(engine, api: str, api_secret: str,
     if as_json:
         collector["stages"]["groups"] = groups_data
 
+    # 任何组 ≥70% 节点挂掉的全局判定（不限于 check_groups 显示的组）
+    # 与 doctor 的 proxy_group.mostly_dead suggestion 共用底层规则。
+    from proxyctl import suggest_rules as _sr
+    proxies_payload = _sr.fetch_proxies(api, api_secret, timeout=1.0)
+    dead_groups = _sr.proxy_group_rules(proxies_payload)
+    if dead_groups:
+        for s in dead_groups:
+            ev = s.get("evidence") or {}
+            print(f"  {RED}✗{NC} {ev.get('group_name','?')}: "
+                  f"{ev.get('dead_count')}/{ev.get('total_count')} 节点不可达 "
+                  f"({ev.get('dead_pct_at_check')}%)")
+        fail = True
+    collector["stages"]["dead_groups"] = [
+        {"name": (s.get("evidence") or {}).get("group_name"),
+         "dead_count": (s.get("evidence") or {}).get("dead_count"),
+         "total_count": (s.get("evidence") or {}).get("total_count"),
+         "dead_pct": (s.get("evidence") or {}).get("dead_pct_at_check")}
+        for s in dead_groups
+    ]
+
     # ── 3. 连通性 ─────────────────────────────────────────────────────────────
     # 从所有插件收集 check_targets。corp-network 等内置插件根据 ctx.corp_net 决定是否启用。
     ctx = {"corp_net": corp_net, "mode": mode, "engine": engine.name}
@@ -965,6 +1016,9 @@ def cmd_check(engine, api: str, api_secret: str,
         print(f"{YELLOW}{BOLD}Some checks failed.{NC}")
         if dns_bad:
             print(f"{CYAN}DNS 异常，执行 {BOLD}sb fix{NC}{CYAN} 修复。{NC}")
+
+    if not as_json and not as_plain:
+        _sys.exit(0 if not fail else 1)
 
     if as_json:
         _sys.stdout = _real_stdout

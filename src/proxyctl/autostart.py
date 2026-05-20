@@ -218,7 +218,7 @@ def inspect_runtime(static_result: dict[str, Any], backend, *,
                     r"^\S+\s+\S+\s+(\S+)\s+(\S+\s+\S+)\s+with\s+go(\S+)\s+(\S+)",
                     raw)
                 if m:
-                    out["autostart_version"] = m.group(1)
+                    out["autostart_version"] = m.group(1).lstrip("v")
         except (subprocess.TimeoutExpired, OSError):
             pass
 
@@ -439,17 +439,23 @@ def to_suggestions(inspect_result: dict[str, Any] | None, *,
         })
 
     # 5. version_mismatch —— 优先于 binary_mismatch 之外的独立信号
+    # 同一 binary 路径不可能版本不同；直接跳过避免 strip 不一致引发的误报。
     autostart_ver = inspect_result.get("autostart_version")
-    if autostart_ver and path_version and autostart_ver != path_version:
+    same_binary = bool(binary and path_binary and binary == path_binary)
+    a_ver_norm = (autostart_ver or "").lstrip("v")
+    p_ver_norm = (path_version or "").lstrip("v")
+    if (autostart_ver and path_version
+            and not same_binary
+            and a_ver_norm != p_ver_norm):
         out.append({
             "id": "autostart.version_mismatch",
             "severity": "advisory",
             "actor": "user",
-            "title": (f"autostart 引擎版本 v{autostart_ver} "
-                      f"≠ PATH v{path_version}"),
+            "title": (f"autostart 引擎版本 v{a_ver_norm} "
+                      f"≠ PATH v{p_ver_norm}"),
             "evidence": {
-                "autostart_version": autostart_ver,
-                "path_version": path_version,
+                "autostart_version": a_ver_norm,
+                "path_version": p_ver_norm,
                 "autostart_binary": binary,
                 "path_binary": path_binary,
             },

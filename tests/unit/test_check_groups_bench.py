@@ -89,6 +89,29 @@ def test_proxy_groups_section_default_group_when_none(fake_subprocess):
     assert check._proxy_groups_section("http://x", "s") is True
 
 
+def test_proxy_groups_section_dedup_subgroup_across_groups(fake_subprocess, capsys):
+    """v0.5.4：多个组的 now 指向同一子组时，该子组节点列表只展开一次。"""
+    payload = {"proxies": {
+        "GA": {"type": "Selector", "now": "SHARED", "all": ["SHARED"]},
+        "GB": {"type": "Selector", "now": "SHARED", "all": ["SHARED"]},
+        "SHARED": {"type": "URLTest", "now": "n1", "all": ["n1", "n2", "n3"]},
+        "n1": {"type": "Shadowsocks",
+                "history": [{"delay": 100, "time": "2026-05-19T00:00:00Z"}]},
+        "n2": {"type": "Shadowsocks",
+                "history": [{"delay": 120, "time": "2026-05-19T00:00:00Z"}]},
+        "n3": {"type": "Shadowsocks",
+                "history": [{"delay": 140, "time": "2026-05-19T00:00:00Z"}]},
+    }}
+    fake_subprocess.set_default(stdout=json.dumps(payload))
+    assert check._proxy_groups_section("http://x", "s", groups=["GA", "GB"]) is True
+    out = capsys.readouterr().out
+    # 节点 n1 只在 SHARED 第一次展开时出现，第二次折叠成 (详见上方)
+    import re
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+    assert plain.count("n1:100") == 1
+    assert "(详见上方)" in plain
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # cmd_bench
 # ────────────────────────────────────────────────────────────────────────────
@@ -116,18 +139,34 @@ def test_cmd_bench_no_groups_match(fake_subprocess, capsys):
 
 
 def test_cmd_bench_empty_group(fake_subprocess, capsys):
+    """空组或穿透叶子后仍为空 → 报"无可测叶子节点"（v0.5.3 文案变化）。"""
     payload = {"proxies": {"empty": {"type": "Selector", "all": []}}}
     fake_subprocess.set_default(stdout=json.dumps(payload))
     check.cmd_bench("http://x", "secret", groups=["empty"])
-    assert "无成员" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "无可测叶子节点" in out
+
+
+def test_cmd_bench_pseudo_only_group_skipped(fake_subprocess, capsys):
+    """v0.5.3：只含 DIRECT/REJECT 的组应跳过（穿透后无可测叶子）。"""
+    payload = {"proxies": {
+        "proxy": {"type": "Selector", "now": "DIRECT", "all": ["DIRECT", "REJECT"]},
+        "DIRECT": {"type": "Direct", "history": []},
+        "REJECT": {"type": "Reject", "history": []},
+    }}
+    fake_subprocess.set_default(stdout=json.dumps(payload))
+    check.cmd_bench("http://x", "secret", groups=["proxy"])
+    assert "无可测叶子节点" in capsys.readouterr().out
 
 
 def test_cmd_bench_dispatches_to_proxy_section(fake_subprocess, capsys, monkeypatch):
     """有可测组时应该走完测速 + 调用 _proxy_groups_section。"""
     payload = {"proxies": {
         "proxy": {"type": "Selector", "now": "n1", "all": ["n1", "n2"]},
-        "n1": {"type": "Direct", "history": [{"delay": 50, "time": "2026-05-14T03:00:00Z"}]},
-        "n2": {"type": "Direct", "history": [{"delay": 0, "time": "2026-05-14T03:00:00Z"}]},
+        "n1": {"type": "Shadowsocks",
+                "history": [{"delay": 50, "time": "2026-05-14T03:00:00Z"}]},
+        "n2": {"type": "Shadowsocks",
+                "history": [{"delay": 0, "time": "2026-05-14T03:00:00Z"}]},
     }}
     fake_subprocess.set_default(stdout=json.dumps(payload), returncode=0)
 
@@ -140,6 +179,26 @@ def test_cmd_bench_dispatches_to_proxy_section(fake_subprocess, capsys, monkeypa
     monkeypatch.setattr(check, "_proxy_groups_section", fake_section)
     check.cmd_bench("http://x", "secret", groups=["proxy"])
     assert called["count"] == 1
+
+
+def test_cmd_bench_dedup_across_groups(fake_subprocess, capsys, monkeypatch):
+    """v0.5.3：多组共享同一节点时只测一次，输出含"去重省 N 次"。"""
+    payload = {"proxies": {
+        # GA / GB 都含 n1,n2,n3；GB 还有 n4
+        "GA": {"type": "Selector", "now": "n1", "all": ["n1", "n2", "n3"]},
+        "GB": {"type": "Selector", "now": "n1", "all": ["n1", "n2", "n3", "n4"]},
+        "n1": {"type": "Shadowsocks", "history": []},
+        "n2": {"type": "Shadowsocks", "history": []},
+        "n3": {"type": "Shadowsocks", "history": []},
+        "n4": {"type": "Shadowsocks", "history": []},
+    }}
+    fake_subprocess.set_default(stdout=json.dumps(payload), returncode=0)
+    monkeypatch.setattr(check, "_proxy_groups_section", lambda *a, **k: True)
+    check.cmd_bench("http://x", "secret", groups=["GA", "GB"])
+    out = capsys.readouterr().out
+    # 应该 4 个唯一节点（n1,n2,n3,n4），去重前 7 个，省 3 次
+    assert "节点: " in out and "4" in out
+    assert "去重省 3 次" in out
 
 
 # ────────────────────────────────────────────────────────────────────────────

@@ -203,6 +203,44 @@ def test_rule_version_match_no_suggestion():
     assert "autostart.version_mismatch" not in _ids(out)
 
 
+def test_rule_version_same_binary_skipped():
+    """同一 binary 路径不可能版本不同；即使版本字符串字面不等也不报（0.5.3）。
+
+    回归 0.5.2 未清干净的 follow-up bug：cli.get_engine_version strip 了
+    v 前缀但 autostart.inspect_runtime 没 strip，自比触发误报。
+    """
+    same_bin = "/home/alice/.local/bin/mihomo"
+    out = autostart.to_suggestions(
+        _ok_inspect(binary=same_bin, autostart_version="v1.19.25"),
+        path_binary=same_bin,
+        path_version="1.19.25")
+    assert "autostart.version_mismatch" not in _ids(out)
+
+
+def test_rule_version_strip_v_prefix_normalized():
+    """不同 binary 但 strip v 前缀后版本相同 → 不报（防御 strip 不一致）（0.5.3）。"""
+    out = autostart.to_suggestions(
+        _ok_inspect(binary="/opt/homebrew/bin/mihomo",
+                    autostart_version="v1.19.25"),
+        path_binary="/Users/alice/.local/bin/mihomo",
+        path_version="1.19.25")
+    assert "autostart.version_mismatch" not in _ids(out)
+
+
+def test_rule_version_mismatch_strip_v_prefix_real():
+    """真实版本差 + autostart 含 v 前缀（strip 后仍不等）→ 报；title/evidence 不带 v 前缀（0.5.3）。"""
+    out = autostart.to_suggestions(
+        _ok_inspect(binary="/opt/homebrew/bin/mihomo",
+                    autostart_version="v1.15.0"),
+        path_binary="/Users/alice/.local/bin/mihomo",
+        path_version="1.19.25")
+    s = [x for x in out if x["id"] == "autostart.version_mismatch"][0]
+    assert s["evidence"]["autostart_version"] == "1.15.0"
+    assert s["evidence"]["path_version"] == "1.19.25"
+    assert "vv" not in s["title"]
+    assert "v1.15.0" in s["title"] and "v1.19.25" in s["title"]
+
+
 def test_rule_config_dir_mismatch():
     out = autostart.to_suggestions(
         _ok_inspect(config_dir="/Users/alice/.config/mihomo"),
