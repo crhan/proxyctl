@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.5.5] — 2026-05-21
+
 ### Fixed
 
 - **`proxyctl check` 的 selector/fallback 代理组现在显示全部子组与
