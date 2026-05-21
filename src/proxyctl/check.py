@@ -251,17 +251,9 @@ def _proxy_groups_section(api_base: str, api_secret: str,
         print(f"  {CYAN}{gname}{NC}({gtype}) → {BOLD}{gnow}{NC} "
               f"{ds(gnow_d)}ms  [{count_str} of {total}]{tested_str}")
 
-        # v0.5.4：selector/fallback 类型 + now 指向子组时，
-        # 跳过顶层成员列表（避免跟子组节点重复），只展开 now 那一个子组。
-        # now 指向真节点时仍打印顶层成员（用户可能想看其他可选项）。
-        sub = (proxies.get(gnow) if g.get("type") in ("Selector", "Fallback")
-               else None)
-        now_is_subgroup = bool(sub and sub.get("all"))
-        if g.get("type") in ("Selector", "Fallback") and not now_is_subgroup:
-            print_members(gmembers, gnow)
-        elif g.get("type") not in ("Selector", "Fallback"):
-            print_members(gmembers, gnow)
-        if now_is_subgroup:
+        def print_sub_summary(sub_name: str, sub: dict, is_now: bool) -> bool:
+            """打印一行子组 summary（含 → now 标记 + 健康度 + tested ago）。
+            返回该子组之前是否已展开过叶子。"""
             sub_type = "url" if sub.get("type") == "URLTest" else "sel"
             sub_now = sub.get("now", "?")
             sub_now_d = get_delay(sub_now)
@@ -275,13 +267,46 @@ def _proxy_groups_section(api_base: str, api_secret: str,
             if s_nodata: sc.append(f"{YELLOW}{s_nodata}—{NC}")
             st = group_tested_ago(sub_members)
             st_str = f"  {DIM}{st}{NC}" if st else ""
-            already = gnow in expanded_subgroups
+            already = sub_name in expanded_subgroups
             tail = f"  {DIM}(详见上方){NC}" if already else ""
-            print(f"    {CYAN}{gnow}{NC}({sub_type}) → {BOLD}{sub_now}{NC} "
-                  f"{ds(sub_now_d)}ms  [{'/'.join(sc)} of {len(sub_members)}]{st_str}{tail}")
-            if not already:
-                print_members(sub_members, sub_now)
-                expanded_subgroups.add(gnow)
+            marker = "→" if is_now else " "
+            print(f"   {marker}{CYAN}{sub_name}{NC}({sub_type}) → "
+                  f"{BOLD}{sub_now}{NC} "
+                  f"{ds(sub_now_d)}ms  [{'/'.join(sc)} of {len(sub_members)}]"
+                  f"{st_str}{tail}")
+            return already
+
+        # v0.5.5：selector/fallback 含子组时，每个子组都打一行 summary（让
+        # 用户看到兄弟子组存在 + 健康度），但只对 now 子组展开叶子（保留
+        # v0.5.3 精简意图）。混在子组里的真节点（如 local-N）按 4 列表格
+        # flush。selector/fallback 全为真节点 / 其他类型组：原 print_members
+        # 行为不变。
+        if g.get("type") in ("Selector", "Fallback"):
+            has_subgroup = any(proxies.get(m, {}).get("all") for m in gmembers)
+            if not has_subgroup:
+                print_members(gmembers, gnow)
+            else:
+                leaf_buf: list = []
+
+                def flush_leaves():
+                    if leaf_buf:
+                        print_members(leaf_buf, gnow)
+                        leaf_buf.clear()
+
+                for m in gmembers:
+                    sub = proxies.get(m, {})
+                    if sub.get("all"):
+                        flush_leaves()
+                        already = print_sub_summary(m, sub, is_now=(m == gnow))
+                        if m == gnow and not already:
+                            print_members(sub.get("all", []),
+                                          sub.get("now", "?"))
+                        expanded_subgroups.add(m)
+                    else:
+                        leaf_buf.append(m)
+                flush_leaves()
+        else:
+            print_members(gmembers, gnow)
         # 顶层组本身展开完后也标记，避免被下层组重新展开
         expanded_subgroups.add(gname)
 

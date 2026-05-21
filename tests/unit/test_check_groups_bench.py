@@ -89,6 +89,47 @@ def test_proxy_groups_section_default_group_when_none(fake_subprocess):
     assert check._proxy_groups_section("http://x", "s") is True
 
 
+def test_proxy_groups_section_shows_sibling_subgroups(fake_subprocess, capsys):
+    """v0.5.5：fallback/selector 含多个子组时，每个子组都要打 summary 行
+    （让用户看到 now 之外的兄弟子组存在），但只对 now 子组展开叶子。
+    混在子组里的真节点成员也要打出来。"""
+    payload = {"proxies": {
+        "claude": {
+            "type": "Fallback", "now": "rsi-us",
+            "all": ["rsi-sg", "rsi-us", "local-13659"],
+        },
+        "rsi-sg": {"type": "URLTest", "now": "SG-01",
+                   "all": ["SG-01", "SG-02"]},
+        "rsi-us": {"type": "URLTest", "now": "US-01",
+                   "all": ["US-01", "US-02"]},
+        "SG-01": {"type": "Shadowsocks",
+                  "history": [{"delay": 80, "time": "2026-05-21T00:00:00Z"}]},
+        "SG-02": {"type": "Shadowsocks",
+                  "history": [{"delay": 0, "time": "2026-05-21T00:00:00Z"}]},
+        "US-01": {"type": "Shadowsocks",
+                  "history": [{"delay": 200, "time": "2026-05-21T00:00:00Z"}]},
+        "US-02": {"type": "Shadowsocks",
+                  "history": [{"delay": 0, "time": "2026-05-21T00:00:00Z"}]},
+        "local-13659": {"type": "Direct", "history": []},
+    }}
+    fake_subprocess.set_default(stdout=json.dumps(payload))
+    assert check._proxy_groups_section("http://x", "s",
+                                       groups=["claude"]) is True
+    import re
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
+    # 兄弟子组必须可见
+    assert "rsi-sg(url)" in plain, "兄弟子组 summary 行缺失"
+    assert "rsi-us(url)" in plain
+    # now 子组的叶子展开
+    assert "US-01:200" in plain
+    assert "US-02:✗" in plain
+    # 非 now 子组的叶子不应该展开（精简意图保留）
+    assert "SG-01:80" not in plain
+    assert "SG-02:✗" not in plain
+    # 真节点成员也要可见
+    assert "local-13659" in plain
+
+
 def test_proxy_groups_section_dedup_subgroup_across_groups(fake_subprocess, capsys):
     """v0.5.4：多个组的 now 指向同一子组时，该子组节点列表只展开一次。"""
     payload = {"proxies": {

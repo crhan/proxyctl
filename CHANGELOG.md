@@ -5,6 +5,18 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`proxyctl check` 的 selector/fallback 代理组现在显示全部子组与
+  真节点成员，不再只显示 `now` 那一个子组。** v0.5.3 / v0.5.4 的"精简
+  显示"为了避免节点重复，把 `now` 之外的兄弟子组 summary 行和混在
+  子组里的真节点成员（如 `local-13659`）都跳过了，导致典型 `claude →
+  [residential-sg, residential-us, local-13659]` 这种结构里用户只能看到
+  当前命中的那一个子组，连"还有哪些可选线路"都不知道。本版恢复全部
+  子组 summary 可见 + 真节点成员可见，但仍只对 `now` 子组展开叶子
+  节点列表（保留 v0.5.3 跨组去重 `(详见上方)` 行为），单组从 ~50 行
+  精简到 5-7 行的目标不变。
+
 ### Added
 
 - **新增 `proxyctl connections` 只读诊断命令。** 该命令读取本机
