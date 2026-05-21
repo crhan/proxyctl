@@ -432,14 +432,14 @@ def _t_flags(backend, config) -> TopicCard:
     return {
         "topic": "flags",
         "summary": (
-            "全局 flag 速查：--json / --plain / --dry-run / --no-color / --quiet。"
+            "全局 flag 速查：--json / --plain / --dry-run/-n / --no-color / --quiet。"
             "全部位置无关；--json 与 --plain 互斥；--dry-run 仅对写命令有效。"
         ),
         "file": "(no file)",
         "edit": (
             "  --json       envelope schema v2（含 meta.ts/elapsed_ms/request_id）\n"
             "  --plain      纯 TSV 输出（audit / check 等表格命令）\n"
-            "  --dry-run    预演写命令的 plan（list[PlanStep]），不真正执行\n"
+            "  --dry-run/-n 预演写命令的 plan（list[PlanStep]），不真正执行\n"
             "  --no-color   关闭 ANSI（也读 NO_COLOR / PROXYCTL_NO_COLOR）\n"
             "  --quiet/-q   压制非关键 stderr\n"
             "  --help/-h    单命令或全局帮助\n"
@@ -730,7 +730,7 @@ Step 5  proxyctl doctor --json            # 当前健康基线
 Step 6  proxyctl explain <topic>          # 深入概念（topic 见下）
 ```
 
-调用任何写命令前先加 `--dry-run --json` 看 `data.plan`，确认无误再去掉。
+调用任何写命令前先加 `--dry-run --json`（或 `-n --json`）看 `data.plan`，确认无误再去掉。
 
 ## Capabilities — 能做什么（按副作用三分类）
 

@@ -52,6 +52,13 @@ through `proxyctl status --json | jq .data.subscription` and the
 refresh script writes this file; proxyctl performs zero network calls. See
 `proxyctl explain subscription` for the schema.
 
+## Runtime output discipline
+
+Machine-readable stdout is sacred. Any warning, config-parse fallback, plugin
+load note, or human diagnostic must go to stderr so `--json` stdout remains a
+single parseable JSON/NDJSON stream. This matters during early startup too:
+`load_config()` runs before most subcommands dispatch.
+
 ---
 
 ## Doctor suggestions (v0.5.0+)

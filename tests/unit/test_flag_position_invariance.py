@@ -58,6 +58,14 @@ def test_dry_run_position_invariant_for_mode():
             == _normalize_envelope_for_compare(c))
 
 
+def test_short_dry_run_flag_matches_long_form_for_mode():
+    """-n is the clig.dev-friendly short alias for --dry-run."""
+    long_out, _, long_code = _run_capture(["proxyctl", "mode", "tun", "--dry-run", "--json"])
+    short_out, _, short_code = _run_capture(["proxyctl", "mode", "tun", "-n", "--json"])
+    assert long_code == short_code == 0
+    assert _normalize_envelope_for_compare(long_out) == _normalize_envelope_for_compare(short_out)
+
+
 def test_dry_run_position_invariant_for_engine():
     a, _, ca = _run_capture(
         ["proxyctl", "engine", "mihomo", "--dry-run", "--json"])

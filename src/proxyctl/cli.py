@@ -70,8 +70,11 @@ def load_config() -> dict:
                 user_cfg = yaml.safe_load(f) or {}
             cfg.update(user_cfg)
         except Exception as e:
-            print(f"{YELLOW}警告：读取配置文件失败：{e}{NC}")
-            print(f"  使用默认配置，可能需要在 {CONFIG_FILE} 中配置 api_secret")
+            print(f"{YELLOW}警告：读取配置文件失败：{e}{NC}", file=sys.stderr)
+            print(
+                f"  使用默认配置，可能需要在 {CONFIG_FILE} 中配置 api_secret",
+                file=sys.stderr,
+            )
     return cfg
 
 
@@ -1501,8 +1504,17 @@ def cmd_help():
           f"{DIM}一键 JSON + 关色 + 非交互{NC}")
     print()
 
+    print(f"{BOLD}常用示例{NC}")
+    print(f"  {CYAN}proxyctl doctor --json{NC}              "
+          f"{DIM}最快健康基线，agent 首选{NC}")
+    print(f"  {CYAN}proxyctl mode tun -n --json{NC}         "
+          f"{DIM}预览写操作 plan，不执行{NC}")
+    print(f"  {CYAN}proxyctl help trace{NC}                 "
+          f"{DIM}查看单命令用法和示例{NC}")
+    print()
+
     print(f"{BOLD}用法{NC}  proxyctl <command> [args] "
-          f"[--json|--plain] [--dry-run] [--no-color] [--quiet]")
+          f"[--json|--plain] [--dry-run|-n] [--no-color] [--quiet]")
     print()
 
     # 按 group 元数据驱动渲染
@@ -1533,7 +1545,7 @@ def cmd_help():
     print(f"{BOLD}全局 flag{NC}")
     print(f"  --json         输出 envelope JSON（schema v2）")
     print(f"  --plain        输出纯 TSV（audit/check 等支持表格的命令）")
-    print(f"  --dry-run      预演写操作（输出 plan，不真正执行）")
+    print(f"  --dry-run/-n   预演写操作（输出 plan，不真正执行）")
     print(f"  --no-color     关闭 ANSI（也读 NO_COLOR）")
     print(f"  --quiet/-q     压制非关键 stderr")
     print(f"  --help/-h      本帮助")
@@ -1647,6 +1659,7 @@ def cmd_version_print() -> None:
                 "lock_path_in_error":      True,
                 "side_effects_enum":       True,
                 "dry_run":                 True,
+                "dry_run_short_flag":      True,
                 "plain":                   True,
                 "flag_position_invariant": True,
                 "agents_md":               True,
@@ -1751,7 +1764,7 @@ def _extract_global_flags(argv: list) -> tuple:
     """从 argv 中剥离全局 flag，返回 (剩余 argv, flag dict)。
 
     clig.dev 原则：flag 位置无关 — 在任意位置出现的 --json / --no-color /
-    --quiet / -q / --dry-run / --plain 都会被识别并剥离，剩余位置参数顺序保持不变。
+    --quiet / -q / --dry-run / -n / --plain 都会被识别并剥离，剩余位置参数顺序保持不变。
     """
     flags = {
         "json": False, "no_color": False, "quiet": False,
@@ -1765,7 +1778,7 @@ def _extract_global_flags(argv: list) -> tuple:
             flags["no_color"] = True
         elif a in ("--quiet", "-q"):
             flags["quiet"] = True
-        elif a == "--dry-run":
+        elif a in ("--dry-run", "-n"):
             flags["dry_run"] = True
         elif a == "--plain":
             flags["plain"] = True

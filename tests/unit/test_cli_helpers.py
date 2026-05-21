@@ -41,6 +41,20 @@ def test_run_out_returns_empty_on_failure(fake_subprocess):
     assert cli.run_out(["fail"]) == ""
 
 
+def test_load_config_warning_goes_to_stderr(monkeypatch, tmp_path: Path, capsys):
+    """Config parse warnings must not pollute stdout or JSON command output."""
+    bad_config = tmp_path / "config.yaml"
+    bad_config.write_text("backend: [\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "CONFIG_FILE", str(bad_config))
+
+    loaded = cli.load_config()
+    captured = capsys.readouterr()
+
+    assert loaded["backend"] == cli.DEFAULTS["backend"]
+    assert captured.out == ""
+    assert "读取配置文件失败" in captured.err
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # wait_port
 # ────────────────────────────────────────────────────────────────────────────

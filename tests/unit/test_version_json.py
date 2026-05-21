@@ -65,7 +65,7 @@ def test_version_json_supported_features_known_keys():
         "envelope_v2", "agent_guide", "commands_json", "explain",
         "version_json", "discovery_envelope", "help_subcommand",
         "exit_codes_extended", "did_you_mean", "lock_path_in_error",
-        "side_effects_enum", "dry_run", "plain",
+        "side_effects_enum", "dry_run", "dry_run_short_flag", "plain",
         "flag_position_invariant", "commands_schema", "doctor_extended",
         "doctor_healthy_field", "log_ndjson_v2", "agents_md",
     }

@@ -69,7 +69,7 @@ def test_completion_json_envelope(capsys):
 def test_bash_completion_includes_0_3_x_global_flags(capsys):
     completion.cmd_completion(["bash"])
     out = capsys.readouterr().out
-    for flag in ("--dry-run", "--plain"):
+    for flag in ("--dry-run", "-n", "--plain"):
         assert flag in out, f"bash 补全缺 {flag}"
 
 
@@ -104,7 +104,7 @@ def test_zsh_completion_includes_help_subcommand_dispatch(capsys):
 def test_zsh_completion_documents_new_global_flags(capsys):
     completion.cmd_completion(["zsh"])
     out = capsys.readouterr().out
-    for flag in ("--plain", "--dry-run", "--no-color"):
+    for flag in ("--plain", "--dry-run", "-n", "--no-color"):
         assert flag in out, f"zsh 补全缺 {flag}"
 
 
@@ -127,6 +127,7 @@ def test_zsh_completion_handles_agent_guide_section(capsys):
 def test_fish_completion_includes_dry_run_for_each_write_command(capsys):
     completion.cmd_completion(["fish"])
     out = capsys.readouterr().out
+    assert "complete -c proxyctl -s n -l dry-run" in out
     # 至少 mode / engine / fix 上有 --dry-run
     for cmd in ("mode", "engine", "fix", "audit", "config", "daemon",
                 "dns-lock", "dns-unlock"):

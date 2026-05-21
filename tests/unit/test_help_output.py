@@ -37,7 +37,10 @@ def test_top_level_help_succeeds():
     out, _, code = _run_capture(["proxyctl", "--help"])
     assert code == 0
     assert "AGENT 接入" in out
+    assert "常用示例" in out
     assert "proxyctl agent-guide" in out
+    assert "proxyctl doctor --json" in out
+    assert "proxyctl mode tun -n --json" in out
     assert "proxyctl commands --json" in out
     assert "用法" in out
 
@@ -85,7 +88,7 @@ def test_help_includes_env_vars():
 def test_help_includes_global_flags():
     """顶层 help 必须文档化 --json / --plain / --dry-run / --no-color / --quiet。"""
     out, _, _ = _run_capture(["proxyctl", "--help"])
-    for flag in ("--json", "--plain", "--dry-run", "--no-color", "--quiet"):
+    for flag in ("--json", "--plain", "--dry-run", "-n", "--no-color", "--quiet"):
         assert flag in out, f"--help 缺少 flag: {flag}"
 
 

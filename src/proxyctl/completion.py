@@ -4,7 +4,7 @@
 0.3.x 起补全：
 
   - 全局 flag: --help / --version / --json / --no-color / --quiet
-              / --dry-run / --plain
+              / --dry-run / -n / --plain
   - explain <topic>          → topic 列表
   - mode <tun|proxy>          → 模式
   - engine <mihomo|singbox>   → 引擎
@@ -66,7 +66,7 @@ _proxyctl_complete() {{
 
     # 第二个 token = 子命令
     if [ ${{COMP_CWORD}} -eq 1 ]; then
-        COMPREPLY=( $(compgen -W "${{cmds}} help --help --version --json --plain --dry-run --no-color --quiet" -- "${{cur}}") )
+        COMPREPLY=( $(compgen -W "${{cmds}} help --help --version --json --plain --dry-run -n --no-color --quiet" -- "${{cur}}") )
         return 0
     fi
 
@@ -133,7 +133,7 @@ _proxyctl_complete() {{
     local dry_run_cmds=({dry_run_cmds})
     for c in "${{dry_run_cmds[@]}}"; do
         if [ "$first" = "$c" ]; then
-            COMPREPLY=( $(compgen -W "--dry-run --json --no-color --quiet --help" -- "${{cur}}") )
+            COMPREPLY=( $(compgen -W "--dry-run -n --json --no-color --quiet --help" -- "${{cur}}") )
             return 0
         fi
     done
@@ -142,7 +142,7 @@ _proxyctl_complete() {{
     local plain_cmds=({plain_cmds})
     for c in "${{plain_cmds[@]}}"; do
         if [ "$first" = "$c" ]; then
-            COMPREPLY=( $(compgen -W "--plain --json --dry-run --help" -- "${{cur}}") )
+            COMPREPLY=( $(compgen -W "--plain --json --dry-run -n --help" -- "${{cur}}") )
             return 0
         fi
     done
@@ -160,7 +160,7 @@ _proxyctl_complete() {{
     fi
 
     # 默认 flag 补全
-    COMPREPLY=( $(compgen -W "--help --json --plain --dry-run --no-color --quiet" -- "${{cur}}") )
+    COMPREPLY=( $(compgen -W "--help --json --plain --dry-run -n --no-color --quiet" -- "${{cur}}") )
 }}
 complete -F _proxyctl_complete proxyctl
 """
@@ -204,6 +204,7 @@ _proxyctl() {{
     '--json[结构化 envelope v2 输出]' \\
     '--plain[纯 TSV 输出（audit/check）；与 --json 互斥]' \\
     '--dry-run[预演写命令；输出 data.plan]' \\
+    '-n[预演写命令；输出 data.plan]' \\
     '--no-color[关闭 ANSI 颜色]' \\
     '--quiet[安静模式]' \\
     '-q[安静模式]'
@@ -258,7 +259,7 @@ def _gen_fish() -> str:
              "complete -c proxyctl -l version -d '显示版本'",
              "complete -c proxyctl -l json -d 'envelope v2 输出'",
              "complete -c proxyctl -l plain -d 'TSV 输出（audit/check）'",
-             "complete -c proxyctl -l dry-run -d '预演写命令'",
+             "complete -c proxyctl -s n -l dry-run -d '预演写命令'",
              "complete -c proxyctl -l no-color -d '关闭 ANSI'",
              "complete -c proxyctl -l quiet -d '安静模式'",
              ""]
