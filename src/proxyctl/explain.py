@@ -1544,6 +1544,12 @@ def cmd_doctor(args: list, backend, config) -> None:
     port = config.get("proxy_port", 7890)
     api_base = config.get("api_base", "http://127.0.0.1:9090")
 
+    # mode 先取（dns_ok 判定 + 显示均依赖；v0.5.4 起）
+    try:
+        mode_str = get_mode(backend)
+    except Exception:
+        mode_str = "unknown"
+
     if suggest_only:
         # Fast path：跳过所有 5 项 score 探测（最慢可累计 5-10s）
         engine_up = None
@@ -1560,7 +1566,7 @@ def cmd_doctor(args: list, backend, config) -> None:
     else:
         engine_up = bool(service_running(backend))
         port_listen = _tcp_open("127.0.0.1", port)
-        dns_ok = _dns_points_to_loopback()
+        dns_ok = _dns_check_ok(mode_str)
         system_proxy_ok = _system_proxy_points_to_loopback(port)
         connectivity_ok = (_quick_connectivity(api_base, port)
                            if engine_up else False)
@@ -1575,10 +1581,6 @@ def cmd_doctor(args: list, backend, config) -> None:
         hint = _doctor_hint(flags_for_human)
 
     # informational extra（不计分）
-    try:
-        mode_str = get_mode(backend)
-    except Exception:
-        mode_str = "unknown"
     try:
         held = _io.held_lock_names()
     except Exception:
@@ -1643,7 +1645,9 @@ def cmd_doctor(args: list, backend, config) -> None:
               f"{DIM}engine={backend.name}{ev_tag} mode={mode_str} port={port}{NC}")
         print(f"  {icon(engine_up)}  engine_up        ({backend.name} 服务运行中)")
         print(f"  {icon(port_listen)}  port_listen      (127.0.0.1:{port})")
-        print(f"  {icon(dns_ok)}  dns_ok           (系统 DNS 含 127.0.0.1)")
+        dns_desc = ("proxy 模式无需 DNS 劫持" if mode_str == "proxy"
+                    else "系统 DNS 含 127.0.0.1")
+        print(f"  {icon(dns_ok)}  dns_ok           ({dns_desc})")
         print(f"  {icon(system_proxy_ok)}  system_proxy_ok  (macOS HTTP/HTTPS proxy)")
         print(f"  {icon(connectivity_ok)}  connectivity_ok  (https://www.google.com via proxy)")
         if held:
@@ -1763,6 +1767,21 @@ def _dns_points_to_loopback() -> bool:
         return "127.0.0.1" in text or "::1" in text
     except OSError:
         return False
+
+
+def _dns_check_ok(mode: str) -> bool:
+    """doctor dns_ok 判定（v0.5.4：mode-aware）。
+
+    proxy 模式无需系统 DNS 指向 127.0.0.1——流量走 HTTP/SOCKS 代理，
+    mihomo 不在 :53 监听，系统 DNS 用 systemd-resolved / DHCP 默认即可。
+    旧逻辑在 Ubuntu（DNS=127.0.0.53 stub）+ proxy 模式下永远判 ✗
+    并建议 `proxyctl fix`——但 fix 的 DNS 改写只对 macOS TUN 模式有意义。
+
+    tun / mixed / 未知模式：保留旧的"系统 DNS 含 127.0.0.1"判定。
+    """
+    if mode == "proxy":
+        return True
+    return _dns_points_to_loopback()
 
 
 def _system_proxy_points_to_loopback(port: int) -> bool:

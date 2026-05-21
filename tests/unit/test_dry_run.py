@@ -90,6 +90,32 @@ def test_fix_dry_run_emits_plan(monkeypatch):
     _assert_plan_step_schema(json.loads(out)["data"]["plan"])
 
 
+def test_plan_fix_linux_only_http_put(monkeypatch):
+    """v0.5.4：Linux 平台 _plan_fix 只输出 Clash API 热重载步骤（不改 DNS）。"""
+    import proxyctl.cli as cli
+    monkeypatch.setattr(cli, "IS_MACOS", False)
+    backend = cli.MihomoBackend({"config_dir": "/tmp/t", "proxy_port": 7890})
+    plan = cli._plan_fix(backend, {"api_base": "http://127.0.0.1:9090"})
+    assert len(plan) == 1
+    assert plan[0]["action"] == "http_put"
+    assert "Clash API" in plan[0]["summary"]
+    actions = {s["action"] for s in plan}
+    assert "system_op" not in actions, \
+        "Linux 不应有 networksetup/scutil 系统 DNS 改写步骤"
+
+
+def test_plan_fix_macos_includes_dns_steps(monkeypatch):
+    """v0.5.4：macOS 平台 _plan_fix 保留三步（DNS 改写 + 缓存清理 + 热重载）。"""
+    import proxyctl.cli as cli
+    monkeypatch.setattr(cli, "IS_MACOS", True)
+    backend = cli.MihomoBackend({"config_dir": "/tmp/t", "proxy_port": 7890})
+    plan = cli._plan_fix(backend, {"api_base": "http://127.0.0.1:9090"})
+    assert len(plan) == 3
+    actions = [s["action"] for s in plan]
+    assert actions == ["system_op", "system_op", "http_put"]
+    assert "networksetup" in plan[0]["target"]
+
+
 def test_audit_apply_dry_run_emits_plan(monkeypatch):
     _ban_subprocess(monkeypatch)
     out, _, code = _run_capture(

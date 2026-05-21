@@ -2010,32 +2010,39 @@ def _plan_engine(backend, target: str) -> list[dict]:
 
 
 def _plan_fix(backend, config) -> list[dict]:
-    """fix 的 plan。
+    """fix 的 plan（v0.5.4：按平台分支）。
+
+    Linux：cmd_fix 仅走 Clash API 热重载，不改系统 DNS（systemd-resolved
+    上的 127.0.0.53 stub 不该被 networksetup 替换）。plan 同步只出 http_put。
+    macOS：保留 DNS 重写 + 缓存清理 + 热重载三步。
 
     networksetup / scutil 迭代型操作不可逐条 argv 化（每个网络服务调一次），
-    标 action=system_op + 描述性 target。http_put 是单次精确请求，target
-    为完整 URL。cmd_fix 实际还会调插件 route_hooks + 第二次 curl 清 fakeip，
-    contract test 不做 subprocess 子集校验（plugin 可注入），只校验
-    placeholder 已消除（< / > 字符不出现）。
+    标 action=system_op + 描述性 target。contract test 不做 subprocess 子集
+    校验（plugin 可注入），只校验 placeholder 已消除。
     """
     api_base = config.get('api_base', 'http://127.0.0.1:9090')
-    return [
-        {"action": "system_op",
-         "target": "networksetup -setdnsservers (per service) 127.0.0.1",
-         "summary": "重置系统 DNS 指向 127.0.0.1（对抗 DHCP 续租）",
-         "reversible": True, "requires_sudo": True,
-         "side_effects": ["system"]},
-        {"action": "system_op",
-         "target": "scutil DNS reset + dscacheutil -flushcache",
-         "summary": "清 macOS DNS 缓存（含 fakeip 表）",
-         "reversible": True, "requires_sudo": True,
-         "side_effects": ["cache"]},
-        {"action": "http_put",
-         "target": f"{api_base}/configs?force=true",
-         "summary": "向 Clash API 发热重载请求（不重启进程）",
-         "reversible": True,
-         "side_effects": ["network-io"]},
-    ]
+    plan = []
+    if IS_MACOS:
+        plan.extend([
+            {"action": "system_op",
+             "target": "networksetup -setdnsservers (per service) 127.0.0.1",
+             "summary": "重置系统 DNS 指向 127.0.0.1（对抗 DHCP 续租）",
+             "reversible": True, "requires_sudo": True,
+             "side_effects": ["system"]},
+            {"action": "system_op",
+             "target": "scutil DNS reset + dscacheutil -flushcache",
+             "summary": "清 macOS DNS 缓存（含 fakeip 表）",
+             "reversible": True, "requires_sudo": True,
+             "side_effects": ["cache"]},
+        ])
+    plan.append({
+        "action": "http_put",
+        "target": f"{api_base}/configs?force=true",
+        "summary": "向 Clash API 发热重载请求（不重启进程）",
+        "reversible": True,
+        "side_effects": ["network-io"],
+    })
+    return plan
 
 
 def _plan_audit_apply(days: int, backend, config: dict) -> list[dict]:

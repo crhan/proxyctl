@@ -251,6 +251,13 @@ inspect what they would do.
   it to the new version section when the release is cut.
 - Keep `man/proxyctl.1` in sync when adding/renaming commands or flags.
 - Bumping `pyproject.toml` version also requires bumping `cli.VERSION`.
+- **Don't bump version while the previous bumped version is still unreleased.**
+  The "next version" is whatever number is currently in `pyproject.toml`
+  *if* it's not yet pushed/tagged. Compare against PyPI / `git tag -l`
+  before bumping — if `0.5.3` is already in `pyproject.toml` but no
+  `v0.5.3` tag exists on origin, keep adding to `[0.5.3]` in CHANGELOG;
+  don't jump to `0.5.4`. Each released version on PyPI must correspond
+  to exactly one bump.
 
 ---
 

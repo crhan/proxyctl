@@ -5,6 +5,34 @@
 
 ## [Unreleased]
 
+## [0.5.4] — 2026-05-21
+
+### Fixed
+
+- **`doctor` 在 Linux + proxy 模式下不再误报 `dns_ok` 失败。** 旧逻辑
+  `_dns_points_to_loopback()` 简单粗暴读 `/etc/resolv.conf` 看是否含
+  `127.0.0.1`，但 Ubuntu / Debian 标准是 systemd-resolved 在 `127.0.0.53:53`
+  起 stub resolver，永远不会匹配 → 永远判 ✗ → doctor 给出 `next: proxyctl fix`
+  的错误建议，且 fix 的 plan 显示 macOS 风格的 `networksetup` 步骤（实际
+  cmd_fix Linux 路径根本不跑这些）。本版 doctor 改用 mode-aware
+  `_dns_check_ok(mode)`：proxy 模式直接返回 True（流量走 HTTP/SOCKS 代理，
+  mihomo 不在 :53 监听，系统 DNS 用 systemd-resolved/DHCP 默认即可），
+  tun / mixed / 未知模式保留旧的回环判定。doctor 人类输出 dns_ok 描述行
+  按 mode 切换：`(proxy 模式无需 DNS 劫持)` 或 `(系统 DNS 含 127.0.0.1)`。
+
+- **`fix --dry-run` 在 Linux 不再输出 macOS 风格的 DNS 改写步骤。**
+  `_plan_fix` 按平台分支：Linux 只输出 1 步 `http_put`（Clash API 热重载），
+  与 `cmd_fix` 实际 Linux 路径对齐；macOS 保留三步（DNS reset + cache
+  flush + reload）。之前 Linux 用户 dry-run 会被 plan 误导以为 fix 要改
+  系统 DNS。
+
+### Compatibility
+
+- `data.dns_ok` 字段类型不变（仍是 bool）；但 proxy 模式下该字段含义
+  从"系统 DNS 是否含 127.0.0.1"变为"DNS 配置对当前 mode 是否健康"。
+  agent 消费 `data.dns_ok` 的逻辑无需调整。
+- `data.plan[].action` 枚举不变；Linux 平台 fix plan 步数从 3 降到 1。
+
 ## [0.5.3] — 2026-05-20
 
 ### Fixed
