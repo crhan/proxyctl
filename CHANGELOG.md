@@ -5,6 +5,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- **新增 `proxyctl connections` 只读诊断命令。** 该命令读取本机
+  `lsof` / `ps` 连接信息，并在 mihomo 后端下用本地 `/connections` API
+  按 `metadata.sourcePort` 关联连接详情。`--app <name>` 可重复指定应用过滤；
+  `--json` 输出 envelope v2，包含进程、PID、fd、本地源端口、是否连接到
+  `proxy_port`、mihomo host/destination/rule/rulePayload/chains/upload/
+  download/start，以及 unmatched 原因。非 mihomo 后端或本地 API 不可用时
+  降级输出本机连接并标注 unmatched。
+
 ## [0.5.4] — 2026-05-21
 
 ### Fixed

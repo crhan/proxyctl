@@ -69,7 +69,7 @@ def test_known_command_side_effects():
         "config-write", "process"}
     assert set(by_name["fix"]["side_effects"]) == {"system", "cache"}
     # 只读命令
-    for name in ("status", "doctor", "explain", "agent-guide",
+    for name in ("status", "doctor", "connections", "explain", "agent-guide",
                  "commands", "help", "env", "log", "plugins"):
         assert by_name[name]["side_effects"] == [], \
             f"{name} 应无 side_effects"

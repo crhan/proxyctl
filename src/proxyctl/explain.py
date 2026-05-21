@@ -736,7 +736,7 @@ Step 6  proxyctl explain <topic>          # 深入概念（topic 见下）
 
 | 类别 | sudo | 命令 |
 |---|---|---|
-| **只读** (side_effects=[]) | 否 | `status doctor check trace bench audit env log plugins explain agent-guide commands config path|get help version` |
+| **只读** (side_effects=[]) | 否 | `status doctor connections audit env log plugins explain agent-guide commands config path|get help version` |
 | **只读 + 网络 IO** (network-io) | 否 | `check trace bench recover`（curl/HTTP，不改本地状态） |
 | **写 proxyctl 自身配置** | 否 | `config set <key> <value>`（原子写 + .bak + YAML 校验） |
 | **写引擎配置** (config-write) | 是 | `mode tun|proxy` `audit apply` |
@@ -1047,6 +1047,13 @@ COMMANDS_META: list[dict] = [
      "args": [], "supports_json": True, "side_effects": ["network-io"],
      "needs_sudo": False, "interactive": False, "exit_codes": [0, 1, 5, 7],
      "examples": ["proxyctl check", "proxyctl check --json"]},
+    {"name": "connections", "group": "diagnostic",
+     "summary": "本机 App/进程到 proxy_port 的连接与 mihomo /connections 按 sourcePort 关联",
+     "args": [{"name": "--app", "required": False, "repeatable": True}],
+     "supports_json": True, "side_effects": [],
+     "needs_sudo": False, "interactive": False, "exit_codes": [0, 2, 10],
+     "examples": ["proxyctl connections --app Codex --app Claude",
+                  "proxyctl connections --app Codex --json"]},
     {"name": "trace", "group": "diagnostic", "summary": "域名链路诊断",
      "args": [{"name": "domain", "required": True}],
      "supports_json": True, "side_effects": ["network-io"],

@@ -1,0 +1,389 @@
+"""proxyctl connections — join local app sockets with mihomo connections.
+
+The command is intentionally read-only: it reads lsof/ps output and, for the
+mihomo backend, the local Clash-compatible `/connections` controller endpoint.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from typing import Any
+
+from proxyctl import _io
+from proxyctl._io import maybe_disable_module_colors
+
+BOLD = "\033[1m"
+DIM = "\033[2m"
+GREEN = "\033[0;32m"
+YELLOW = "\033[0;33m"
+CYAN = "\033[0;36m"
+NC = "\033[0m"
+
+maybe_disable_module_colors(__name__)
+
+DEFAULT_APP_FILTERS = ["Codex", "Claude", "ChatGPT"]
+
+
+@dataclass
+class LocalConnection:
+    """One local TCP connection reported by lsof.
+
+    Attributes:
+        pid: Owning process id.
+        app: Short process name from lsof.
+        fd: File descriptor label from lsof, for example ``12u``.
+        source_port: Local ephemeral port used to connect to proxy_port.
+        target_host: Destination host from lsof's NAME field.
+        target_port: Destination port from lsof's NAME field.
+        raw_name: Original lsof NAME field.
+        process: Full executable path from ps, when available.
+        command: Full command line from ps, when available.
+    """
+
+    pid: int
+    app: str
+    fd: str
+    source_port: int
+    target_host: str
+    target_port: int
+    raw_name: str
+    process: str = ""
+    command: str = ""
+
+    def matches_app(self, filters: list[str]) -> bool:
+        """Return whether this row matches any requested ``--app`` filter."""
+        if not filters:
+            return True
+        haystack = " ".join(
+            [self.app, os.path.basename(self.process), self.process, self.command]
+        ).lower()
+        return any(f.lower() in haystack for f in filters)
+
+    def to_dict(self, proxy_port: int) -> dict[str, Any]:
+        """Convert the lsof row to the JSON contract used by this command."""
+        return {
+            "app": self.app,
+            "pid": self.pid,
+            "fd": self.fd,
+            "process": self.process,
+            "command": self.command,
+            "local_source_port": self.source_port,
+            "target_host": self.target_host,
+            "target_port": self.target_port,
+            "connects_proxy_port": self.target_port == proxy_port,
+            "raw_lsof_name": self.raw_name,
+        }
+
+
+@dataclass
+class ConnectionArgs:
+    """Parsed ``proxyctl connections`` arguments.
+
+    Attributes:
+        app_filters: Process/app name filters. Empty means collect all apps.
+        all_apps: Whether the user explicitly requested all processes.
+    """
+
+    app_filters: list[str]
+    all_apps: bool = False
+
+
+def parse_args(args: list[str]) -> ConnectionArgs:
+    """Parse ``proxyctl connections`` arguments.
+
+    Supported syntax:
+        ``--app NAME`` may appear more than once.
+        ``--all`` disables the default AI-app filter.
+    """
+    apps: list[str] = []
+    all_apps = False
+    idx = 0
+    while idx < len(args):
+        arg = args[idx]
+        if arg == "--all":
+            all_apps = True
+            idx += 1
+            continue
+        if arg == "--app":
+            if idx + 1 >= len(args):
+                _io.fail("connections --app 需要一个应用名",
+                         hint="proxyctl connections --app Codex --json",
+                         doc="agent-protocol", code=_io.USAGE,
+                         cmd="connections")
+            apps.append(args[idx + 1])
+            idx += 2
+            continue
+        _io.fail(f"未识别 connections 参数：{arg}",
+                 hints=["proxyctl connections --app Codex --app Claude",
+                        "proxyctl connections --all --json",
+                        "proxyctl connections --json"],
+                 doc="agent-protocol", code=_io.USAGE, cmd="connections")
+    if all_apps and apps:
+        _io.fail("connections 的 --all 与 --app 不能同时使用",
+                 hint="proxyctl connections --all --json",
+                 doc="agent-protocol", code=_io.USAGE, cmd="connections")
+    return ConnectionArgs(app_filters=[] if all_apps else (apps or DEFAULT_APP_FILTERS),
+                          all_apps=all_apps)
+
+
+def _parse_lsof_name(name: str) -> tuple[int, str, int] | None:
+    """Parse lsof NAME into ``(source_port, target_host, target_port)``.
+
+    The format differs slightly across macOS/Linux and IPv4/IPv6, but the
+    stable part for established TCP is ``local:port->remote:port``.
+    """
+    if "->" not in name:
+        return None
+    left, right = name.split("->", 1)
+    right = right.split(" ", 1)[0]
+    source_match = re.search(r":(\d+)$", left.strip("[]"))
+    target_match = re.search(r"(.+):(\d+)$", right.strip())
+    if not source_match or not target_match:
+        return None
+    target_host = target_match.group(1).strip("[]")
+    return int(source_match.group(1)), target_host, int(target_match.group(2))
+
+
+def parse_lsof_fields(text: str) -> list[LocalConnection]:
+    """Parse ``lsof -Fpcfn`` established TCP output."""
+    rows: list[LocalConnection] = []
+    pid: int | None = None
+    app = ""
+    fd = ""
+    for line in text.splitlines():
+        if not line:
+            continue
+        tag, value = line[0], line[1:]
+        if tag == "p":
+            try:
+                pid = int(value)
+            except ValueError:
+                pid = None
+            app = ""
+            fd = ""
+        elif tag == "c":
+            app = value
+        elif tag == "f":
+            fd = value
+        elif tag == "n" and pid is not None:
+            parsed = _parse_lsof_name(value)
+            if not parsed:
+                continue
+            source_port, target_host, target_port = parsed
+            rows.append(LocalConnection(
+                pid=pid, app=app, fd=fd, source_port=source_port,
+                target_host=target_host, target_port=target_port,
+                raw_name=value,
+            ))
+    return rows
+
+
+def collect_lsof_connections(app_filters: list[str]) -> list[LocalConnection]:
+    """Collect local established TCP connections for the requested apps."""
+    cmd = ["lsof", "-nP", "-iTCP", "-sTCP:ESTABLISHED", "-Fpcfn"]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+    if proc.returncode not in (0, 1):
+        _io.fail("lsof 读取本机连接失败",
+                 hints=[proc.stderr.strip()] if proc.stderr else None,
+                 doc="troubleshooting", code=_io.DEPENDENCY_MISSING,
+                 cmd="connections")
+    rows = parse_lsof_fields(proc.stdout)
+    _enrich_with_ps(rows)
+    return [row for row in rows if row.matches_app(app_filters)]
+
+
+def _enrich_with_ps(rows: list[LocalConnection]) -> None:
+    """Add process path and command line from ps; failures leave lsof data intact."""
+    seen: set[int] = set()
+    for row in rows:
+        if row.pid in seen:
+            continue
+        seen.add(row.pid)
+        process = _ps_field(row.pid, "comm=")
+        command = _ps_field(row.pid, "command=")
+        for same_pid in rows:
+            if same_pid.pid == row.pid:
+                same_pid.process = process
+                same_pid.command = command
+
+
+def _ps_field(pid: int, field: str) -> str:
+    """Read one ps output field for ``pid`` and return an empty string on failure."""
+    try:
+        proc = subprocess.run(["ps", "-p", str(pid), "-o", field],
+                              capture_output=True, text=True, timeout=1)
+    except Exception:
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip()
+
+
+def fetch_mihomo_connections(api_base: str, api_secret: str,
+                             *, timeout: float = 1.0) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Fetch local mihomo `/connections` data without using system proxies."""
+    url = f"{api_base.rstrip('/')}/connections"
+    headers = {}
+    if api_secret:
+        headers["Authorization"] = f"Bearer {api_secret}"
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read())
+    except (urllib.error.URLError, OSError, TimeoutError,
+            json.JSONDecodeError) as exc:
+        return [], {"ok": False, "status": "error", "url": url,
+                    "error": str(exc)}
+    conns = payload.get("connections")
+    if not isinstance(conns, list):
+        return [], {"ok": False, "status": "error", "url": url,
+                    "error": "response missing connections[]"}
+    return conns, {"ok": True, "status": "ok", "url": url,
+                   "error": None, "count": len(conns)}
+
+
+def _connection_source_port(conn: dict[str, Any]) -> int | None:
+    """Return mihomo metadata.sourcePort as int when present."""
+    metadata = conn.get("metadata") or {}
+    port = metadata.get("sourcePort")
+    try:
+        return int(port)
+    except (TypeError, ValueError):
+        return None
+
+
+def _mihomo_detail(conn: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Extract the stable mihomo fields needed by agents."""
+    if not conn:
+        return None
+    metadata = conn.get("metadata") or {}
+    return {
+        "host": metadata.get("host") or "",
+        "destination_ip": metadata.get("destinationIP") or "",
+        "destination_port": metadata.get("destinationPort"),
+        "network": metadata.get("network") or "",
+        "type": metadata.get("type") or "",
+        "rule": conn.get("rule") or "",
+        "rule_payload": conn.get("rulePayload") or "",
+        "chains": conn.get("chains") or [],
+        "upload": conn.get("upload"),
+        "download": conn.get("download"),
+        "start": conn.get("start") or "",
+        "id": conn.get("id") or "",
+    }
+
+
+def build_report(backend_name: str, config: dict[str, Any],
+                 parsed_args: ConnectionArgs) -> dict[str, Any]:
+    """Build the full joined connections report."""
+    proxy_port = int(config.get("proxy_port", 7890))
+    api_base = config.get("api_base", "http://127.0.0.1:9090")
+    api_secret = config.get("api_secret", "")
+
+    local_rows = collect_lsof_connections(parsed_args.app_filters)
+    api_status: dict[str, Any]
+    remote_by_port: dict[int, dict[str, Any]] = {}
+    proxy_rows = [row for row in local_rows if row.target_port == proxy_port]
+    if backend_name != "mihomo":
+        api_status = {
+            "ok": False, "status": "skipped", "url": None,
+            "error": f"connections join needs mihomo backend, current backend is {backend_name}",
+            "count": 0,
+        }
+    elif not proxy_rows:
+        api_status = {
+            "ok": True, "status": "skipped_no_proxy_connections", "url": None,
+            "error": None, "count": 0,
+        }
+    else:
+        remote_rows, api_status = fetch_mihomo_connections(api_base, api_secret)
+        remote_by_port = {
+            port: conn for conn in remote_rows
+            if (port := _connection_source_port(conn)) is not None
+        }
+
+    joined: list[dict[str, Any]] = []
+    for row in local_rows:
+        via_proxy = row.target_port == proxy_port
+        matched = remote_by_port.get(row.source_port) if via_proxy else None
+        if matched:
+            unmatched_reason = None
+        elif not via_proxy:
+            unmatched_reason = "not_proxyctl_proxy_port"
+        elif api_status["status"] == "skipped":
+            unmatched_reason = "backend_not_mihomo"
+        elif api_status["ok"] is False:
+            unmatched_reason = "mihomo_api_unavailable"
+        else:
+            unmatched_reason = "no_mihomo_source_port_match"
+        joined.append({
+            **row.to_dict(proxy_port),
+            "matched": matched is not None,
+            "unmatched_reason": unmatched_reason,
+            "mihomo": _mihomo_detail(matched),
+        })
+
+    proxy_count = sum(1 for row in local_rows if row.target_port == proxy_port)
+    return {
+        "proxy_port": proxy_port,
+        "backend": backend_name,
+        "apps": parsed_args.app_filters,
+        "all_apps": parsed_args.all_apps,
+        "api": api_status,
+        "connections": joined,
+        "summary": {
+            "local_count": len(local_rows),
+            "proxy_port_count": proxy_count,
+            "non_proxy_port_count": len(local_rows) - proxy_count,
+            "all_via_proxy_port": bool(local_rows) and proxy_count == len(local_rows),
+            "matched_count": sum(1 for item in joined if item["matched"]),
+            "unmatched_count": sum(1 for item in joined if not item["matched"]),
+        },
+    }
+
+
+def emit_human(report: dict[str, Any]) -> None:
+    """Render a compact human-readable report."""
+    api = report["api"]
+    summary = report["summary"]
+    all_proxy = "yes" if summary["all_via_proxy_port"] else "no"
+    print(f"{BOLD}proxyctl connections{NC}  backend={report['backend']} "
+          f"proxy_port={report['proxy_port']} all_via_proxy={all_proxy}")
+    if not api.get("ok"):
+        print(f"  {YELLOW}degraded:{NC} {api.get('error')}")
+    if not report["connections"]:
+        print(f"  {DIM}no local connections to proxy_port matched filters{NC}")
+        return
+    for item in report["connections"]:
+        status = f"{GREEN}matched{NC}" if item["matched"] else f"{YELLOW}unmatched{NC}"
+        target = "proxy" if item["connects_proxy_port"] else item["target_host"]
+        print(f"  {CYAN}{item['app']}{NC} pid={item['pid']} fd={item['fd']} "
+              f"src={item['local_source_port']} -> {target}:{item['target_port']} "
+              f"{status}")
+        if item["matched"]:
+            m = item["mihomo"] or {}
+            dest = m.get("host") or m.get("destination_ip") or "?"
+            print(f"    dest={dest} rule={m.get('rule') or '?'} "
+                  f"payload={m.get('rule_payload') or '-'} "
+                  f"chains={','.join(m.get('chains') or []) or '-'} "
+                  f"up={m.get('upload')} down={m.get('download')} "
+                  f"start={m.get('start') or '-'}")
+        else:
+            print(f"    reason={item['unmatched_reason']}")
+
+
+def cmd_connections(args: list[str], backend, config: dict[str, Any]) -> None:
+    """Entry point for ``proxyctl connections``."""
+    parsed_args = parse_args(args)
+    report = build_report(backend.name, config, parsed_args)
+    if _io.is_json_mode():
+        _io.emit_json(_io.envelope("connections", data=report))
+        return
+    emit_human(report)

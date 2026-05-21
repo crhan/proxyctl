@@ -131,6 +131,11 @@ Linux systemctl --user）。
 4 阶段健康检查：basic / groups / connectivity / outbound-ip。
 \fB--plain\fR 输出 TSV（stage / ok / detail）。
 .TP
+\fBproxyctl connections\fR [\fB--app\fR \fINAME\fR ...] [\fB--json\fR]
+把本机 App/进程到 \fIproxy_port\fR 的 lsof 连接，与 mihomo
+\fB/connections\fR API 的 \fIsourcePort\fR 连接详情关联。只读；非 mihomo
+后端或本地 API 不可用时降级输出 unmatched。
+.TP
 \fBproxyctl trace\fR \fIDOMAIN\fR [\fB--json\fR]
 4 阶段域名链路诊断：DNS 解析 / 规则匹配预测 / 连通性 / 实际连接。
 .TP

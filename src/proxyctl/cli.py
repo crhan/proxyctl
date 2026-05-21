@@ -2745,6 +2745,10 @@ def _h_check(ctx):
     cmd_check(ctx["backend"], ctx["api_base"], ctx["api_secret"],
               ctx["config"], mode_str, registry=ctx["registry"])
 
+def _h_connections(ctx):
+    from proxyctl.connections import cmd_connections
+    cmd_connections(ctx["args"], ctx["backend"], ctx["config"])
+
 def _h_bench(ctx):
     from proxyctl.check import cmd_bench
     bench_groups = ctx["args"] or None
@@ -2911,6 +2915,7 @@ DISPATCH: dict = {
     "status":          _h_status,
     "log":             _h_log,
     "check":           _h_check,
+    "connections":     _h_connections,
     "bench":           _h_bench,
     "fix":             _h_fix,
     "recover":         _h_recover,
