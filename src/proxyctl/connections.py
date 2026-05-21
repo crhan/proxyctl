@@ -72,7 +72,6 @@ class LocalConnection:
             "pid": self.pid,
             "fd": self.fd,
             "process": self.process,
-            "command": self.command,
             "local_source_port": self.source_port,
             "target_host": self.target_host,
             "target_port": self.target_port,
@@ -83,11 +82,11 @@ class LocalConnection:
 
 @dataclass
 class ConnectionArgs:
-    """Parsed ``proxyctl connections`` arguments.
+    """Parsed arguments for ``proxyctl connections``.
 
     Attributes:
-        app_filters: Process/app name filters. Empty means collect all apps.
-        all_apps: Whether the user explicitly requested all processes.
+        app_filters: Process/app filters; empty means all processes.
+        all_apps: Whether ``--all`` was explicitly requested.
     """
 
     app_filters: list[str]
@@ -99,7 +98,7 @@ def parse_args(args: list[str]) -> ConnectionArgs:
 
     Supported syntax:
         ``--app NAME`` may appear more than once.
-        ``--all`` disables the default AI-app filter.
+        ``--all`` disables the default AI app filter.
     """
     apps: list[str] = []
     all_apps = False
@@ -128,8 +127,10 @@ def parse_args(args: list[str]) -> ConnectionArgs:
         _io.fail("connections 的 --all 与 --app 不能同时使用",
                  hint="proxyctl connections --all --json",
                  doc="agent-protocol", code=_io.USAGE, cmd="connections")
-    return ConnectionArgs(app_filters=[] if all_apps else (apps or DEFAULT_APP_FILTERS),
-                          all_apps=all_apps)
+    return ConnectionArgs(
+        app_filters=[] if all_apps else (apps or DEFAULT_APP_FILTERS),
+        all_apps=all_apps,
+    )
 
 
 def _parse_lsof_name(name: str) -> tuple[int, str, int] | None:
@@ -148,6 +149,23 @@ def _parse_lsof_name(name: str) -> tuple[int, str, int] | None:
         return None
     target_host = target_match.group(1).strip("[]")
     return int(source_match.group(1)), target_host, int(target_match.group(2))
+
+
+def _parse_endpoint(endpoint: str) -> tuple[str, int] | None:
+    """Parse ``host:port`` or ``[ipv6]:port`` endpoint text."""
+    endpoint = endpoint.strip()
+    if endpoint.startswith("["):
+        m = re.match(r"^\[([^\]]+)\]:(\d+)$", endpoint)
+        if not m:
+            return None
+        return m.group(1), int(m.group(2))
+    if ":" not in endpoint:
+        return None
+    host, port = endpoint.rsplit(":", 1)
+    try:
+        return host.strip("[]"), int(port)
+    except ValueError:
+        return None
 
 
 def parse_lsof_fields(text: str) -> list[LocalConnection]:
@@ -184,10 +202,46 @@ def parse_lsof_fields(text: str) -> list[LocalConnection]:
     return rows
 
 
+def parse_ss_lines(text: str) -> list[LocalConnection]:
+    """Parse Linux ``ss -Htnp`` established TCP output."""
+    rows: list[LocalConnection] = []
+    proc_re = re.compile(r'"(?P<app>[^"]+)",pid=(?P<pid>\d+),fd=(?P<fd>\d+)')
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[0] != "ESTAB":
+            continue
+        local = _parse_endpoint(parts[3])
+        peer = _parse_endpoint(parts[4])
+        if not local or not peer:
+            continue
+        proc_match = proc_re.search(" ".join(parts[5:]))
+        if proc_match:
+            app = proc_match.group("app")
+            pid = int(proc_match.group("pid"))
+            fd = proc_match.group("fd")
+        else:
+            app, pid, fd = "", 0, ""
+        rows.append(LocalConnection(
+            pid=pid,
+            app=app,
+            fd=fd,
+            source_port=local[1],
+            target_host=peer[0],
+            target_port=peer[1],
+            raw_name=f"{parts[3]}->{parts[4]}",
+        ))
+    return rows
+
+
 def collect_lsof_connections(app_filters: list[str]) -> list[LocalConnection]:
     """Collect local established TCP connections for the requested apps."""
     cmd = ["lsof", "-nP", "-iTCP", "-sTCP:ESTABLISHED", "-Fpcfn"]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+    except FileNotFoundError:
+        return collect_ss_connections(app_filters)
+    if proc.returncode == 127:
+        return collect_ss_connections(app_filters)
     if proc.returncode not in (0, 1):
         _io.fail("lsof 读取本机连接失败",
                  hints=[proc.stderr.strip()] if proc.stderr else None,
@@ -195,6 +249,26 @@ def collect_lsof_connections(app_filters: list[str]) -> list[LocalConnection]:
                  cmd="connections")
     rows = parse_lsof_fields(proc.stdout)
     _enrich_with_ps(rows)
+    return [row for row in rows if row.matches_app(app_filters)]
+
+
+def collect_ss_connections(app_filters: list[str]) -> list[LocalConnection]:
+    """Collect Linux established TCP connections with ``ss``."""
+    cmd = ["ss", "-Htnp"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+    except FileNotFoundError:
+        _io.fail("读取本机连接需要 lsof 或 ss",
+                 hint="安装 lsof，或在 Linux 上安装 iproute2(ss)",
+                 doc="troubleshooting", code=_io.DEPENDENCY_MISSING,
+                 cmd="connections")
+    if proc.returncode != 0:
+        _io.fail("ss 读取本机连接失败",
+                 hints=[proc.stderr.strip()] if proc.stderr else None,
+                 doc="troubleshooting", code=_io.DEPENDENCY_MISSING,
+                 cmd="connections")
+    rows = parse_ss_lines(proc.stdout)
+    _enrich_with_ps([row for row in rows if row.pid])
     return [row for row in rows if row.matches_app(app_filters)]
 
 
@@ -287,7 +361,10 @@ def build_report(backend_name: str, config: dict[str, Any],
     api_base = config.get("api_base", "http://127.0.0.1:9090")
     api_secret = config.get("api_secret", "")
 
-    local_rows = collect_lsof_connections(parsed_args.app_filters)
+    local_rows = [
+        row for row in collect_lsof_connections(parsed_args.app_filters)
+        if row.source_port != proxy_port
+    ]
     api_status: dict[str, Any]
     remote_by_port: dict[int, dict[str, Any]] = {}
     proxy_rows = [row for row in local_rows if row.target_port == proxy_port]

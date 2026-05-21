@@ -26,6 +26,10 @@ LSOF_OUTPUT = "\n".join([
     "cOther",
     "f9u",
     "nTCP 127.0.0.1:60000->127.0.0.1:8080 (ESTABLISHED)",
+    "p999",
+    "cmihomo",
+    "f99u",
+    "nTCP 127.0.0.1:7890->127.0.0.1:54321 (ESTABLISHED)",
 ])
 
 
@@ -49,6 +53,22 @@ def _install_lsof_and_ps(fake_subprocess):
     fake_subprocess.set_result(
         ["ps", "-p", "456", "-o", "command="],
         stdout="/Applications/Claude.app/Contents/MacOS/Claude\n",
+    )
+    fake_subprocess.set_result(
+        ["ps", "-p", "789", "-o", "comm="],
+        stdout="/usr/bin/other\n",
+    )
+    fake_subprocess.set_result(
+        ["ps", "-p", "789", "-o", "command="],
+        stdout="/usr/bin/other\n",
+    )
+    fake_subprocess.set_result(
+        ["ps", "-p", "999", "-o", "comm="],
+        stdout="/opt/homebrew/bin/mihomo\n",
+    )
+    fake_subprocess.set_result(
+        ["ps", "-p", "999", "-o", "command="],
+        stdout="/opt/homebrew/bin/mihomo -d ~/.config/mihomo\n",
     )
 
 
@@ -191,6 +211,21 @@ def test_connections_non_mihomo_backend_degrades_without_api(fake_subprocess, mo
     assert report["connections"][1]["unmatched_reason"] == "not_proxyctl_proxy_port"
 
 
+def test_connections_all_ignores_proxy_server_side_socket(fake_subprocess, monkeypatch):
+    _install_lsof_and_ps(fake_subprocess)
+    _install_connections_api(monkeypatch, {"connections": []})
+
+    report = connections.build_report(
+        "mihomo",
+        {"proxy_port": 7890, "api_base": "http://127.0.0.1:9090"},
+        connections.ConnectionArgs([], all_apps=True),
+    )
+
+    assert all(row["local_source_port"] != 7890 for row in report["connections"])
+    assert {row["app"] for row in report["connections"]} == {
+        "Codex", "Claude", "Other"}
+
+
 def test_connections_default_filters_are_ai_apps():
     parsed = connections.parse_args([])
     assert parsed.app_filters == ["Codex", "Claude", "ChatGPT"]
@@ -201,6 +236,48 @@ def test_connections_all_disables_default_filters():
     parsed = connections.parse_args(["--all"])
     assert parsed.app_filters == []
     assert parsed.all_apps is True
+
+
+def test_connections_parse_linux_ss_output():
+    text = (
+        'ESTAB 0 0 127.0.0.1:54321 127.0.0.1:7890 '
+        'users:(("Codex",pid=123,fd=27))\n'
+        'ESTAB 0 0 30.230.81.9:54323 203.0.113.10:443 '
+        'users:(("Codex",pid=123,fd=28))\n'
+    )
+    rows = connections.parse_ss_lines(text)
+    assert len(rows) == 2
+    assert rows[0].app == "Codex"
+    assert rows[0].pid == 123
+    assert rows[0].fd == "27"
+    assert rows[0].source_port == 54321
+    assert rows[0].target_port == 7890
+    assert rows[1].target_host == "203.0.113.10"
+
+
+def test_connections_lsof_missing_falls_back_to_linux_ss(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(cmd)
+        if cmd[0] == "lsof":
+            raise FileNotFoundError("lsof")
+        if cmd[0] == "ss":
+            return type("CP", (), {
+                "returncode": 0,
+                "stdout": (
+                    'ESTAB 0 0 127.0.0.1:54321 127.0.0.1:7890 '
+                    'users:(("Codex",pid=123,fd=27))\n'
+                ),
+                "stderr": "",
+            })()
+        return type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(connections.subprocess, "run", fake_run)
+    rows = connections.collect_lsof_connections(["Codex"])
+    assert calls[0][0] == "lsof"
+    assert calls[1][0] == "ss"
+    assert rows[0].app == "Codex"
 
 
 def test_cmd_connections_json_outputs_envelope(monkeypatch):
