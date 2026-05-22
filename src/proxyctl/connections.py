@@ -17,17 +17,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from proxyctl import _io
-from proxyctl._io import maybe_disable_module_colors
-
-BOLD = "\033[1m"
-DIM = "\033[2m"
-GREEN = "\033[0;32m"
-YELLOW = "\033[0;33m"
-CYAN = "\033[0;36m"
-NC = "\033[0m"
-
-maybe_disable_module_colors(__name__)
-
 APP_CONTEXTS = ["codex_app", "codex_cli", "claude_app",
                 "claude_cli", "chatgpt_app"]
 APP_CONTEXT_LABELS = {
@@ -56,28 +45,6 @@ APP_REMOTE_PATTERNS = {
     "claude_cli": re.compile(r"anthropic|claude|mcp-proxy", re.I),
 }
 KNOWN_SYSTEM_EXTENSION_OWNERS = ("com.antgroup.asp",)
-ATTRIBUTION_LABELS = {
-    "owner_matches_app_filter": "持有进程匹配过滤条件",
-    "system_extension_owner_original_app_hidden": "系统扩展持有，原始 App 被隐藏",
-    "owner_does_not_match_app_filter": "持有进程不匹配过滤条件",
-    "visible_owner": "可见持有进程",
-}
-ROUTE_LABELS = {
-    "proxy": "代理",
-    "direct": "直连",
-    "reject": "拒绝",
-    "unknown": "未知",
-}
-UNMATCHED_REASON_LABELS = {
-    "not_proxyctl_proxy_port": "没有连到 proxyctl 代理端口",
-    "backend_not_mihomo": "当前后端不是 mihomo",
-    "mihomo_api_unavailable": "mihomo API 不可用",
-    "no_mihomo_source_port_match": "未在 mihomo /connections 找到相同源端口",
-}
-WARNING_LABELS = {
-    "mixed_chains": "同一目的地使用了不同代理链路",
-    "mixed_route_kind": "同一目的地混用了代理/直连/拒绝路由",
-}
 
 
 def _normalize_app_filter(value: str) -> str:
@@ -161,36 +128,6 @@ def _merge_contexts(items: list[dict[str, Any]], field: str) -> list[str]:
         for app_context in item.get(field, [])
     }
     return [app_context for app_context in APP_CONTEXTS if app_context in seen]
-
-
-def _route_label(route_kind: str | None) -> str:
-    """Return a Chinese human label for a route kind."""
-    return ROUTE_LABELS.get(route_kind or "unknown", route_kind or "未知")
-
-
-def _context_label(has_candidates: bool) -> str:
-    """Return the Chinese label for confirmed or inferred app contexts."""
-    return "候选" if has_candidates else "上下文"
-
-
-def _unmatched_reason_label(reason: str | None) -> str:
-    """Return a Chinese human label for an unmatched reason."""
-    return UNMATCHED_REASON_LABELS.get(reason or "", reason or "未知")
-
-
-def _attribution_label(value: str | None) -> str:
-    """Return a Chinese human label for owner attribution."""
-    return ATTRIBUTION_LABELS.get(value or "", value or "未知")
-
-
-def _warning_label(value: str | None) -> str:
-    """Return a Chinese human label for group route warnings."""
-    return WARNING_LABELS.get(value or "", value or "未知")
-
-
-def _format_contexts(contexts: list[str]) -> str:
-    """Format app contexts for human output."""
-    return ",".join(APP_CONTEXT_LABELS.get(item, item) for item in contexts) or "-"
 
 
 @dataclass
@@ -914,106 +851,10 @@ def build_report(backend_name: str, config: dict[str, Any],
 
 
 def emit_human(report: dict[str, Any]) -> None:
-    """Render a compact human-readable report."""
-    api = report["api"]
-    summary = report["summary"]
-    all_proxy = "是" if summary["all_via_proxy_port"] else "否"
-    print(f"{BOLD}proxyctl connections{NC}  backend={report['backend']} "
-          f"代理端口={report['proxy_port']} 全部经代理端口={all_proxy}")
-    if not api.get("ok"):
-        print(f"  {YELLOW}降级：{NC}{api.get('error')}")
-    if not report["connections"] and not report["proxy_owner_connections"]:
-        print(f"  {DIM}没有匹配过滤条件的本机连接{NC}")
-        return
-    if not report["connections"]:
-        print(f"  {DIM}没有匹配过滤条件的 App 直连 socket{NC}")
-    for item in report["connections"]:
-        status = f"{GREEN}已关联{NC}" if item["matched"] else f"{YELLOW}未关联{NC}"
-        target = "代理" if item["connects_proxy_port"] else item["target_host"]
-        contexts = _format_contexts(item.get("app_contexts") or [])
-        print(f"  {CYAN}{item['app']}{NC} pid={item['pid']} fd={item['fd']} "
-              f"源端口={item['local_source_port']} -> {target}:{item['target_port']} "
-              f"上下文={contexts} {status}")
-        if item["matched"]:
-            m = item["mihomo"] or {}
-            dest = m.get("host") or m.get("destination_ip") or "?"
-            print(f"    目的={dest} 规则={m.get('rule') or '?'} "
-                  f"规则载荷={m.get('rule_payload') or '-'} "
-                  f"链路={','.join(m.get('chains') or []) or '-'} "
-                  f"上传={m.get('upload')} 下载={m.get('download')} "
-                  f"开始={m.get('start') or '-'}")
-        else:
-            print(f"    原因={_unmatched_reason_label(item['unmatched_reason'])}")
-    _emit_proxy_owner_explain_human(report)
-    _emit_proxy_owner_groups_human(report)
-    _emit_proxy_owner_human(report)
+    """Render a compact human-readable report via the human renderer."""
+    from proxyctl.connections_human import emit_human as render_human
 
-
-def _emit_proxy_owner_explain_human(report: dict[str, Any]) -> None:
-    """Render short notes that explain proxy-owner attribution."""
-    rows = report["proxy_owner_connections"]
-    if not rows:
-        return
-    has_candidates = any(item.get("candidate_contexts") for item in rows)
-    has_system_extension = any(
-        (item.get("owner") or {}).get("system_extension_owner") for item in rows
-    )
-    print(f"  {DIM}说明：下面是同一批连接的两个视图：先按目的站点汇总，"
-          f"再列逐条连接明细。{NC}")
-    print(f"  {DIM}说明：每条连接链路是 本机入口 -> 代理端口 -> Mihomo -> 目的站点；"
-          f"路由和链路来自 Mihomo。{NC}")
-    if has_candidates or has_system_extension:
-        print(f"  {DIM}说明：com.antgroup.asp 这类系统扩展会隐藏原始 App；"
-              f"候选只按目的域名推断，不等于确认 App。{NC}")
-
-
-def _emit_proxy_owner_groups_human(report: dict[str, Any]) -> None:
-    """Render grouped proxy-owned route summary."""
-    groups = report["proxy_owner_groups"]
-    if not groups:
-        return
-    print(f"  {BOLD}目的站点汇总（同一批连接的聚合视图）{NC}")
-    for group in groups:
-        marker = f"{YELLOW}警告{NC}" if group["warning"] else f"{GREEN}正常{NC}"
-        route = ",".join(_route_label(item) for item in group["route_kinds"])
-        route = route or "未知"
-        first_variant = (group["chain_variants"] or [{"chains": []}])[0]
-        chains = ",".join(first_variant["chains"]) or "-"
-        contexts = _format_contexts(group.get("contexts") or [])
-        context_label = _context_label(bool(group.get("candidate_contexts")))
-        print(f"  {marker} {CYAN}{group['key']}{NC} "
-              f"数量={group['connection_count']} {context_label}={contexts} "
-              f"路由={route} 链路={chains}")
-        if group["hosts"]:
-            print(f"    主机={','.join(group['hosts'][:6])}")
-        if group["warning"]:
-            print(f"    告警={_warning_label(group['warning'])} "
-                  f"链路变体数={len(group['chain_variants'])}")
-
-
-def _emit_proxy_owner_human(report: dict[str, Any]) -> None:
-    """Render reverse-owned proxy connections from macOS netstat."""
-    rows = report["proxy_owner_connections"]
-    if not rows:
-        return
-    print(f"  {BOLD}逐条连接明细（同一批连接的明细视图）{NC}")
-    for item in rows[:12]:
-        owner = item["owner"]
-        m = item["mihomo"] or {}
-        dest = m.get("host") or m.get("destination_ip") or "?"
-        route = _route_label(m.get("route_kind"))
-        contexts = item.get("candidate_contexts") or owner.get("app_contexts") or []
-        context_text = _format_contexts(contexts)
-        context_label = _context_label(bool(item.get("candidate_contexts")))
-        print(f"  入口进程={CYAN}{owner['app']}{NC} pid={owner['pid']} "
-              f"源端口={item['local_source_port']} -> 代理:{report['proxy_port']} "
-              f"状态={owner['state']} {context_label}={context_text} 路由={route}")
-        print(f"    目的={dest} 规则={m.get('rule') or '?'} "
-              f"规则载荷={m.get('rule_payload') or '-'} "
-              f"链路={','.join(m.get('chains') or []) or '-'} "
-              f"归因={_attribution_label(item['attribution'])}")
-    if len(rows) > 12:
-        print(f"  {DIM}... 已省略 {len(rows) - 12} 条代理入口连接{NC}")
+    render_human(report)
 
 
 def cmd_connections(args: list[str], backend, config: dict[str, Any]) -> None:

@@ -72,7 +72,7 @@ _COLOR_NAMES = ("RED", "GREEN", "YELLOW", "CYAN", "BOLD", "DIM", "NC")
 _COLOR_MODULES_KNOWN = (
     "proxyctl.cli", "proxyctl.status", "proxyctl.check",
     "proxyctl.trace", "proxyctl.audit", "proxyctl.explain",
-    "proxyctl.connections",
+    "proxyctl.connections", "proxyctl.connections_human",
 )
 
 
