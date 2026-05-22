@@ -18,13 +18,13 @@
   / `mixed_route_kind` 和 summary 里的
   `inconsistent_proxy_owner_group_count`，从而能判断连接是否经过 Mihomo、
   最终是 `proxy` 还是 `direct` 路由，以及同一组线路是否一致。
-- **`proxyctl connections` 默认区分 Codex App / Codex CLI / Claude App /
-  Claude CLI。** `connections[]`、`proxy_owner_connections[]` 与
-  `proxy_owner_groups[]` 现在输出 `app_contexts` / `candidate_contexts` /
-  `contexts`，可区分可见进程属于 App 还是 CLI。被 macOS Network/System
-  Extension 遮蔽原始进程时，命令只按目的地给出候选上下文，不把候选结果
-  误报成已确认进程；`--app Codex` / `--app Claude` 保持向后兼容，分别匹配
-  App 与 CLI 两类上下文。
+- **`proxyctl connections` 默认输出全量目的站点，并新增多维过滤。**
+  无参数时不再默认限制 Codex / Claude / ChatGPT；需要 AI 视角时使用
+  `--preset ai`。新增 `--host` 按 host / rulePayload / IP 过滤，`--preset`
+  使用预设（`ai` / `openai` / `anthropic` / `coding` 等），`--agent` 按工具
+  过滤（`codex` / `claude` / `chatgpt` / `openclaw` 等），`--query` /
+  `--filter` 做全文过滤。不同维度之间取 AND，同一维度内多个值取 OR。
+  `--app Codex` / `--app Claude` 保持向后兼容，分别匹配 App 与 CLI 两类上下文。
 - **`proxyctl connections` 的人类输出改用目的站点汇总。** 默认输出只按
   目的站点展示数量、候选 App / CLI、路由和链路；每个目的站点下会统计
   持有进程连接数，例如 `com.antgroup.asp(pid=47283):8`，系统扩展也按普通

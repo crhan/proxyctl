@@ -240,16 +240,15 @@ def test_connections_all_ignores_proxy_server_side_socket(fake_subprocess, monke
         "Codex", "Claude", "Other"}
 
 
-def test_connections_default_filters_are_ai_apps():
+def test_connections_default_has_no_filters():
     parsed = connections.parse_args([])
-    assert parsed.app_filters == [
-        "Codex App",
-        "Codex CLI",
-        "Claude App",
-        "Claude CLI",
-        "ChatGPT App",
-    ]
+    assert parsed.app_filters == []
+    assert parsed.host_filters == []
+    assert parsed.preset_filters == []
+    assert parsed.agent_filters == []
+    assert parsed.query_filters == []
     assert parsed.all_apps is False
+    assert parsed.has_filters() is False
 
 
 def test_connections_detects_app_and_cli_contexts():
@@ -282,6 +281,85 @@ def test_connections_all_disables_default_filters():
     parsed = connections.parse_args(["--all"])
     assert parsed.app_filters == []
     assert parsed.all_apps is True
+    assert parsed.has_filters() is False
+
+
+def test_connections_parse_multidimensional_filters():
+    parsed = connections.parse_args([
+        "--host", "anthropic.com",
+        "--preset", "ai",
+        "--agent", "openclaw",
+        "--query", "residential",
+        "--filter", "proxy",
+    ])
+
+    assert parsed.host_filters == ["anthropic.com"]
+    assert parsed.preset_filters == ["ai"]
+    assert parsed.agent_filters == ["openclaw"]
+    assert parsed.query_filters == ["residential", "proxy"]
+    assert parsed.has_filters() is True
+
+
+def test_connections_host_filter_matches_mihomo_destination(fake_subprocess,
+                                                            monkeypatch):
+    _install_lsof_and_ps(fake_subprocess)
+    _install_connections_api(monkeypatch, {
+        "connections": [{
+            "id": "openai",
+            "metadata": {
+                "sourcePort": "54321",
+                "host": "api.openai.com",
+                "destinationPort": "443",
+                "network": "tcp",
+                "type": "HTTPS",
+            },
+            "rule": "DomainSuffix",
+            "rulePayload": "openai.com",
+            "chains": ["OpenAI", "Proxy"],
+        }]
+    })
+
+    report = connections.build_report(
+        "mihomo",
+        {"proxy_port": 7890, "api_base": "http://127.0.0.1:9090"},
+        connections.ConnectionArgs([], host_filters=["openai.com"]),
+    )
+
+    assert [row["local_source_port"] for row in report["connections"]] == [54321]
+    assert report["filters"]["host"] == ["openai.com"]
+
+
+def test_connections_agent_filter_matches_openclaw_process(fake_subprocess,
+                                                           monkeypatch):
+    fake_subprocess.set_result(
+        ["lsof", "-nP", "-iTCP", "-sTCP:ESTABLISHED", "-Fpcfn"],
+        stdout="\n".join([
+            "p101",
+            "cnode",
+            "f14u",
+            "nTCP 127.0.0.1:60392->127.0.0.1:28789 (ESTABLISHED)",
+        ]),
+    )
+    fake_subprocess.set_result(
+        ["ps", "-p", "101", "-o", "comm="],
+        stdout="/opt/homebrew/bin/openclaw-node\n",
+    )
+    fake_subprocess.set_result(
+        ["ps", "-p", "101", "-o", "command="],
+        stdout="node /opt/homebrew/bin/openclaw-node\n",
+    )
+    fake_subprocess.set_result(["netstat", "-anv", "-p", "tcp"], stdout="")
+    _install_connections_api(monkeypatch, {"connections": []})
+
+    report = connections.build_report(
+        "mihomo",
+        {"proxy_port": 7890, "api_base": "http://127.0.0.1:9090"},
+        connections.ConnectionArgs([], agent_filters=["openclaw"]),
+    )
+
+    assert len(report["connections"]) == 1
+    assert report["connections"][0]["process"].endswith("openclaw-node")
+    assert report["filters"]["agent"] == ["openclaw"]
 
 
 def test_connections_parse_linux_ss_output():

@@ -13,121 +13,31 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from proxyctl import _io
-APP_CONTEXTS = ["codex_app", "codex_cli", "claude_app",
-                "claude_cli", "chatgpt_app"]
-APP_CONTEXT_LABELS = {
-    "codex_app": "Codex App",
-    "codex_cli": "Codex CLI",
-    "claude_app": "Claude App",
-    "claude_cli": "Claude CLI",
-    "chatgpt_app": "ChatGPT App",
-}
-DEFAULT_APP_FILTERS = [APP_CONTEXT_LABELS[name] for name in APP_CONTEXTS]
-APP_FILTER_ALIASES = {
-    "codex": ["codex_app", "codex_cli"],
-    "codex app": ["codex_app"],
-    "codex cli": ["codex_cli"],
-    "claude": ["claude_app", "claude_cli"],
-    "claude app": ["claude_app"],
-    "claude cli": ["claude_cli"],
-    "chatgpt": ["chatgpt_app"],
-    "chatgpt app": ["chatgpt_app"],
-}
-APP_REMOTE_PATTERNS = {
-    "codex_app": re.compile(r"openai|chatgpt|oaistatic|oaiusercontent", re.I),
-    "codex_cli": re.compile(r"openai|chatgpt|oaistatic|oaiusercontent", re.I),
-    "chatgpt_app": re.compile(r"openai|chatgpt|oaistatic|oaiusercontent", re.I),
-    "claude_app": re.compile(r"anthropic|claude|mcp-proxy", re.I),
-    "claude_cli": re.compile(r"anthropic|claude|mcp-proxy", re.I),
-}
+from proxyctl.connections_filters import (
+    APP_CONTEXTS,
+    APP_CONTEXT_LABELS,
+    APP_FILTER_ALIASES,
+    APP_REMOTE_PATTERNS,
+    DEFAULT_APP_FILTERS,
+    PRESET_AGENTS,
+    _contexts_for_filter,
+    _detect_app_contexts,
+    _detail_text,
+    _effective_contexts,
+    _matches_app_text,
+    _matches_filter_dimensions,
+    _merge_contexts,
+    _normalize_app_filter,
+    _normalize_filter_value,
+    _remote_candidate_contexts,
+    _remote_candidate_contexts_for_args,
+)
+
 KNOWN_SYSTEM_EXTENSION_OWNERS = ("com.antgroup.asp",)
-
-
-def _normalize_app_filter(value: str) -> str:
-    """Normalize a user-facing app filter for alias lookup."""
-    return re.sub(r"[\s_-]+", " ", value.strip().lower())
-
-
-def _contexts_for_filter(value: str) -> list[str]:
-    """Return canonical app contexts selected by one ``--app`` filter."""
-    return APP_FILTER_ALIASES.get(_normalize_app_filter(value), [])
-
-
-def _effective_contexts(filters: list[str]) -> list[str]:
-    """Expand user filters to canonical app contexts, preserving priority."""
-    contexts: list[str] = []
-    for app_context in APP_CONTEXTS:
-        if any(app_context in _contexts_for_filter(item) for item in filters):
-            contexts.append(app_context)
-    return contexts
-
-
-def _detect_app_contexts(text: str) -> list[str]:
-    """Detect known AI app/CLI contexts from process text."""
-    lowered = text.lower()
-    contexts: list[str] = []
-    if "/applications/codex.app/" in lowered or "codex helper" in lowered:
-        contexts.append("codex_app")
-    elif re.search(r"(^|[/\s])codex(-aarch64|$|\s)", lowered):
-        contexts.append("codex_cli")
-    if "/applications/claude.app/" in lowered or "claude helper" in lowered:
-        contexts.append("claude_app")
-    elif re.search(r"(^|[/\s])claude($|[\s-])", lowered):
-        contexts.append("claude_cli")
-    if "/applications/chatgpt.app/" in lowered or "chatgpthelper" in lowered:
-        contexts.append("chatgpt_app")
-    return contexts
-
-
-def _matches_app_text(text: str, filters: list[str]) -> bool:
-    """Return whether process text matches requested app filters."""
-    if not filters:
-        return True
-    detected = set(_detect_app_contexts(text))
-    requested = set(_effective_contexts(filters))
-    if requested and detected & requested:
-        return True
-    lowered = text.lower()
-    return any(
-        app_filter.lower() in lowered
-        for app_filter in filters
-        if not _contexts_for_filter(app_filter)
-    )
-
-
-def _remote_target_text(conn: dict[str, Any]) -> str:
-    """Return searchable destination text for one Mihomo connection."""
-    metadata = conn.get("metadata") or {}
-    return " ".join([
-        str(metadata.get("host") or ""),
-        str(metadata.get("destinationIP") or ""),
-    ])
-
-
-def _remote_candidate_contexts(conn: dict[str, Any],
-                               filters: list[str]) -> list[str]:
-    """Infer possible app contexts from a remote destination."""
-    requested = _effective_contexts(filters)
-    candidates = requested or APP_CONTEXTS
-    target = _remote_target_text(conn)
-    return [
-        app_context for app_context in candidates
-        if APP_REMOTE_PATTERNS[app_context].search(target)
-    ]
-
-
-def _merge_contexts(items: list[dict[str, Any]], field: str) -> list[str]:
-    """Merge canonical app context lists while preserving display order."""
-    seen = {
-        app_context
-        for item in items
-        for app_context in item.get(field, [])
-    }
-    return [app_context for app_context in APP_CONTEXTS if app_context in seen]
 
 
 @dataclass
@@ -228,7 +138,9 @@ class ProxyOwner:
             "state": self.state,
             "local_source_port": self.source_port,
             "target_port": self.target_port,
-            "matches_app_filter": self.matches_app(app_filters),
+            "matches_app_filter": (
+                bool(app_filters) and self.matches_app(app_filters)
+            ),
             "system_extension_owner": _is_system_extension_owner(self),
             "raw_netstat_line": self.raw_line,
         }
@@ -239,52 +151,91 @@ class ConnectionArgs:
     """Parsed arguments for ``proxyctl connections``.
 
     Attributes:
-        app_filters: Process/app filters; empty means all processes.
+        app_filters: Legacy process/app filters from ``--app``.
+        host_filters: Host/rule-payload/destination filters from ``--host``.
+        preset_filters: Named filter presets from ``--preset``.
+        agent_filters: Agent/tool filters from ``--agent``.
+        query_filters: Free-text filters from ``--query`` / ``--filter``.
         all_apps: Whether ``--all`` was explicitly requested.
     """
 
     app_filters: list[str]
+    host_filters: list[str] = field(default_factory=list)
+    preset_filters: list[str] = field(default_factory=list)
+    agent_filters: list[str] = field(default_factory=list)
+    query_filters: list[str] = field(default_factory=list)
     all_apps: bool = False
+
+    def has_filters(self) -> bool:
+        """Return whether any narrowing filter is active."""
+        return any([
+            self.app_filters,
+            self.host_filters,
+            self.preset_filters,
+            self.agent_filters,
+            self.query_filters,
+        ])
 
 
 def parse_args(args: list[str]) -> ConnectionArgs:
     """Parse ``proxyctl connections`` arguments.
 
     Supported syntax:
-        ``--app NAME`` may appear more than once.
-        ``--all`` disables the default AI app filter.
+        ``--host`` / ``--preset`` / ``--agent`` / ``--query`` are repeatable.
+        ``--app`` is kept as a legacy alias for process/app filtering.
     """
-    apps: list[str] = []
-    all_apps = False
+    parsed = ConnectionArgs(app_filters=[])
     idx = 0
     while idx < len(args):
         arg = args[idx]
         if arg == "--all":
-            all_apps = True
+            parsed.all_apps = True
             idx += 1
             continue
-        if arg == "--app":
-            if idx + 1 >= len(args):
-                _io.fail("connections --app 需要一个应用名",
-                         hint="proxyctl connections --app Codex --json",
-                         doc="agent-protocol", code=_io.USAGE,
-                         cmd="connections")
-            apps.append(args[idx + 1])
+        if arg in ("--app", "--host", "--preset", "--agent",
+                   "--query", "--filter"):
+            _append_filter_arg(parsed, arg, args, idx)
             idx += 2
             continue
         _io.fail(f"未识别 connections 参数：{arg}",
-                 hints=["proxyctl connections --app Codex --app Claude",
-                        "proxyctl connections --all --json",
+                 hints=["proxyctl connections --host anthropic.com",
+                        "proxyctl connections --preset ai",
+                        "proxyctl connections --agent codex --json",
                         "proxyctl connections --json"],
                  doc="agent-protocol", code=_io.USAGE, cmd="connections")
-    if all_apps and apps:
-        _io.fail("connections 的 --all 与 --app 不能同时使用",
-                 hint="proxyctl connections --all --json",
+    return parsed
+
+
+def _append_filter_arg(parsed: ConnectionArgs, arg: str,
+                       args: list[str], idx: int) -> None:
+    """Append one repeatable filter argument."""
+    if idx + 1 >= len(args):
+        _io.fail(f"connections {arg} 需要一个值",
+                 hint="proxyctl connections --host anthropic.com --json",
                  doc="agent-protocol", code=_io.USAGE, cmd="connections")
-    return ConnectionArgs(
-        app_filters=[] if all_apps else (apps or DEFAULT_APP_FILTERS),
-        all_apps=all_apps,
-    )
+    value = args[idx + 1]
+    if arg == "--app":
+        parsed.app_filters.append(value)
+    elif arg == "--host":
+        parsed.host_filters.append(value)
+    elif arg == "--preset":
+        _validate_preset(value)
+        parsed.preset_filters.append(value)
+    elif arg == "--agent":
+        parsed.agent_filters.append(value)
+    else:
+        parsed.query_filters.append(value)
+
+
+def _validate_preset(value: str) -> None:
+    """Fail early when a preset name is unknown."""
+    normalized = _normalize_filter_value(value)
+    if normalized in PRESET_AGENTS:
+        return
+    known = ", ".join(sorted(PRESET_AGENTS))
+    _io.fail(f"未知 connections preset：{value}",
+             hint=f"可用 preset: {known}",
+             doc="agent-protocol", code=_io.USAGE, cmd="connections")
 
 
 def _parse_lsof_name(name: str) -> tuple[int, str, int] | None:
@@ -617,7 +568,7 @@ def _is_system_extension_owner(owner: ProxyOwner) -> bool:
 
 def _owner_attribution(owner: ProxyOwner, app_filters: list[str]) -> str:
     """Explain what the kernel owner means for app-level attribution."""
-    if owner.matches_app(app_filters):
+    if app_filters and owner.matches_app(app_filters):
         return "owner_matches_app_filter"
     if _is_system_extension_owner(owner):
         return "system_extension_owner_original_app_hidden"
@@ -626,8 +577,15 @@ def _owner_attribution(owner: ProxyOwner, app_filters: list[str]) -> str:
     return "visible_owner"
 
 
+def _original_app_visible(owner: ProxyOwner, app_filters: list[str]) -> bool:
+    """Return whether the kernel owner exposes a recognizable original app."""
+    if _detect_app_contexts(owner._match_text()):
+        return True
+    return bool(app_filters) and owner.matches_app(app_filters)
+
+
 def _proxy_owner_connections(remote_rows: list[dict[str, Any]], proxy_port: int,
-                             app_filters: list[str]) -> list[dict[str, Any]]:
+                             parsed_args: ConnectionArgs) -> list[dict[str, Any]]:
     """Build reverse-owned proxy connections from Mihomo rows and netstat."""
     ports = {
         port for conn in remote_rows
@@ -640,37 +598,72 @@ def _proxy_owner_connections(remote_rows: list[dict[str, Any]], proxy_port: int,
         owner = owners.get(port) if port is not None else None
         if not owner:
             continue
-        selection_reason = _proxy_owner_selection_reason(conn, owner, app_filters)
+        selection_reason = _proxy_owner_selection_reason(conn, owner, parsed_args)
         if not selection_reason:
             continue
         detail = _mihomo_detail(conn) or {}
-        candidate_contexts = _remote_candidate_contexts(conn, app_filters)
-        items.append({
+        candidate_contexts = _remote_candidate_contexts_for_args(conn, parsed_args)
+        item = {
             "local_source_port": port,
             "connects_proxy_port": True,
             "target_port": proxy_port,
-            "owner": owner.to_dict(app_filters),
+            "owner": owner.to_dict(parsed_args.app_filters),
             "candidate_contexts": candidate_contexts,
-            "attribution": _owner_attribution(owner, app_filters),
+            "attribution": _owner_attribution(owner, parsed_args.app_filters),
             "selection_reason": selection_reason,
-            "original_app_visible": owner.matches_app(app_filters),
+            "original_app_visible": _original_app_visible(
+                owner, parsed_args.app_filters),
             "via_proxy_engine": True,
             "routed_via_proxy": detail.get("routed_via_proxy"),
             "mihomo": detail,
-        })
+        }
+        if _proxy_owner_item_matches_filters(item, parsed_args):
+            items.append(item)
     return items
 
 
 def _proxy_owner_selection_reason(conn: dict[str, Any], owner: ProxyOwner,
-                                  app_filters: list[str]) -> str | None:
+                                  parsed_args: ConnectionArgs) -> str | None:
     """Return why a reverse-owned row belongs in the current report."""
-    if owner.matches_app(app_filters):
+    if parsed_args.app_filters and owner.matches_app(parsed_args.app_filters):
         return "owner_matches_app_filter"
-    if not app_filters:
+    if not parsed_args.has_filters():
         return "all_apps"
-    if _remote_candidate_contexts(conn, app_filters):
+    if _remote_candidate_contexts_for_args(conn, parsed_args):
         return "host_matches_app_context"
-    return None
+    return "filter_candidate"
+
+
+def _proxy_owner_item_matches_filters(item: dict[str, Any],
+                                      args: ConnectionArgs) -> bool:
+    """Return whether a proxy-owner item satisfies active filters."""
+    owner = item.get("owner") or {}
+    process_text = " ".join([
+        str(owner.get("app") or ""),
+        os.path.basename(str(owner.get("process") or "")),
+        str(owner.get("process") or ""),
+        str(owner.get("command") or ""),
+    ])
+    contexts = list(item.get("candidate_contexts") or [])
+    contexts.extend(owner.get("app_contexts") or [])
+    return _matches_filter_dimensions(
+        process_text, _detail_text(item.get("mihomo")), contexts, args)
+
+
+def _local_item_matches_filters(item: dict[str, Any],
+                                args: ConnectionArgs) -> bool:
+    """Return whether a local lsof item satisfies active filters."""
+    process_text = " ".join([
+        str(item.get("app") or ""),
+        os.path.basename(str(item.get("process") or "")),
+        str(item.get("process") or ""),
+    ])
+    target_text = " ".join([
+        str(item.get("target_host") or ""),
+        _detail_text(item.get("mihomo")),
+    ])
+    return _matches_filter_dimensions(
+        process_text, target_text, item.get("app_contexts") or [], args)
 
 
 def _proxy_group_key(item: dict[str, Any]) -> tuple[str, str]:
@@ -775,7 +768,7 @@ def build_report(backend_name: str, config: dict[str, Any],
     api_secret = config.get("api_secret", "")
 
     local_rows = [
-        row for row in collect_lsof_connections(parsed_args.app_filters)
+        row for row in collect_lsof_connections([])
         if row.source_port != proxy_port
     ]
     api_status: dict[str, Any]
@@ -808,31 +801,40 @@ def build_report(backend_name: str, config: dict[str, Any],
             unmatched_reason = "mihomo_api_unavailable"
         else:
             unmatched_reason = "no_mihomo_source_port_match"
-        joined.append({
+        item = {
             **row.to_dict(proxy_port),
             "matched": matched is not None,
             "unmatched_reason": unmatched_reason,
             "mihomo": _mihomo_detail(matched),
-        })
+        }
+        if _local_item_matches_filters(item, parsed_args):
+            joined.append(item)
 
-    proxy_count = sum(1 for row in local_rows if row.target_port == proxy_port)
+    proxy_count = sum(1 for item in joined if item["connects_proxy_port"])
     proxy_owner_rows = _proxy_owner_connections(
-        remote_rows, proxy_port, parsed_args.app_filters)
+        remote_rows, proxy_port, parsed_args)
     proxy_owner_group_rows = _proxy_owner_groups(proxy_owner_rows)
     return {
         "proxy_port": proxy_port,
         "backend": backend_name,
         "apps": parsed_args.app_filters,
+        "filters": {
+            "app": parsed_args.app_filters,
+            "host": parsed_args.host_filters,
+            "preset": parsed_args.preset_filters,
+            "agent": parsed_args.agent_filters,
+            "query": parsed_args.query_filters,
+        },
         "all_apps": parsed_args.all_apps,
         "api": api_status,
         "connections": joined,
         "proxy_owner_connections": proxy_owner_rows,
         "proxy_owner_groups": proxy_owner_group_rows,
         "summary": {
-            "local_count": len(local_rows),
+            "local_count": len(joined),
             "proxy_port_count": proxy_count,
-            "non_proxy_port_count": len(local_rows) - proxy_count,
-            "all_via_proxy_port": bool(local_rows) and proxy_count == len(local_rows),
+            "non_proxy_port_count": len(joined) - proxy_count,
+            "all_via_proxy_port": bool(joined) and proxy_count == len(joined),
             "matched_count": sum(1 for item in joined if item["matched"]),
             "unmatched_count": sum(1 for item in joined if not item["matched"]),
             "proxy_owner_connection_count": len(proxy_owner_rows),

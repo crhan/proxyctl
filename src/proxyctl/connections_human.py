@@ -76,7 +76,8 @@ def emit_human(report: dict[str, Any]) -> None:
     _emit_header(report)
     if _should_stop_after_header(report):
         return
-    _emit_local_connections(report)
+    if _has_narrowing_filters(report):
+        _emit_local_connections(report)
     _emit_proxy_owner_explain_human(report)
     _emit_proxy_owner_groups_human(report)
 
@@ -100,10 +101,20 @@ def _should_stop_after_header(report: dict[str, Any]) -> bool:
     return True
 
 
+def _has_narrowing_filters(report: dict[str, Any]) -> bool:
+    """Return whether the command used explicit filters."""
+    filters = report.get("filters") or {}
+    return any(bool(filters.get(name)) for name in (
+        "app", "host", "preset", "agent", "query"
+    ))
+
+
 def _emit_local_connections(report: dict[str, Any]) -> None:
     """Render app-owned local socket rows."""
     if not report["connections"]:
-        print(f"  {DIM}没有匹配过滤条件的 App 直连 socket{NC}")
+        if not report["proxy_owner_connections"]:
+            print(f"  {DIM}没有匹配过滤条件的 App 直连 socket{NC}")
+        return
     for item in report["connections"]:
         status = f"{GREEN}已关联{NC}" if item["matched"] else f"{YELLOW}未关联{NC}"
         target = "代理" if item["connects_proxy_port"] else item["target_host"]
