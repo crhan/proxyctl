@@ -209,7 +209,8 @@ def test_ipgeo_uses_line_cache(tmp_path: Path, fake_subprocess):
 def test_ipgeo_fetches_and_appends_cache(tmp_path: Path, fake_subprocess):
     cache = tmp_path / "geo.txt"
     fake_subprocess.set_default(
-        stdout='{"city": "Tokyo", "country": "JP", "org": "AS123 Foo Inc"}',
+        stdout='{"status": "success", "city": "Tokyo", "countryCode": "JP", '
+               '"isp": "AS123 Foo Inc"}',
         returncode=0,
     )
     out = check._ipgeo("2.2.2.2", str(cache), "secret")
@@ -217,12 +218,27 @@ def test_ipgeo_fetches_and_appends_cache(tmp_path: Path, fake_subprocess):
     assert out == "Tokyo,JP|Foo Inc"
     content = cache.read_text()
     assert content.startswith("2.2.2.2|Tokyo,JP|Foo Inc")
+    last = fake_subprocess.calls[-1]
+    assert "--noproxy" in last
+    assert "--proxy" not in last
 
 
 def test_ipgeo_bad_json_returns_empty(tmp_path: Path, fake_subprocess):
     cache = tmp_path / "geo.txt"
     fake_subprocess.set_default(stdout="not json", returncode=0)
     assert check._ipgeo("3.3.3.3", str(cache), "secret") == ""
+
+
+def test_ipgeo_keeps_non_asn_isp_prefix(tmp_path: Path, fake_subprocess):
+    cache = tmp_path / "geo.txt"
+    fake_subprocess.set_default(
+        stdout='{"status": "success", "city": "Shanghai", '
+               '"countryCode": "CN", "isp": "Hangzhou Alibaba Advertising Co"}',
+        returncode=0,
+    )
+    assert check._ipgeo("4.4.4.4", str(cache), "secret") == (
+        "Shanghai,CN|Hangzhou Alibaba Advertising Co"
+    )
 
 
 # ────────────────────────────────────────────────────────────────────────────

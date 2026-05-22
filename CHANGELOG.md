@@ -5,6 +5,19 @@
 
 ## [Unreleased]
 
+## [0.5.8] — 2026-05-22
+
+### Fixed
+
+- **`proxyctl check` 的出口 IP 归属地补全不再依赖被测代理线路。**
+  第 4 阶段会直连查询已探测到的 IP 归属地，避免 `claude` 出口失败时影响
+  `direct` 或 `proxy` 的归属地显示。
+
+### Changed
+
+- **出口 IP 归属地补全现在并发执行。** `proxy` / `claude` / `direct`
+  的归属地查询互不阻塞，单个出口查询慢或失败不会拖慢其他出口的显示。
+
 ## [0.5.7] — 2026-05-22
 
 ### Changed
@@ -995,7 +1008,8 @@ Env var `PROXYCTL_SUBSCRIPTION_PATH` 覆盖默认契约文件路径（测试用�
 - `cli.main()` 处理 `--help/-h/help` 后未 return，导致继续落入默认 else
   分支二次调用 `cmd_help()`，help 输出重复两次。
 
-[Unreleased]: https://github.com/crhan/proxyctl/compare/v0.5.7...HEAD
+[Unreleased]: https://github.com/crhan/proxyctl/compare/v0.5.8...HEAD
+[0.5.8]: https://github.com/crhan/proxyctl/compare/v0.5.7...v0.5.8
 [0.5.7]: https://github.com/crhan/proxyctl/compare/v0.5.6...v0.5.7
 [0.5.6]: https://github.com/crhan/proxyctl/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/crhan/proxyctl/compare/v0.5.4...v0.5.5

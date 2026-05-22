@@ -458,10 +458,13 @@ def _ipgeo(ip: str, cache_file: str, api_secret: str,
     env = {k: v for k, v in os.environ.items()
            if k not in ("http_proxy", "https_proxy", "all_proxy",
                         "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")}
+    # Geo lookup is metadata lookup for an already-known IP; it should not be
+    # routed through the proxy under test. In particular, users may route
+    # ipinfo.io itself through the claude group, so a claude outage must not
+    # hide the direct/proxy geo labels.
     r = subprocess.run(
-        ["curl", "-s", "--max-time", "6",
-         "--proxy", f"socks5h://127.0.0.1:{proxy_port}",
-         f"https://ipinfo.io/{ip}/json"],
+        ["curl", "-s", "--max-time", "6", "--noproxy", "*",
+         f"http://ip-api.com/json/{ip}?fields=status,countryCode,city,isp,org,query"],
         capture_output=True, text=True, env=env, timeout=10
     )
     if not r.stdout:
@@ -469,9 +472,9 @@ def _ipgeo(ip: str, cache_file: str, api_secret: str,
     try:
         d = json.loads(r.stdout)
         city    = d.get("city", "")
-        country = d.get("country", "")
-        org     = d.get("org", "")
-        if org:
+        country = d.get("countryCode") or d.get("country", "")
+        org     = d.get("isp") or d.get("org", "")
+        if org and _re_mod.match(r"^AS\d+\s+", org):
             parts = org.split(" ", 1)
             org = parts[1] if len(parts) > 1 else org
         loc = ",".join(filter(None, [city, country]))
@@ -1123,9 +1126,24 @@ def cmd_check(engine, api: str, api_secret: str,
     cache_file = os.path.join(sb_dir, ".ipgeo-cache")
     if not probes:
         print(f"  {YELLOW}—{NC} 无出口探测项")
+    geo_results: dict[str, str] = {p.name: "" for p in probes}
+    geo_threads = [
+        threading.Thread(
+            target=lambda p=probe: geo_results.__setitem__(
+                p.name,
+                _ipgeo(probe_ips.get(p.name, ""), cache_file, api_secret,
+                       proxy_port=proxy_port),
+            )
+        )
+        for probe in probes
+    ]
+    for t in geo_threads:
+        t.start()
+    for t in geo_threads:
+        t.join()
     for probe in probes:
         ip = probe_ips.get(probe.name, "")
-        geo = _ipgeo(ip, cache_file, api_secret, proxy_port=proxy_port)
+        geo = geo_results.get(probe.name, "")
         print(f"  {probe.name:<7s}{_fmt_ip(ip, geo)}")
         collector["stages"]["outbound_ip"][probe.name] = {
             "ip": ip, "geo": geo, "mode": getattr(probe, "mode", ""),
