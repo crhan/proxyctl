@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from proxyctl._io import maybe_disable_module_colors
@@ -187,7 +188,7 @@ def _owner_count_lines(group: dict[str, Any],
         if _row_group_key(row) != (group["key_type"], group["key"]):
             continue
         owner = row.get("owner") or {}
-        key = (str(owner.get("app") or "?"), owner.get("pid"))
+        key = (_owner_display_name(owner), owner.get("pid"))
         counts[key] = counts.get(key, 0) + 1
     items = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
     return [f"{_format_owner_label(key)}  {count} 条" for key, count in items]
@@ -211,3 +212,17 @@ def _format_owner_label(key: tuple[str, Any]) -> str:
     if pid is None:
         return app
     return f"{app}(pid={pid})"
+
+
+def _owner_display_name(owner: dict[str, Any]) -> str:
+    """Return the clearest available process name for an owner row."""
+    app = str(owner.get("app") or "")
+    if app and app != "?":
+        return app
+    process = str(owner.get("process") or "")
+    if process:
+        return os.path.basename(process)
+    command = str(owner.get("command") or "").split()
+    if command:
+        return os.path.basename(command[0])
+    return "未知进程"

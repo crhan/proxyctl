@@ -510,6 +510,19 @@ def test_connections_human_output_uses_chinese_proxy_owner_labels():
                 "route_kind": "proxy",
                 "chains": ["proxy-tuic", "proxy"],
             },
+        }, {
+            "owner": {"app": "?", "pid": 39707, "process": "/usr/bin/worker",
+                      "state": "ESTABLISHED", "app_contexts": []},
+            "local_source_port": 58381,
+            "candidate_contexts": ["codex_app"],
+            "attribution": "system_extension_owner_original_app_hidden",
+            "mihomo": {
+                "host": "chatgpt.com",
+                "rule": "DomainSuffix",
+                "rule_payload": "chatgpt.com",
+                "route_kind": "proxy",
+                "chains": ["proxy-tuic", "proxy"],
+            },
         }],
     }
 
@@ -526,6 +539,7 @@ def test_connections_human_output_uses_chinese_proxy_owner_labels():
     assert "源端口样例: 58380" in text
     assert "持有进程:" in text
     assert "com.antgroup.asp(pid=47283)  1 条" in text
+    assert "worker(pid=39707)  1 条" in text
     assert "候选: Codex App" in text
     assert "路由=代理" in text
     assert "链路: proxy-tuic -> proxy" in text
