@@ -29,7 +29,8 @@
   目的站点展示数量、候选 App / CLI、路由和链路；每个目的站点下会统计
   持有进程连接数，例如 `com.antgroup.asp(pid=47283):8`，系统扩展也按普通
   进程展示。人类输出里的上下文显示为 `Claude App` / `Claude CLI` 等可读
-  名称；`--json` 里的 `proxy_owner_connections[]` 仍保留逐条 socket 明细。
+  名称，并使用多行布局展示候选、链路、主机和持有进程，避免长字段挤在
+  同一行；`--json` 里的 `proxy_owner_connections[]` 仍保留逐条 socket 明细。
 
 ## [0.5.5] — 2026-05-21
 

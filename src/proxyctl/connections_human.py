@@ -62,7 +62,12 @@ def _warning_label(value: str | None) -> str:
 
 def _format_contexts(contexts: list[str]) -> str:
     """Format app contexts for human output."""
-    return ",".join(APP_CONTEXT_LABELS.get(item, item) for item in contexts) or "-"
+    return ", ".join(APP_CONTEXT_LABELS.get(item, item) for item in contexts) or "-"
+
+
+def _format_chain(chains: list[Any]) -> str:
+    """Format a proxy chain for human output."""
+    return " -> ".join(str(item) for item in chains) or "-"
 
 
 def emit_human(report: dict[str, Any]) -> None:
@@ -152,31 +157,31 @@ def _emit_destination_group(group: dict[str, Any],
     marker = f"{YELLOW}警告{NC}" if group["warning"] else f"{GREEN}正常{NC}"
     route = ",".join(_route_label(item) for item in group["route_kinds"]) or "未知"
     first_variant = (group["chain_variants"] or [{"chains": []}])[0]
-    chains = ",".join(first_variant["chains"]) or "-"
+    chains = _format_chain(first_variant["chains"])
     contexts = _format_contexts(group.get("contexts") or [])
     context_label = _context_label(bool(group.get("candidate_contexts")))
-    print(f"  {marker} {CYAN}{group['key']}{NC} "
-          f"数量={group['connection_count']} {context_label}={contexts} "
-          f"路由={route} 链路={chains}")
+    print(f"  {marker} {CYAN}{group['key']}{NC}  "
+          f"{group['connection_count']} 条  路由={route}")
+    print(f"    {context_label}: {contexts}")
+    print(f"    链路: {chains}")
     samples = ",".join(str(port) for port in group.get("sample_source_ports", []))
-    details = []
     if group["hosts"]:
-        details.append(f"主机={','.join(group['hosts'][:6])}")
+        print(f"    主机: {', '.join(group['hosts'][:6])}")
     if samples:
-        details.append(f"源端口样例={samples}")
-    if details:
-        print(f"    {' '.join(details)}")
-    owners = _format_owner_counts(group, owner_rows)
+        print(f"    源端口样例: {samples}")
+    owners = _owner_count_lines(group, owner_rows)
     if owners:
-        print(f"    持有进程={owners}")
+        print("    持有进程:")
+        for owner_line in owners:
+            print(f"      {owner_line}")
     if group["warning"]:
         print(f"    告警={_warning_label(group['warning'])} "
               f"链路变体数={len(group['chain_variants'])}")
 
 
-def _format_owner_counts(group: dict[str, Any],
-                         rows: list[dict[str, Any]]) -> str:
-    """Format owner process counts for one destination group."""
+def _owner_count_lines(group: dict[str, Any],
+                       rows: list[dict[str, Any]]) -> list[str]:
+    """Return owner process count lines for one destination group."""
     counts: dict[tuple[str, Any], int] = {}
     for row in rows:
         if _row_group_key(row) != (group["key_type"], group["key"]):
@@ -185,7 +190,7 @@ def _format_owner_counts(group: dict[str, Any],
         key = (str(owner.get("app") or "?"), owner.get("pid"))
         counts[key] = counts.get(key, 0) + 1
     items = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
-    return ",".join(f"{_format_owner_label(key)}:{count}" for key, count in items)
+    return [f"{_format_owner_label(key)}  {count} 条" for key, count in items]
 
 
 def _row_group_key(row: dict[str, Any]) -> tuple[str, str]:

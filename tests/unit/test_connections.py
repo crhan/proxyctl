@@ -523,10 +523,12 @@ def test_connections_human_output_uses_chinese_proxy_owner_labels():
     assert "目的站点汇总" in text
     assert "持有进程只是本机 socket owner" in text
     assert "系统扩展也按普通进程统计" in text
-    assert "源端口样例=58380" in text
-    assert "持有进程=com.antgroup.asp(pid=47283):1" in text
-    assert "候选=Codex App" in text
+    assert "源端口样例: 58380" in text
+    assert "持有进程:" in text
+    assert "com.antgroup.asp(pid=47283)  1 条" in text
+    assert "候选: Codex App" in text
     assert "路由=代理" in text
+    assert "链路: proxy-tuic -> proxy" in text
     assert "入口进程=" not in text
     assert "proxy-owned" not in text
 
