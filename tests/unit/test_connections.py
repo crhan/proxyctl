@@ -487,12 +487,14 @@ def test_connections_human_output_uses_chinese_proxy_owner_labels():
         "connections": [],
         "proxy_owner_groups": [{
             "key": "chatgpt.com",
+            "key_type": "rule_payload",
             "connection_count": 1,
             "contexts": ["codex_app"],
             "candidate_contexts": ["codex_app"],
             "route_kinds": ["proxy"],
             "chain_variants": [{"chains": ["proxy-tuic", "proxy"]}],
             "hosts": ["chatgpt.com"],
+            "sample_source_ports": [58380],
             "warning": None,
         }],
         "proxy_owner_connections": [{
@@ -517,17 +519,15 @@ def test_connections_human_output_uses_chinese_proxy_owner_labels():
         connections.emit_human(report)
     text = out.getvalue()
 
-    assert "同一批连接的两个视图：先按目的站点汇总" in text
-    assert "再把逐条连接折叠成同类连接组" in text
-    assert "目的站点汇总（同一批连接的聚合视图）" in text
-    assert "同类连接组（由逐条连接明细折叠）" in text
-    assert "本机入口 -> 代理端口 -> Mihomo -> 目的站点" in text
-    assert "候选只按目的域名推断，不等于确认 App" in text
-    assert "入口进程=com.antgroup.asp" in text
-    assert "数量=1 源端口=58380" in text
+    assert "默认按目的站点汇总，并在每个目的站点下统计持有进程" in text
+    assert "目的站点汇总" in text
+    assert "持有进程只是本机 socket owner" in text
+    assert "系统扩展也按普通进程统计" in text
+    assert "源端口样例=58380" in text
+    assert "持有进程=com.antgroup.asp(pid=47283):1" in text
     assert "候选=Codex App" in text
     assert "路由=代理" in text
-    assert "归因=系统扩展持有，原始 App 被隐藏" in text
+    assert "入口进程=" not in text
     assert "proxy-owned" not in text
 
 

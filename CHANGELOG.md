@@ -25,17 +25,11 @@
   Extension 遮蔽原始进程时，命令只按目的地给出候选上下文，不把候选结果
   误报成已确认进程；`--app Codex` / `--app Claude` 保持向后兼容，分别匹配
   App 与 CLI 两类上下文。
-- **`proxyctl connections` 的人类输出改用中文标签。** 同一批连接会先显示
-  "目的站点汇总（同一批连接的聚合视图）"，再显示"同类连接组（由逐条连接明细
-  折叠）"，并用"候选"明确标识被 Network/System Extension 遮蔽时只能按
-  目的地推断的 App / CLI 上下文。输出还会提示
-  "本机入口 -> 代理端口 -> Mihomo -> 目的站点" 的链路含义，避免把
-  `com.antgroup.asp` 误读成原始 App；人类输出里的上下文显示为
-  `Claude App` / `Claude CLI` 等可读名称。
-- **`proxyctl connections` 的人类明细默认折叠同类连接。** 入口进程、候选
-  App、目的站点、规则、路由、链路和归因相同的 socket 会合并为
-  "同类连接组（由逐条连接明细折叠）"，显示数量、状态分布与源端口样例；
-  `--json` 里的 `proxy_owner_connections[]` 仍保留逐条连接。
+- **`proxyctl connections` 的人类输出改用目的站点汇总。** 默认输出只按
+  目的站点展示数量、候选 App / CLI、路由和链路；每个目的站点下会统计
+  持有进程连接数，例如 `com.antgroup.asp(pid=47283):8`，系统扩展也按普通
+  进程展示。人类输出里的上下文显示为 `Claude App` / `Claude CLI` 等可读
+  名称；`--json` 里的 `proxy_owner_connections[]` 仍保留逐条 socket 明细。
 
 ## [0.5.5] — 2026-05-21
 

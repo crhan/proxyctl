@@ -22,12 +22,6 @@ APP_CONTEXT_LABELS = {
     "claude_cli": "Claude CLI",
     "chatgpt_app": "ChatGPT App",
 }
-ATTRIBUTION_LABELS = {
-    "owner_matches_app_filter": "持有进程匹配过滤条件",
-    "system_extension_owner_original_app_hidden": "系统扩展持有，原始 App 被隐藏",
-    "owner_does_not_match_app_filter": "持有进程不匹配过滤条件",
-    "visible_owner": "可见持有进程",
-}
 ROUTE_LABELS = {
     "proxy": "代理",
     "direct": "直连",
@@ -61,11 +55,6 @@ def _unmatched_reason_label(reason: str | None) -> str:
     return UNMATCHED_REASON_LABELS.get(reason or "", reason or "未知")
 
 
-def _attribution_label(value: str | None) -> str:
-    """Return a Chinese human label for owner attribution."""
-    return ATTRIBUTION_LABELS.get(value or "", value or "未知")
-
-
 def _warning_label(value: str | None) -> str:
     """Return a Chinese human label for group route warnings."""
     return WARNING_LABELS.get(value or "", value or "未知")
@@ -76,12 +65,6 @@ def _format_contexts(contexts: list[str]) -> str:
     return ",".join(APP_CONTEXT_LABELS.get(item, item) for item in contexts) or "-"
 
 
-def _format_counts(counts: dict[str, int]) -> str:
-    """Format a small count map in stable human-readable order."""
-    items = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
-    return ",".join(f"{key}:{value}" for key, value in items) or "-"
-
-
 def emit_human(report: dict[str, Any]) -> None:
     """Render a compact human-readable connections report."""
     _emit_header(report)
@@ -90,7 +73,6 @@ def emit_human(report: dict[str, Any]) -> None:
     _emit_local_connections(report)
     _emit_proxy_owner_explain_human(report)
     _emit_proxy_owner_groups_human(report)
-    _emit_proxy_owner_human(report)
 
 
 def _emit_header(report: dict[str, Any]) -> None:
@@ -146,15 +128,11 @@ def _emit_proxy_owner_explain_human(report: dict[str, Any]) -> None:
     if not rows:
         return
     has_candidates = any(item.get("candidate_contexts") for item in rows)
-    has_system_extension = any(
-        (item.get("owner") or {}).get("system_extension_owner") for item in rows
-    )
-    print(f"  {DIM}说明：下面是同一批连接的两个视图：先按目的站点汇总，"
-          f"再把逐条连接折叠成同类连接组。{NC}")
-    print(f"  {DIM}说明：每条连接链路是 本机入口 -> 代理端口 -> Mihomo -> 目的站点；"
-          f"路由和链路来自 Mihomo。{NC}")
-    if has_candidates or has_system_extension:
-        print(f"  {DIM}说明：com.antgroup.asp 这类系统扩展会隐藏原始 App；"
+    print(f"  {DIM}说明：默认按目的站点汇总，并在每个目的站点下统计持有进程；"
+          f"逐条 socket 明细保留在 --json 的 proxy_owner_connections[]。{NC}")
+    print(f"  {DIM}说明：路由和链路来自 Mihomo，表示目的站点最终走直连还是代理。{NC}")
+    if has_candidates:
+        print(f"  {DIM}说明：持有进程只是本机 socket owner；系统扩展也按普通进程统计。"
               f"候选只按目的域名推断，不等于确认 App。{NC}")
 
 
@@ -163,12 +141,13 @@ def _emit_proxy_owner_groups_human(report: dict[str, Any]) -> None:
     groups = report["proxy_owner_groups"]
     if not groups:
         return
-    print(f"  {BOLD}目的站点汇总（同一批连接的聚合视图）{NC}")
+    print(f"  {BOLD}目的站点汇总{NC}")
     for group in groups:
-        _emit_destination_group(group)
+        _emit_destination_group(group, report["proxy_owner_connections"])
 
 
-def _emit_destination_group(group: dict[str, Any]) -> None:
+def _emit_destination_group(group: dict[str, Any],
+                            owner_rows: list[dict[str, Any]]) -> None:
     """Render one destination summary group."""
     marker = f"{YELLOW}警告{NC}" if group["warning"] else f"{GREEN}正常{NC}"
     route = ",".join(_route_label(item) for item in group["route_kinds"]) or "未知"
@@ -179,92 +158,51 @@ def _emit_destination_group(group: dict[str, Any]) -> None:
     print(f"  {marker} {CYAN}{group['key']}{NC} "
           f"数量={group['connection_count']} {context_label}={contexts} "
           f"路由={route} 链路={chains}")
+    samples = ",".join(str(port) for port in group.get("sample_source_ports", []))
+    details = []
     if group["hosts"]:
-        print(f"    主机={','.join(group['hosts'][:6])}")
+        details.append(f"主机={','.join(group['hosts'][:6])}")
+    if samples:
+        details.append(f"源端口样例={samples}")
+    if details:
+        print(f"    {' '.join(details)}")
+    owners = _format_owner_counts(group, owner_rows)
+    if owners:
+        print(f"    持有进程={owners}")
     if group["warning"]:
         print(f"    告警={_warning_label(group['warning'])} "
               f"链路变体数={len(group['chain_variants'])}")
 
 
-def _emit_proxy_owner_human(report: dict[str, Any]) -> None:
-    """Render folded reverse-owned proxy connection groups."""
-    groups = _fold_proxy_owner_rows(report["proxy_owner_connections"])
-    if not groups:
-        return
-    print(f"  {BOLD}同类连接组（由逐条连接明细折叠）{NC}")
-    for group in groups[:12]:
-        _emit_folded_proxy_owner_group(report, group)
-    if len(groups) > 12:
-        print(f"  {DIM}... 已省略 {len(groups) - 12} 个同类连接组；"
-              f"JSON 中仍保留逐条 proxy_owner_connections{NC}")
-
-
-def _fold_proxy_owner_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Fold equivalent proxy-owner rows for human output."""
-    groups: dict[tuple[Any, ...], dict[str, Any]] = {}
+def _format_owner_counts(group: dict[str, Any],
+                         rows: list[dict[str, Any]]) -> str:
+    """Format owner process counts for one destination group."""
+    counts: dict[tuple[str, Any], int] = {}
     for row in rows:
-        key = _proxy_owner_fold_key(row)
-        if key not in groups:
-            groups[key] = _new_folded_group(row)
-        _add_folded_row(groups[key], row)
-    return sorted(groups.values(), key=lambda item: (-item["count"], item["dest"]))
+        if _row_group_key(row) != (group["key_type"], group["key"]):
+            continue
+        owner = row.get("owner") or {}
+        key = (str(owner.get("app") or "?"), owner.get("pid"))
+        counts[key] = counts.get(key, 0) + 1
+    items = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return ",".join(f"{_format_owner_label(key)}:{count}" for key, count in items)
 
 
-def _proxy_owner_fold_key(row: dict[str, Any]) -> tuple[Any, ...]:
-    """Return the human-output fold key for one proxy-owner row."""
-    owner = row["owner"]
+def _row_group_key(row: dict[str, Any]) -> tuple[str, str]:
+    """Return the destination grouping key used by proxy_owner_groups."""
     m = row.get("mihomo") or {}
-    contexts = tuple(row.get("candidate_contexts") or owner.get("app_contexts") or [])
-    return (
-        owner.get("app"), owner.get("pid"), contexts, row.get("attribution"),
-        m.get("host") or m.get("destination_ip") or "?",
-        m.get("rule") or "?", m.get("rule_payload") or "-",
-        m.get("route_kind") or "unknown", tuple(m.get("chains") or []),
-    )
+    if m.get("rule_payload"):
+        return "rule_payload", str(m["rule_payload"])
+    if m.get("host"):
+        return "host", str(m["host"])
+    if m.get("destination_ip"):
+        return "destination_ip", str(m["destination_ip"])
+    return "unknown", "unknown"
 
 
-def _new_folded_group(row: dict[str, Any]) -> dict[str, Any]:
-    """Create an empty folded group seeded from one row."""
-    owner = row["owner"]
-    m = row.get("mihomo") or {}
-    return {
-        "owner": owner,
-        "contexts": row.get("candidate_contexts") or owner.get("app_contexts") or [],
-        "has_candidates": bool(row.get("candidate_contexts")),
-        "dest": m.get("host") or m.get("destination_ip") or "?",
-        "rule": m.get("rule") or "?",
-        "rule_payload": m.get("rule_payload") or "-",
-        "route_kind": m.get("route_kind") or "unknown",
-        "chains": m.get("chains") or [],
-        "attribution": row.get("attribution"),
-        "count": 0,
-        "source_ports": [],
-        "state_counts": {},
-    }
-
-
-def _add_folded_row(group: dict[str, Any], row: dict[str, Any]) -> None:
-    """Add one proxy-owner row to an existing folded group."""
-    group["count"] += 1
-    group["source_ports"].append(row["local_source_port"])
-    state = (row.get("owner") or {}).get("state") or "UNKNOWN"
-    group["state_counts"][state] = group["state_counts"].get(state, 0) + 1
-
-
-def _emit_folded_proxy_owner_group(report: dict[str, Any],
-                                   group: dict[str, Any]) -> None:
-    """Render one folded proxy-owner group."""
-    owner = group["owner"]
-    ports = ",".join(str(port) for port in group["source_ports"][:6])
-    if len(group["source_ports"]) > 6:
-        ports += ",..."
-    context_label = _context_label(group["has_candidates"])
-    context_text = _format_contexts(group["contexts"])
-    print(f"  入口进程={CYAN}{owner['app']}{NC} pid={owner['pid']} "
-          f"数量={group['count']} 源端口={ports} -> 代理:{report['proxy_port']} "
-          f"状态={_format_counts(group['state_counts'])} "
-          f"{context_label}={context_text} 路由={_route_label(group['route_kind'])}")
-    print(f"    目的={group['dest']} 规则={group['rule']} "
-          f"规则载荷={group['rule_payload']} "
-          f"链路={','.join(group['chains']) or '-'} "
-          f"归因={_attribution_label(group['attribution'])}")
+def _format_owner_label(key: tuple[str, Any]) -> str:
+    """Format an owner process key for human output."""
+    app, pid = key
+    if pid is None:
+        return app
+    return f"{app}(pid={pid})"
