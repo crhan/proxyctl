@@ -87,6 +87,16 @@ PRESET_AGENTS = {
     "codex": ["codex"],
     "chatgpt": ["chatgpt"],
 }
+ROUTE_FILTER_ALIASES = {
+    "proxy": "proxy",
+    "direct": "direct",
+    "reject": "reject",
+    "unknown": "unknown",
+    "代理": "proxy",
+    "直连": "direct",
+    "拒绝": "reject",
+    "未知": "unknown",
+}
 
 
 def _normalize_app_filter(value: str) -> str:
@@ -97,6 +107,11 @@ def _normalize_app_filter(value: str) -> str:
 def _normalize_filter_value(value: str) -> str:
     """Normalize a user-facing filter value for lookup and matching."""
     return re.sub(r"[\s_-]+", " ", value.strip().lower())
+
+
+def _normalize_route_filter(value: str) -> str:
+    """Normalize route filter aliases to Mihomo route_kind values."""
+    return ROUTE_FILTER_ALIASES.get(_normalize_filter_value(value), "")
 
 
 def _contexts_for_filter(value: str) -> list[str]:
@@ -252,18 +267,41 @@ def _detail_text(detail: dict[str, Any] | None) -> str:
     ])
 
 
+def _chain_text(detail: dict[str, Any] | None) -> str:
+    """Return searchable chain text for one Mihomo detail block."""
+    return " ".join(str(item) for item in ((detail or {}).get("chains") or []))
+
+
+def _route_kind_text(detail: dict[str, Any] | None) -> str:
+    """Return Mihomo route kind text for one detail block."""
+    return str((detail or {}).get("route_kind") or "")
+
+
 def _matches_filter_dimensions(process_text: str, target_text: str,
-                               contexts: list[str], args: Any) -> bool:
+                               contexts: list[str], args: Any,
+                               chain_text: str = "",
+                               route_kind: str = "") -> bool:
     """Return whether a row satisfies all active filter dimensions."""
     if not args.has_filters():
         return True
     if args.host_filters and not _contains_any(target_text, args.host_filters):
+        return False
+    if args.chain_filters and not _contains_any(chain_text, args.chain_filters):
+        return False
+    if args.route_filters and not _matches_route_kind(route_kind, args.route_filters):
         return False
     if args.query_filters:
         query_text = " ".join([process_text, target_text, " ".join(contexts)])
         if not _contains_any(query_text, args.query_filters):
             return False
     return _matches_agent_dimension(process_text, target_text, contexts, args)
+
+
+def _matches_route_kind(route_kind: str, filters: list[str]) -> bool:
+    """Return whether a Mihomo route kind matches route filters."""
+    normalized = _normalize_route_filter(route_kind)
+    requested = {_normalize_route_filter(item) for item in filters}
+    return normalized in requested
 
 
 def _matches_agent_dimension(process_text: str, target_text: str,

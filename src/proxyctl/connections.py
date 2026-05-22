@@ -24,6 +24,8 @@ from proxyctl.connections_filters import (
     APP_REMOTE_PATTERNS,
     DEFAULT_APP_FILTERS,
     PRESET_AGENTS,
+    ROUTE_FILTER_ALIASES,
+    _chain_text,
     _contexts_for_filter,
     _detect_app_contexts,
     _detail_text,
@@ -33,8 +35,10 @@ from proxyctl.connections_filters import (
     _merge_contexts,
     _normalize_app_filter,
     _normalize_filter_value,
+    _normalize_route_filter,
     _remote_candidate_contexts,
     _remote_candidate_contexts_for_args,
+    _route_kind_text,
 )
 
 KNOWN_SYSTEM_EXTENSION_OWNERS = ("com.antgroup.asp",)
@@ -153,6 +157,8 @@ class ConnectionArgs:
     Attributes:
         app_filters: Legacy process/app filters from ``--app``.
         host_filters: Host/rule-payload/destination filters from ``--host``.
+        chain_filters: Mihomo chain/node filters from ``--chain`` / ``--line``.
+        route_filters: Mihomo route-kind filters from ``--route``.
         preset_filters: Named filter presets from ``--preset``.
         agent_filters: Agent/tool filters from ``--agent``.
         query_filters: Free-text filters from ``--query`` / ``--filter``.
@@ -161,6 +167,8 @@ class ConnectionArgs:
 
     app_filters: list[str]
     host_filters: list[str] = field(default_factory=list)
+    chain_filters: list[str] = field(default_factory=list)
+    route_filters: list[str] = field(default_factory=list)
     preset_filters: list[str] = field(default_factory=list)
     agent_filters: list[str] = field(default_factory=list)
     query_filters: list[str] = field(default_factory=list)
@@ -171,6 +179,8 @@ class ConnectionArgs:
         return any([
             self.app_filters,
             self.host_filters,
+            self.chain_filters,
+            self.route_filters,
             self.preset_filters,
             self.agent_filters,
             self.query_filters,
@@ -181,7 +191,8 @@ def parse_args(args: list[str]) -> ConnectionArgs:
     """Parse ``proxyctl connections`` arguments.
 
     Supported syntax:
-        ``--host`` / ``--preset`` / ``--agent`` / ``--query`` are repeatable.
+        ``--host`` / ``--chain`` / ``--route`` / ``--preset`` / ``--agent`` /
+        ``--query`` are repeatable. ``--line`` aliases ``--chain``.
         ``--app`` is kept as a legacy alias for process/app filtering.
     """
     parsed = ConnectionArgs(app_filters=[])
@@ -192,13 +203,16 @@ def parse_args(args: list[str]) -> ConnectionArgs:
             parsed.all_apps = True
             idx += 1
             continue
-        if arg in ("--app", "--host", "--preset", "--agent",
+        if arg in ("--app", "--host", "--chain", "--line", "--route",
+                   "--preset", "--agent",
                    "--query", "--filter"):
             _append_filter_arg(parsed, arg, args, idx)
             idx += 2
             continue
         _io.fail(f"未识别 connections 参数：{arg}",
                  hints=["proxyctl connections --host anthropic.com",
+                        "proxyctl connections --chain SG-Residential-01",
+                        "proxyctl connections --route proxy",
                         "proxyctl connections --preset ai",
                         "proxyctl connections --agent codex --json",
                         "proxyctl connections --json"],
@@ -218,6 +232,11 @@ def _append_filter_arg(parsed: ConnectionArgs, arg: str,
         parsed.app_filters.append(value)
     elif arg == "--host":
         parsed.host_filters.append(value)
+    elif arg in ("--chain", "--line"):
+        parsed.chain_filters.append(value)
+    elif arg == "--route":
+        _validate_route(value)
+        parsed.route_filters.append(value)
     elif arg == "--preset":
         _validate_preset(value)
         parsed.preset_filters.append(value)
@@ -235,6 +254,16 @@ def _validate_preset(value: str) -> None:
     known = ", ".join(sorted(PRESET_AGENTS))
     _io.fail(f"未知 connections preset：{value}",
              hint=f"可用 preset: {known}",
+             doc="agent-protocol", code=_io.USAGE, cmd="connections")
+
+
+def _validate_route(value: str) -> None:
+    """Fail early when a route filter cannot match a Mihomo route_kind."""
+    if _normalize_route_filter(value):
+        return
+    known = ", ".join(sorted(ROUTE_FILTER_ALIASES))
+    _io.fail(f"未知 connections route：{value}",
+             hint=f"可用 route: {known}",
              doc="agent-protocol", code=_io.USAGE, cmd="connections")
 
 
@@ -646,8 +675,12 @@ def _proxy_owner_item_matches_filters(item: dict[str, Any],
     ])
     contexts = list(item.get("candidate_contexts") or [])
     contexts.extend(owner.get("app_contexts") or [])
+    detail = item.get("mihomo")
     return _matches_filter_dimensions(
-        process_text, _detail_text(item.get("mihomo")), contexts, args)
+        process_text, _detail_text(detail), contexts, args,
+        chain_text=_chain_text(detail),
+        route_kind=_route_kind_text(detail),
+    )
 
 
 def _local_item_matches_filters(item: dict[str, Any],
@@ -662,8 +695,12 @@ def _local_item_matches_filters(item: dict[str, Any],
         str(item.get("target_host") or ""),
         _detail_text(item.get("mihomo")),
     ])
+    detail = item.get("mihomo")
     return _matches_filter_dimensions(
-        process_text, target_text, item.get("app_contexts") or [], args)
+        process_text, target_text, item.get("app_contexts") or [], args,
+        chain_text=_chain_text(detail),
+        route_kind=_route_kind_text(detail),
+    )
 
 
 def _proxy_group_key(item: dict[str, Any]) -> tuple[str, str]:
@@ -821,6 +858,8 @@ def build_report(backend_name: str, config: dict[str, Any],
         "filters": {
             "app": parsed_args.app_filters,
             "host": parsed_args.host_filters,
+            "chain": parsed_args.chain_filters,
+            "route": parsed_args.route_filters,
             "preset": parsed_args.preset_filters,
             "agent": parsed_args.agent_filters,
             "query": parsed_args.query_filters,

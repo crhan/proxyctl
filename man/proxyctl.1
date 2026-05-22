@@ -131,11 +131,13 @@ Linux systemctl --user）。
 4 阶段健康检查：basic / groups / connectivity / outbound-ip。
 \fB--plain\fR 输出 TSV（stage / ok / detail）。
 .TP
-\fBproxyctl connections\fR [\fB--host\fR \fITEXT\fR ...] [\fB--preset\fR \fINAME\fR ...] [\fB--agent\fR \fINAME\fR ...] [\fB--query\fR \fITEXT\fR ...] [\fB--app\fR \fINAME\fR ...] [\fB--all\fR] [\fB--json\fR]
+\fBproxyctl connections\fR [\fB--host\fR \fITEXT\fR ...] [\fB--chain\fR \fITEXT\fR ...] [\fB--route\fR \fIKIND\fR ...] [\fB--preset\fR \fINAME\fR ...] [\fB--agent\fR \fINAME\fR ...] [\fB--query\fR \fITEXT\fR ...] [\fB--app\fR \fINAME\fR ...] [\fB--all\fR] [\fB--json\fR]
 把本机 App/进程的 TCP 连接与 \fIproxy_port\fR、mihomo \fB/connections\fR
 API 的 \fIsourcePort\fR 连接详情关联。默认不做 AI 工具过滤，输出全部可关联
-目的站点；\fB--host\fR 按 host/rulePayload/IP 过滤，\fB--preset\fR 使用
-预设（如 ai/openai/anthropic/coding），\fB--agent\fR 按工具过滤（如
+目的站点；\fB--host\fR 按 host/rulePayload/IP 过滤，\fB--chain\fR /
+\fB--line\fR 按 Mihomo 链路节点过滤，\fB--route\fR 按 route_kind 过滤
+（proxy/direct/reject/unknown，也接受 代理/直连/拒绝/未知），\fB--preset\fR
+使用预设（如 ai/openai/anthropic/coding），\fB--agent\fR 按工具过滤（如
 codex/claude/chatgpt/openclaw），\fB--query\fR / \fB--filter\fR 做全文过滤。
 \fB--app\fR 保留兼容，用于进程/App 过滤；\fB--all\fR 为兼容 no-op。
 macOS 上还会用 \fBnetstat -anv\fR 反查被

@@ -22,8 +22,10 @@
   无参数时不再默认限制 Codex / Claude / ChatGPT；需要 AI 视角时使用
   `--preset ai`。新增 `--host` 按 host / rulePayload / IP 过滤，`--preset`
   使用预设（`ai` / `openai` / `anthropic` / `coding` 等），`--agent` 按工具
-  过滤（`codex` / `claude` / `chatgpt` / `openclaw` 等），`--query` /
-  `--filter` 做全文过滤。不同维度之间取 AND，同一维度内多个值取 OR。
+  过滤（`codex` / `claude` / `chatgpt` / `openclaw` 等），`--chain` /
+  `--line` 按 Mihomo 链路节点过滤，`--route` 按 route kind 过滤
+  （`proxy` / `direct` / `reject` / `unknown`，同时接受中文别名），
+  `--query` / `--filter` 做全文过滤。不同维度之间取 AND，同一维度内多个值取 OR。
   `--app Codex` / `--app Claude` 保持向后兼容，分别匹配 App 与 CLI 两类上下文。
 - **`proxyctl connections` 的人类输出改用目的站点汇总。** 默认输出只按
   目的站点展示数量、候选 App / CLI、路由和链路；每个目的站点下会统计

@@ -244,6 +244,8 @@ def test_connections_default_has_no_filters():
     parsed = connections.parse_args([])
     assert parsed.app_filters == []
     assert parsed.host_filters == []
+    assert parsed.chain_filters == []
+    assert parsed.route_filters == []
     assert parsed.preset_filters == []
     assert parsed.agent_filters == []
     assert parsed.query_filters == []
@@ -287,6 +289,9 @@ def test_connections_all_disables_default_filters():
 def test_connections_parse_multidimensional_filters():
     parsed = connections.parse_args([
         "--host", "anthropic.com",
+        "--chain", "SG-Residential-01",
+        "--line", "residential-sg",
+        "--route", "代理",
         "--preset", "ai",
         "--agent", "openclaw",
         "--query", "residential",
@@ -294,6 +299,8 @@ def test_connections_parse_multidimensional_filters():
     ])
 
     assert parsed.host_filters == ["anthropic.com"]
+    assert parsed.chain_filters == ["SG-Residential-01", "residential-sg"]
+    assert parsed.route_filters == ["代理"]
     assert parsed.preset_filters == ["ai"]
     assert parsed.agent_filters == ["openclaw"]
     assert parsed.query_filters == ["residential", "proxy"]
@@ -327,6 +334,71 @@ def test_connections_host_filter_matches_mihomo_destination(fake_subprocess,
 
     assert [row["local_source_port"] for row in report["connections"]] == [54321]
     assert report["filters"]["host"] == ["openai.com"]
+
+
+def test_connections_chain_filter_matches_mihomo_route(fake_subprocess,
+                                                       monkeypatch):
+    _install_lsof_and_ps(fake_subprocess)
+    _install_connections_api(monkeypatch, {
+        "connections": [{
+            "id": "openai",
+            "metadata": {
+                "sourcePort": "54321",
+                "host": "api.openai.com",
+                "destinationPort": "443",
+                "network": "tcp",
+                "type": "HTTPS",
+            },
+            "rule": "DomainSuffix",
+            "rulePayload": "openai.com",
+            "chains": ["SG-Residential-01", "proxy"],
+        }]
+    })
+
+    report = connections.build_report(
+        "mihomo",
+        {"proxy_port": 7890, "api_base": "http://127.0.0.1:9090"},
+        connections.ConnectionArgs([], chain_filters=["Residential"]),
+    )
+
+    assert [row["local_source_port"] for row in report["connections"]] == [54321]
+    assert report["filters"]["chain"] == ["Residential"]
+
+
+def test_connections_route_filter_matches_mihomo_route_kind(fake_subprocess,
+                                                            monkeypatch):
+    _install_lsof_and_ps(fake_subprocess)
+    _install_connections_api(monkeypatch, {
+        "connections": [{
+            "id": "openai",
+            "metadata": {
+                "sourcePort": "54321",
+                "host": "api.openai.com",
+                "destinationPort": "443",
+                "network": "tcp",
+                "type": "HTTPS",
+            },
+            "rule": "DomainSuffix",
+            "rulePayload": "openai.com",
+            "chains": ["SG-Residential-01", "proxy"],
+        }]
+    })
+
+    proxy_report = connections.build_report(
+        "mihomo",
+        {"proxy_port": 7890, "api_base": "http://127.0.0.1:9090"},
+        connections.ConnectionArgs([], route_filters=["代理"]),
+    )
+    direct_report = connections.build_report(
+        "mihomo",
+        {"proxy_port": 7890, "api_base": "http://127.0.0.1:9090"},
+        connections.ConnectionArgs([], route_filters=["direct"]),
+    )
+
+    assert [row["local_source_port"] for row in proxy_report["connections"]] == [
+        54321
+    ]
+    assert direct_report["connections"] == []
 
 
 def test_connections_agent_filter_matches_openclaw_process(fake_subprocess,

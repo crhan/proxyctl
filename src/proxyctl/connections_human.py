@@ -105,7 +105,7 @@ def _has_narrowing_filters(report: dict[str, Any]) -> bool:
     """Return whether the command used explicit filters."""
     filters = report.get("filters") or {}
     return any(bool(filters.get(name)) for name in (
-        "app", "host", "preset", "agent", "query"
+        "app", "host", "chain", "route", "preset", "agent", "query"
     ))
 
 
