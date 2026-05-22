@@ -1680,8 +1680,8 @@ def cmd_version_print() -> None:
                 "doctor_since_filter":             True,   # 0.5.0: --since <version> 屏蔽未来规则
                 "suggestions_ignore_file":         True,   # 0.5.0: ~/.config/proxyctl/suggestions.ignore
                 "proxy_group_dead_check":          True,   # 0.5.0: proxy_group.mostly_dead 规则
-                "traffic_snapshot":                True,   # 0.5.5+: active /connections traffic grouping
-                "traffic_history":                 True,   # 0.5.5+: sample/watch/report recorded deltas
+                "traffic_snapshot":                True,   # 0.5.6+: active /connections traffic grouping
+                "traffic_history":                 True,   # 0.5.6+: sample/watch/report recorded deltas
             },
         }
         _io.emit_json(_io.envelope("version", data=data))

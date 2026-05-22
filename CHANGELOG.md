@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.5.6] — 2026-05-22
+
 ### Added
 
 - **新增 `proxyctl traffic` 线路/软件流量统计。** `snapshot` 读取 Mihomo
