@@ -12,8 +12,12 @@
   连接被本机网络扩展接管时，`lsof` 只能看到扩展进程而不是原始 App。
   本版在 macOS 上补充 `netstat -anv` 反向归因，JSON 新增
   `proxy_owner_connections[]`，包含 socket owner、是否为系统扩展、
-  Mihomo `route_kind` / `chains` / `routed_via_proxy`，从而能判断连接是否
-  经过 Mihomo 以及最终是 `proxy` 还是 `direct` 路由。
+  Mihomo `route_kind` / `chains` / `routed_via_proxy`，并新增
+  `proxy_owner_groups[]` 按 `rulePayload` / host / IP 聚合目的地。如果同一
+  目的组出现不同 `chains` 或 route kind，会输出 `warning=mixed_chains`
+  / `mixed_route_kind` 和 summary 里的
+  `inconsistent_proxy_owner_group_count`，从而能判断连接是否经过 Mihomo、
+  最终是 `proxy` 还是 `direct` 路由，以及同一组线路是否一致。
 
 ## [0.5.5] — 2026-05-21
 

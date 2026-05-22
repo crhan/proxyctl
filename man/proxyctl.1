@@ -136,8 +136,9 @@ Linux systemctl --user）。
 API 的 \fIsourcePort\fR 连接详情关联。默认过滤 Codex / Claude / ChatGPT；
 \fB--all\fR 查看所有进程。macOS 上还会用 \fBnetstat -anv\fR 反查被
 Network/System Extension 接管后的 socket owner，并在 JSON 中输出
-\fBproxy_owner_connections\fR 与 Mihomo route/chains。只读；非 mihomo 后端或
-本地 API 不可用时降级输出 unmatched。
+\fBproxy_owner_connections\fR 与 \fBproxy_owner_groups\fR。后者按
+rulePayload / host / IP 聚合目的地，并标出 mixed_chains / mixed_route_kind。
+只读；非 mihomo 后端或本地 API 不可用时降级输出 unmatched。
 .TP
 \fBproxyctl trace\fR \fIDOMAIN\fR [\fB--json\fR]
 4 阶段域名链路诊断：DNS 解析 / 规则匹配预测 / 连通性 / 实际连接。

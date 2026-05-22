@@ -581,6 +581,94 @@ def _proxy_owner_selection_reason(conn: dict[str, Any], owner: ProxyOwner,
     return None
 
 
+def _proxy_group_key(item: dict[str, Any]) -> tuple[str, str]:
+    """Return ``(key_type, key)`` for grouping proxy-owned connections."""
+    m = item.get("mihomo") or {}
+    if m.get("rule_payload"):
+        return "rule_payload", str(m["rule_payload"])
+    if m.get("host"):
+        return "host", str(m["host"])
+    if m.get("destination_ip"):
+        return "destination_ip", str(m["destination_ip"])
+    return "unknown", "unknown"
+
+
+def _chain_key(chains: list[Any]) -> tuple[str, ...]:
+    """Return a hashable representation of a Mihomo chain."""
+    return tuple(str(part) for part in chains)
+
+
+def _sum_number(items: list[dict[str, Any]], field: str) -> int:
+    """Sum numeric Mihomo fields while tolerating missing values."""
+    total = 0
+    for item in items:
+        value = (item.get("mihomo") or {}).get(field)
+        if isinstance(value, (int, float)):
+            total += int(value)
+    return total
+
+
+def _chain_variants(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Summarize unique route chains in a group."""
+    variants: dict[tuple[str, ...], dict[str, Any]] = {}
+    for item in items:
+        m = item.get("mihomo") or {}
+        key = _chain_key(m.get("chains") or [])
+        if key not in variants:
+            variants[key] = {
+                "chains": list(key),
+                "route_kind": m.get("route_kind") or "unknown",
+                "count": 0,
+            }
+        variants[key]["count"] += 1
+    return sorted(variants.values(), key=lambda row: (-row["count"], row["chains"]))
+
+
+def _group_warning(consistent_chains: bool, consistent_route_kind: bool) -> str | None:
+    """Return the most important route consistency warning for a group."""
+    if not consistent_route_kind:
+        return "mixed_route_kind"
+    if not consistent_chains:
+        return "mixed_chains"
+    return None
+
+
+def _proxy_owner_groups(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group reverse-owned proxy connections by destination intent."""
+    buckets: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for item in items:
+        buckets.setdefault(_proxy_group_key(item), []).append(item)
+
+    groups: list[dict[str, Any]] = []
+    for (key_type, key), rows in buckets.items():
+        route_kinds = sorted({(row.get("mihomo") or {}).get("route_kind") or "unknown"
+                              for row in rows})
+        variants = _chain_variants(rows)
+        consistent_chains = len(variants) <= 1
+        consistent_route_kind = len(route_kinds) <= 1
+        hosts = sorted({(row.get("mihomo") or {}).get("host") or ""
+                        for row in rows if (row.get("mihomo") or {}).get("host")})
+        groups.append({
+            "key": key,
+            "key_type": key_type,
+            "connection_count": len(rows),
+            "hosts": hosts,
+            "owner_apps": sorted({row["owner"]["app"] for row in rows}),
+            "route_kinds": route_kinds,
+            "routed_via_proxy_count": sum(1 for row in rows if row["routed_via_proxy"]),
+            "direct_count": sum(1 for row in rows
+                                if (row.get("mihomo") or {}).get("route_kind") == "direct"),
+            "upload_sum": _sum_number(rows, "upload"),
+            "download_sum": _sum_number(rows, "download"),
+            "chain_variants": variants,
+            "consistent_chains": consistent_chains,
+            "consistent_route_kind": consistent_route_kind,
+            "warning": _group_warning(consistent_chains, consistent_route_kind),
+            "sample_source_ports": [row["local_source_port"] for row in rows[:5]],
+        })
+    return sorted(groups, key=lambda row: (-row["connection_count"], row["key"]))
+
+
 def build_report(backend_name: str, config: dict[str, Any],
                  parsed_args: ConnectionArgs) -> dict[str, Any]:
     """Build the full joined connections report."""
@@ -632,6 +720,7 @@ def build_report(backend_name: str, config: dict[str, Any],
     proxy_count = sum(1 for row in local_rows if row.target_port == proxy_port)
     proxy_owner_rows = _proxy_owner_connections(
         remote_rows, proxy_port, parsed_args.app_filters)
+    proxy_owner_group_rows = _proxy_owner_groups(proxy_owner_rows)
     return {
         "proxy_port": proxy_port,
         "backend": backend_name,
@@ -640,6 +729,7 @@ def build_report(backend_name: str, config: dict[str, Any],
         "api": api_status,
         "connections": joined,
         "proxy_owner_connections": proxy_owner_rows,
+        "proxy_owner_groups": proxy_owner_group_rows,
         "summary": {
             "local_count": len(local_rows),
             "proxy_port_count": proxy_count,
@@ -653,6 +743,11 @@ def build_report(backend_name: str, config: dict[str, Any],
                 if item["owner"]["system_extension_owner"]),
             "routed_via_proxy_count": sum(
                 1 for item in proxy_owner_rows if item["routed_via_proxy"]),
+            "proxy_owner_group_count": len(proxy_owner_group_rows),
+            "inconsistent_proxy_owner_group_count": sum(
+                1 for item in proxy_owner_group_rows if item["warning"]),
+            "mixed_route_group_count": sum(
+                1 for item in proxy_owner_group_rows if item["warning"]),
         },
     }
 
@@ -687,7 +782,28 @@ def emit_human(report: dict[str, Any]) -> None:
                   f"start={m.get('start') or '-'}")
         else:
             print(f"    reason={item['unmatched_reason']}")
+    _emit_proxy_owner_groups_human(report)
     _emit_proxy_owner_human(report)
+
+
+def _emit_proxy_owner_groups_human(report: dict[str, Any]) -> None:
+    """Render grouped proxy-owned route summary."""
+    groups = report["proxy_owner_groups"]
+    if not groups:
+        return
+    print(f"  {BOLD}proxy-owned destination groups{NC}")
+    for group in groups:
+        marker = f"{YELLOW}WARN{NC}" if group["warning"] else f"{GREEN}OK{NC}"
+        route = ",".join(group["route_kinds"]) or "unknown"
+        first_variant = (group["chain_variants"] or [{"chains": []}])[0]
+        chains = ",".join(first_variant["chains"]) or "-"
+        print(f"  {marker} {CYAN}{group['key']}{NC} "
+              f"count={group['connection_count']} route={route} chains={chains}")
+        if group["hosts"]:
+            print(f"    hosts={','.join(group['hosts'][:6])}")
+        if group["warning"]:
+            print(f"    warning={group['warning']} "
+                  f"chain_variants={len(group['chain_variants'])}")
 
 
 def _emit_proxy_owner_human(report: dict[str, Any]) -> None:

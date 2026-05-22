@@ -145,6 +145,9 @@ def test_connections_join_matches_proxy_port_source_port(fake_subprocess, monkey
         "proxy_owner_connection_count": 0,
         "system_extension_owner_count": 0,
         "routed_via_proxy_count": 0,
+        "proxy_owner_group_count": 0,
+        "inconsistent_proxy_owner_group_count": 0,
+        "mixed_route_group_count": 0,
     }
     row = report["connections"][0]
     assert row["app"] == "Codex"
@@ -295,6 +298,9 @@ def test_connections_reports_network_extension_owner(fake_subprocess, monkeypatc
             "tcp4 0 0 127.0.0.1.58380 127.0.0.1.7890 ESTABLISHED "
             "130 322 392384 131072 com.antgroup.asp:47283 "
             "00182 00000008 00000000075bc7fb 00000081 04000900 2 0 000000\n"
+            "tcp4 0 0 127.0.0.1.58382 127.0.0.1.7890 ESTABLISHED "
+            "130 322 392384 131072 com.antgroup.asp:47283 "
+            "00182 00000008 00000000075bc7fc 00000081 04000900 2 0 000000\n"
         ),
     )
     fake_subprocess.set_result(
@@ -330,6 +336,21 @@ def test_connections_reports_network_extension_owner(fake_subprocess, monkeypatc
             "download": 322,
             "start": "2026-05-22T08:23:41+08:00",
         }, {
+            "id": "openai-ab",
+            "metadata": {
+                "sourcePort": "58382",
+                "host": "ab.chatgpt.com",
+                "destinationPort": "443",
+                "network": "tcp",
+                "type": "HTTPS",
+            },
+            "rule": "DomainSuffix",
+            "rulePayload": "chatgpt.com",
+            "chains": ["电信专用(直连)", "proxy-tuic", "proxy"],
+            "upload": 10,
+            "download": 20,
+            "start": "2026-05-22T08:23:42+08:00",
+        }, {
             "id": "other",
             "metadata": {
                 "sourcePort": "58381",
@@ -354,9 +375,12 @@ def test_connections_reports_network_extension_owner(fake_subprocess, monkeypatc
     )
 
     assert report["connections"] == []
-    assert report["summary"]["proxy_owner_connection_count"] == 1
-    assert report["summary"]["system_extension_owner_count"] == 1
-    assert report["summary"]["routed_via_proxy_count"] == 1
+    assert report["summary"]["proxy_owner_connection_count"] == 2
+    assert report["summary"]["system_extension_owner_count"] == 2
+    assert report["summary"]["routed_via_proxy_count"] == 2
+    assert report["summary"]["proxy_owner_group_count"] == 1
+    assert report["summary"]["inconsistent_proxy_owner_group_count"] == 0
+    assert report["summary"]["mixed_route_group_count"] == 0
     row = report["proxy_owner_connections"][0]
     assert row["owner"]["app"] == "com.antgroup.asp"
     assert row["owner"]["system_extension_owner"] is True
@@ -367,6 +391,53 @@ def test_connections_reports_network_extension_owner(fake_subprocess, monkeypatc
     assert row["routed_via_proxy"] is True
     assert row["mihomo"]["route_kind"] == "proxy"
     assert row["mihomo"]["chains"] == ["电信专用(直连)", "proxy-tuic", "proxy"]
+    group = report["proxy_owner_groups"][0]
+    assert group["key"] == "chatgpt.com"
+    assert group["key_type"] == "rule_payload"
+    assert group["connection_count"] == 2
+    assert group["hosts"] == ["ab.chatgpt.com", "chatgpt.com"]
+    assert group["consistent_chains"] is True
+    assert group["consistent_route_kind"] is True
+    assert group["warning"] is None
+
+
+def test_connections_proxy_owner_group_warns_on_mixed_chains():
+    base = {
+        "owner": {"app": "com.antgroup.asp"},
+        "routed_via_proxy": True,
+        "local_source_port": 1,
+        "mihomo": {
+            "host": "chatgpt.com",
+            "rule_payload": "chatgpt.com",
+            "route_kind": "proxy",
+            "chains": ["proxy-a", "proxy"],
+            "upload": 10,
+            "download": 1,
+        },
+    }
+    other = {
+        **base,
+        "local_source_port": 2,
+        "mihomo": {
+            **base["mihomo"],
+            "host": "ab.chatgpt.com",
+            "chains": ["proxy-b", "proxy"],
+            "upload": 20,
+            "download": 2,
+        },
+    }
+
+    groups = connections._proxy_owner_groups([base, other])
+
+    group = groups[0]
+    assert group["key"] == "chatgpt.com"
+    assert group["connection_count"] == 2
+    assert group["hosts"] == ["ab.chatgpt.com", "chatgpt.com"]
+    assert group["consistent_chains"] is False
+    assert group["consistent_route_kind"] is True
+    assert group["warning"] == "mixed_chains"
+    assert len(group["chain_variants"]) == 2
+    assert group["upload_sum"] == 30
 
 
 def test_connections_lsof_missing_falls_back_to_linux_ss(monkeypatch):
