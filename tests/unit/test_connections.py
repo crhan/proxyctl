@@ -519,7 +519,10 @@ def test_connections_human_output_uses_chinese_proxy_owner_labels():
 
     assert "按目的地归组的代理入口连接" in text
     assert "代理入口连接明细" in text
-    assert "候选=codex_app" in text
+    assert "本机入口 -> 代理端口 -> Mihomo -> 目的站点" in text
+    assert "候选只按目的域名推断，不等于确认 App" in text
+    assert "入口进程=com.antgroup.asp" in text
+    assert "候选=Codex App" in text
     assert "路由=代理" in text
     assert "归因=系统扩展持有，原始 App 被隐藏" in text
     assert "proxy-owned" not in text

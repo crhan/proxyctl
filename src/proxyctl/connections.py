@@ -188,6 +188,11 @@ def _warning_label(value: str | None) -> str:
     return WARNING_LABELS.get(value or "", value or "未知")
 
 
+def _format_contexts(contexts: list[str]) -> str:
+    """Format app contexts for human output."""
+    return ",".join(APP_CONTEXT_LABELS.get(item, item) for item in contexts) or "-"
+
+
 @dataclass
 class LocalConnection:
     """One local TCP connection reported by lsof.
@@ -925,7 +930,7 @@ def emit_human(report: dict[str, Any]) -> None:
     for item in report["connections"]:
         status = f"{GREEN}已关联{NC}" if item["matched"] else f"{YELLOW}未关联{NC}"
         target = "代理" if item["connects_proxy_port"] else item["target_host"]
-        contexts = ",".join(item.get("app_contexts") or []) or "-"
+        contexts = _format_contexts(item.get("app_contexts") or [])
         print(f"  {CYAN}{item['app']}{NC} pid={item['pid']} fd={item['fd']} "
               f"源端口={item['local_source_port']} -> {target}:{item['target_port']} "
               f"上下文={contexts} {status}")
@@ -939,8 +944,25 @@ def emit_human(report: dict[str, Any]) -> None:
                   f"开始={m.get('start') or '-'}")
         else:
             print(f"    原因={_unmatched_reason_label(item['unmatched_reason'])}")
+    _emit_proxy_owner_explain_human(report)
     _emit_proxy_owner_groups_human(report)
     _emit_proxy_owner_human(report)
+
+
+def _emit_proxy_owner_explain_human(report: dict[str, Any]) -> None:
+    """Render short notes that explain proxy-owner attribution."""
+    rows = report["proxy_owner_connections"]
+    if not rows:
+        return
+    has_candidates = any(item.get("candidate_contexts") for item in rows)
+    has_system_extension = any(
+        (item.get("owner") or {}).get("system_extension_owner") for item in rows
+    )
+    print(f"  {DIM}说明：下面看的是 本机入口 -> 代理端口 -> Mihomo -> 目的站点；"
+          f"路由和链路来自 Mihomo。{NC}")
+    if has_candidates or has_system_extension:
+        print(f"  {DIM}说明：com.antgroup.asp 这类系统扩展会隐藏原始 App；"
+              f"候选只按目的域名推断，不等于确认 App。{NC}")
 
 
 def _emit_proxy_owner_groups_human(report: dict[str, Any]) -> None:
@@ -955,7 +977,7 @@ def _emit_proxy_owner_groups_human(report: dict[str, Any]) -> None:
         route = route or "未知"
         first_variant = (group["chain_variants"] or [{"chains": []}])[0]
         chains = ",".join(first_variant["chains"]) or "-"
-        contexts = ",".join(group.get("contexts") or []) or "-"
+        contexts = _format_contexts(group.get("contexts") or [])
         context_label = _context_label(bool(group.get("candidate_contexts")))
         print(f"  {marker} {CYAN}{group['key']}{NC} "
               f"数量={group['connection_count']} {context_label}={contexts} "
@@ -979,9 +1001,9 @@ def _emit_proxy_owner_human(report: dict[str, Any]) -> None:
         dest = m.get("host") or m.get("destination_ip") or "?"
         route = _route_label(m.get("route_kind"))
         contexts = item.get("candidate_contexts") or owner.get("app_contexts") or []
-        context_text = ",".join(contexts) or "-"
+        context_text = _format_contexts(contexts)
         context_label = _context_label(bool(item.get("candidate_contexts")))
-        print(f"  {CYAN}{owner['app']}{NC} pid={owner['pid']} "
+        print(f"  入口进程={CYAN}{owner['app']}{NC} pid={owner['pid']} "
               f"源端口={item['local_source_port']} -> 代理:{report['proxy_port']} "
               f"状态={owner['state']} {context_label}={context_text} 路由={route}")
         print(f"    目的={dest} 规则={m.get('rule') or '?'} "

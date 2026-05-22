@@ -28,7 +28,9 @@
 - **`proxyctl connections` 的人类输出改用中文标签。** 代理入口连接分组
   显示为"按目的地归组的代理入口连接"，明细显示为"代理入口连接明细"，
   并用"候选"明确标识被 Network/System Extension 遮蔽时只能按目的地推断的
-  App / CLI 上下文。
+  App / CLI 上下文。输出还会提示"本机入口 -> 代理端口 -> Mihomo -> 目的站点"
+  的链路含义，避免把 `com.antgroup.asp` 误读成原始 App；人类输出里的上下文
+  显示为 `Claude App` / `Claude CLI` 等可读名称。
 
 ## [0.5.5] — 2026-05-21
 
