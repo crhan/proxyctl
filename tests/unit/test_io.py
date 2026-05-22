@@ -276,7 +276,7 @@ def test_with_lock_released_after_with(tmp_path):
 
 def test_lock_paths_includes_known_names(tmp_path):
     paths = _io.lock_paths(lock_dir=str(tmp_path))
-    assert set(paths) >= {"system", "config", "daemon"}
+    assert set(paths) >= {"system", "config", "daemon", "traffic"}
     for name, path in paths.items():
         assert path.endswith(f".lock.{name}")
 

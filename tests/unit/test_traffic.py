@@ -74,6 +74,24 @@ def test_traffic_parse_by_and_filters():
     assert parsed.filters.preset_filters == ["ai"]
 
 
+def test_traffic_parse_sampling_args():
+    sample = traffic.parse_args([
+        "sample", "--store", "/tmp/proxyctl-traffic", "--host", "chatgpt.com"
+    ])
+    watch = traffic.parse_args(["watch", "--interval", "2.5", "--count", "3"])
+    report = traffic.parse_args(["report", "--since", "30m", "--by", "line,app"])
+
+    assert sample.subcmd == "sample"
+    assert sample.store_dir == "/tmp/proxyctl-traffic"
+    assert sample.filters.host_filters == ["chatgpt.com"]
+    assert watch.subcmd == "watch"
+    assert watch.interval == 2.5
+    assert watch.count == 3
+    assert report.subcmd == "report"
+    assert report.since == "30m"
+    assert report.group_by == ["line", "app"]
+
+
 def test_traffic_groups_by_line(monkeypatch):
     _install_fetch(monkeypatch, [
         _conn(1001, "api.anthropic.com",
@@ -184,6 +202,157 @@ def test_traffic_local_process_attribution(monkeypatch):
 
     assert report["groups"][0]["dimensions"] == {"app": "Codex App"}
     assert report["groups"][0]["app_breakdown"][0]["confidence"] == "process"
+
+
+def test_traffic_sample_baselines_first_seen(monkeypatch, tmp_path):
+    _install_fetch(monkeypatch, [
+        _conn(5001, "api.anthropic.com",
+              ["SG-Residential-01", "residential-sg", "claude"], 10, 90),
+    ])
+    _no_local_owners(monkeypatch)
+
+    result = traffic.record_sample(
+        "mihomo",
+        {"proxy_port": 7890, "api_base": "http://127.0.0.1:9090"},
+        traffic.parse_args(["sample", "--store", str(tmp_path)]),
+    )
+
+    assert result["baseline_connection_count"] == 1
+    assert result["recorded_event_count"] == 0
+    assert result["totals"]["total"] == 0
+    assert (tmp_path / traffic.TRAFFIC_STATE_FILE).exists()
+    assert traffic._read_events(str(tmp_path / traffic.TRAFFIC_EVENTS_FILE)) == []
+
+
+def test_traffic_sample_persists_deltas(monkeypatch, tmp_path):
+    rows = [
+        _conn(5002, "chatgpt.com", ["OpenAI-01", "proxy"], 10, 90),
+    ]
+    _install_fetch(monkeypatch, rows)
+    _no_local_owners(monkeypatch)
+    args = traffic.parse_args(["sample", "--store", str(tmp_path)])
+
+    traffic.record_sample("mihomo", {"proxy_port": 7890}, args)
+    rows[0]["upload"] = 25
+    rows[0]["download"] = 140
+    result = traffic.record_sample("mihomo", {"proxy_port": 7890}, args)
+
+    assert result["baseline_connection_count"] == 0
+    assert result["recorded_event_count"] == 1
+    assert result["totals"]["upload"] == 15
+    assert result["totals"]["download"] == 50
+    events = traffic._read_events(str(tmp_path / traffic.TRAFFIC_EVENTS_FILE))
+    assert len(events) == 1
+    assert events[0]["total"] == 65
+
+
+def test_traffic_report_reads_recorded_events(monkeypatch, tmp_path):
+    rows = [
+        _conn(6001, "api.anthropic.com",
+              ["SG-Residential-01", "residential-sg"], 1, 10),
+    ]
+    _install_fetch(monkeypatch, rows)
+    _no_local_owners(monkeypatch)
+    sample_args = traffic.parse_args(["sample", "--store", str(tmp_path)])
+    traffic.record_sample("mihomo", {"proxy_port": 7890}, sample_args)
+    rows[0]["upload"] = 3
+    rows[0]["download"] = 40
+    traffic.record_sample("mihomo", {"proxy_port": 7890}, sample_args)
+
+    report = traffic.build_report(
+        "mihomo",
+        {"proxy_port": 7890},
+        traffic.parse_args([
+            "report", "--store", str(tmp_path), "--since", "1h", "--by", "line"
+        ]),
+    )
+
+    assert report["scope"] == "traffic_recorded_report"
+    assert report["totals"]["upload"] == 2
+    assert report["totals"]["download"] == 30
+    assert report["groups"][0]["dimensions"] == {"line": "SG-Residential-01"}
+
+
+def test_traffic_report_sorts_equal_totals(monkeypatch, tmp_path):
+    events = [
+        _stored_event("A-line", "App A", "a.example", 10),
+        _stored_event("B-line", "App B", "b.example", 10),
+    ]
+    events_path = tmp_path / traffic.TRAFFIC_EVENTS_FILE
+    events_path.write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n",
+        encoding="utf-8",
+    )
+    _no_local_owners(monkeypatch)
+
+    report = traffic.build_report(
+        "mihomo",
+        {"proxy_port": 7890},
+        traffic.parse_args([
+            "report", "--store", str(tmp_path), "--since", "9999d",
+            "--by", "line,app"
+        ]),
+    )
+
+    assert [group["dimensions"]["line"] for group in report["groups"]] == [
+        "A-line", "B-line"
+    ]
+
+
+def _stored_event(line: str, app: str, host: str, total: int) -> dict:
+    """Build one stored event row for report tests."""
+    return {
+        "id": host,
+        "local_source_port": 12345,
+        "host": host,
+        "destination_ip": "",
+        "rule": "DomainSuffix",
+        "rule_payload": host,
+        "route_kind": "proxy",
+        "line": line,
+        "chains": [line, "proxy"],
+        "chain": f"{line} -> proxy",
+        "upload": total,
+        "download": 0,
+        "total": total,
+        "start": "2026-05-22T10:00:00+08:00",
+        "sample_ts": "2026-05-22T03:00:00Z",
+        "attribution": {
+            "app": app,
+            "confidence": "process",
+            "source": "lsof",
+            "owner_app": app,
+            "owner_pid": 1,
+            "candidate_contexts": [],
+        },
+    }
+
+
+def test_traffic_watch_records_bounded_samples(monkeypatch, tmp_path):
+    samples = [0, 10, 25]
+
+    def _fetch(*args, **kwargs):
+        value = samples.pop(0)
+        row = _conn(7001, "chatgpt.com", ["OpenAI-01", "proxy"],
+                    value, value * 2)
+        return [row], {"ok": True, "status": "ok", "count": 1}
+
+    monkeypatch.setattr(traffic, "fetch_mihomo_connections", _fetch)
+    monkeypatch.setattr(traffic.time, "sleep", lambda interval: None)
+    _no_local_owners(monkeypatch)
+
+    result = traffic.run_watch(
+        "mihomo",
+        {"proxy_port": 7890},
+        traffic.parse_args([
+            "watch", "--store", str(tmp_path), "--interval", "1", "--count", "3"
+        ]),
+    )
+
+    assert result["sample_count"] == 3
+    assert result["totals"]["connection_count"] == 2
+    assert result["totals"]["upload"] == 25
+    assert result["totals"]["download"] == 50
 
 
 def test_cmd_traffic_json_outputs_envelope(monkeypatch):

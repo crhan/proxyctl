@@ -399,7 +399,7 @@ def lock_paths(lock_dir: str | None = None) -> dict[str, str]:
     home = os.path.expanduser("~")
     base = lock_dir or os.path.join(home, ".config", "proxyctl")
     # 已知锁名（与 cli._exec_with_lock 一致）
-    names = ["system", "config", "daemon"]
+    names = ["system", "config", "daemon", "traffic"]
     return {n: os.path.join(base, f".lock.{n}") for n in names}
 
 

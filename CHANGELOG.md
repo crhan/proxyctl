@@ -7,12 +7,12 @@
 
 ### Added
 
-- **新增 `proxyctl traffic` 活跃连接流量快照。** 命令读取 Mihomo
-  `/connections` 的 `upload` / `download`，默认按线路（链路首节点）聚合，
-  支持 `--by line,app` 进一步按软件归因，也支持复用 `connections` 的
-  `--host` / `--chain` / `--route` / `--preset` / `--agent` 过滤。JSON 输出
-  明确标注 `scope=active_connections_snapshot`，避免把当前活跃连接误认为
-  历史累计。
+- **新增 `proxyctl traffic` 线路/软件流量统计。** `snapshot` 读取 Mihomo
+  `/connections` 的 `upload` / `download` 并按线路、链路、软件或路由聚合；
+  `sample` / `watch` 可把连接计数器增量写入本地缓存；`report --since 1h`
+  可按已记录增量生成历史窗口报表。命令复用 `connections` 的 `--host` /
+  `--chain` / `--route` / `--preset` / `--agent` 过滤。首次采样只建立基线，
+  不回填此前已经产生的字节，避免把活跃连接当前计数误算成历史累计。
 
 ### Fixed
 

@@ -147,12 +147,15 @@ rulePayload / host / IP 聚合目的地，输出 app_contexts / candidate_contex
 并标出 mixed_chains / mixed_route_kind。
 只读；非 mihomo 后端或本地 API 不可用时降级输出 unmatched。
 .TP
-\fBproxyctl traffic\fR [snapshot] [\fB--by\fR \fIline,app\fR] [\fB--host\fR \fITEXT\fR ...] [\fB--chain\fR \fITEXT\fR ...] [\fB--route\fR \fIKIND\fR ...] [\fB--preset\fR \fINAME\fR ...] [\fB--agent\fR \fINAME\fR ...] [\fB--json\fR]
+\fBproxyctl traffic\fR [snapshot|sample|watch|report] [\fB--by\fR \fIline,app\fR] [\fB--interval\fR \fISEC\fR] [\fB--count\fR \fIN\fR] [\fB--since\fR \fI1h\fR] [\fB--store\fR \fIDIR\fR] [\fB--host\fR \fITEXT\fR ...] [\fB--chain\fR \fITEXT\fR ...] [\fB--route\fR \fIKIND\fR ...] [\fB--preset\fR \fINAME\fR ...] [\fB--agent\fR \fINAME\fR ...] [\fB--json\fR]
 按当前活跃 Mihomo \fB/connections\fR 的 upload/download 统计流量快照。
 默认 \fB--by line\fR 按首个链路节点统计线路；也可用
 \fB--by line,app\fR 进一步按软件归因。软件归因分可信度：
 可见进程为 process/socket-owner，被 Network/System Extension 遮蔽时按目的域名
-给出 inferred 候选。该命令不提供历史累计；连接关闭后的流量需要后续采样器落盘。
+给出 inferred 候选。\fBsample\fR 记录一次连接计数器增量，
+\fBwatch\fR 按间隔重复记录，\fBreport\fR 读取已记录增量并按
+\fB--since\fR 汇总。首次看到的连接只建立基线，不回填此前已经产生的字节；
+未运行 sample/watch 的时间段无法补算。
 .TP
 \fBproxyctl trace\fR \fIDOMAIN\fR [\fB--json\fR]
 4 阶段域名链路诊断：DNS 解析 / 规则匹配预测 / 连通性 / 实际连接。

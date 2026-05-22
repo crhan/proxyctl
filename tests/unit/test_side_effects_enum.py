@@ -82,5 +82,7 @@ def test_known_command_side_effects():
         "apply": ["config-write"]}
     assert by_name["config"]["conditional_side_effects"] == {
         "set": ["config-write"]}
+    assert by_name["traffic"]["conditional_side_effects"] == {
+        "sample": ["cache"], "watch": ["cache"]}
     assert by_name["audit"]["side_effects"] == []
     assert by_name["config"]["side_effects"] == []

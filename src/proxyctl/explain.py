@@ -405,12 +405,13 @@ def _t_locks(backend, config) -> TopicCard:
             "写操作互斥锁。LOCKED(8) 退出码触发时，错误 hints 已列出锁路径。"
             "极端情况（挂死进程）可手动 rm。"
         ),
-        "file": f"{lock_dir}/.lock.{{system,config,daemon}}",
+        "file": f"{lock_dir}/.lock.{{system,config,daemon,traffic}}",
         "edit": (
             "  # 三类锁（按写操作类型分）：\n"
             "  #   .lock.system   start/stop/restart/fix\n"
             "  #   .lock.config   mode/engine/audit apply/config set\n"
             "  #   .lock.daemon   daemon/dns-lock/dns-unlock\n"
+            "  #   .lock.traffic  traffic sample/watch\n"
             "  #\n"
             "  # 排查：\n"
             "  #   lsof <lock_path>            # 看谁持有\n"
@@ -736,8 +737,9 @@ Step 6  proxyctl explain <topic>          # 深入概念（topic 见下）
 
 | 类别 | sudo | 命令 |
 |---|---|---|
-| **只读** (side_effects=[]) | 否 | `status doctor connections traffic audit env log plugins explain agent-guide commands config path|get help version` |
+| **只读** (side_effects=[]) | 否 | `status doctor connections traffic snapshot/report audit env log plugins explain agent-guide commands config path|get help version` |
 | **只读 + 网络 IO** (network-io) | 否 | `check trace bench recover`（curl/HTTP，不改本地状态） |
+| **写 proxyctl 本地缓存** (cache) | 否 | `traffic sample/watch`（记录连接计数器增量，供 report 汇总） |
 | **写 proxyctl 自身配置** | 否 | `config set <key> <value>`（原子写 + .bak + YAML 校验） |
 | **写引擎配置** (config-write) | 是 | `mode tun|proxy` `audit apply` |
 | **写系统 + 进程** | 是 | `start stop restart restart-clean fix engine daemon dns-lock dns-unlock` |
@@ -815,7 +817,7 @@ proxyctl 才能区分「过期 / 网络挂 / 订阅服务方挂」。
 - 引擎日志: `{log}`
 - 代理端口: HTTP/SOCKS = `{port}`，Clash API = `9090`
 - 用户插件目录: `~/.config/proxyctl/plugins/*.py`
-- 锁文件目录: `{lock_dir}/.lock.{{system|config|daemon}}`
+- 锁文件目录: `{lock_dir}/.lock.{{system|config|daemon|traffic}}`
 
 ## Config Tracking — 用户配置目录建议纳入 git
 
@@ -938,7 +940,7 @@ proxyctl 在 stdin 非 TTY 时**不会**调用 `input()` 等阻塞读取。
 `fcntl.flock` 保护，并发冲突返回 `LOCKED(8)`。
 
 ```
-锁文件位置：{lock_dir}/.lock.{{system,config,daemon}}
+锁文件位置：{lock_dir}/.lock.{{system,config,daemon,traffic}}
 诊断：lsof <锁文件>                # 看谁持有
      ps -p <PID>                  # 验证是否为活的 proxyctl
 释放：（极端情况）rm <锁文件>      # 仅当 lsof 显示无持有者
@@ -1068,9 +1070,14 @@ COMMANDS_META: list[dict] = [
                   "proxyctl connections --route proxy",
                   "proxyctl connections --agent codex --json"]},
     {"name": "traffic", "group": "diagnostic",
-     "summary": "按线路/软件统计当前活跃 Mihomo 连接流量快照",
-     "args": [{"name": "snapshot", "required": False},
+     "summary": "按线路/软件统计当前活跃或已采样的 Mihomo 连接流量",
+     "args": [{"name": "subcmd", "required": False,
+               "choices": ["snapshot", "sample", "watch", "report"]},
               {"name": "--by", "required": False, "repeatable": True},
+              {"name": "--interval", "required": False},
+              {"name": "--count", "required": False},
+              {"name": "--since", "required": False},
+              {"name": "--store", "required": False},
               {"name": "--host", "required": False, "repeatable": True},
               {"name": "--chain", "required": False, "repeatable": True},
               {"name": "--line", "required": False, "repeatable": True},
@@ -1082,9 +1089,13 @@ COMMANDS_META: list[dict] = [
               {"name": "--app", "required": False, "repeatable": True},
               {"name": "--all", "required": False}],
      "supports_json": True, "side_effects": [],
+     "conditional_side_effects": {"sample": ["cache"], "watch": ["cache"]},
      "needs_sudo": False, "interactive": False, "exit_codes": [0, 2],
      "examples": ["proxyctl traffic",
                   "proxyctl traffic --by line,app",
+                  "proxyctl traffic sample",
+                  "proxyctl traffic watch --interval 5 --count 12",
+                  "proxyctl traffic report --since 1h --by line,app",
                   "proxyctl traffic --chain residential-sg",
                   "proxyctl traffic --route proxy --preset ai",
                   "proxyctl traffic --json"]},

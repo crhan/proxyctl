@@ -1,14 +1,17 @@
-"""proxyctl traffic — active Mihomo traffic snapshot.
+"""proxyctl traffic — active and sampled Mihomo traffic accounting.
 
-This command is intentionally read-only. It reports only currently active
-Mihomo connections because the Clash-compatible ``/connections`` API does not
-retain closed-connection history.
+``snapshot`` and ``report`` are read-only. ``sample`` and ``watch`` write a
+small local cache so later reports can aggregate deltas. Mihomo only exposes
+currently active connections, so the sampler deliberately treats first-seen
+connections as baselines instead of inventing historical bytes.
 """
 
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 
 from proxyctl import _io
@@ -36,8 +39,22 @@ from proxyctl.connections_filters import (
     _remote_candidate_contexts,
     _route_kind_text,
 )
+from proxyctl.traffic_store import (
+    TRAFFIC_EVENTS_FILE,
+    TRAFFIC_STATE_FILE,
+    append_events as _append_events,
+    delta_events as _delta_events,
+    load_state as _load_state,
+    merge_totals as _merge_totals,
+    now as _now,
+    parse_timestamp as _parse_ts,
+    read_events as _read_events,
+    save_state as _save_state,
+    store_paths as _raw_store_paths,
+)
 
 VALID_GROUPS = ("line", "chain", "app", "route")
+VALID_SUBCMDS = ("snapshot", "sample", "watch", "report")
 FILTER_VALUE_FLAGS = {
     "--app",
     "--host",
@@ -56,14 +73,22 @@ class TrafficArgs:
     """Parsed arguments for ``proxyctl traffic``.
 
     Attributes:
-        subcmd: Currently only ``snapshot`` is supported.
+        subcmd: ``snapshot`` / ``sample`` / ``watch`` / ``report``.
         group_by: Aggregation dimensions. Defaults to ``["line"]``.
         filters: Reused connection filters for host/line/route/agent narrowing.
+        interval: Sampling interval for ``watch``.
+        count: Optional watch sample count.
+        since: Report window such as ``1h`` / ``30m``.
+        store_dir: Optional override for traffic state/event files.
     """
 
     subcmd: str = "snapshot"
     group_by: list[str] = field(default_factory=lambda: ["line"])
     filters: ConnectionArgs = field(default_factory=lambda: ConnectionArgs([]))
+    interval: float = 5.0
+    count: int | None = None
+    since: str = "1h"
+    store_dir: str | None = None
 
 
 def parse_args(args: list[str]) -> TrafficArgs:
@@ -73,10 +98,11 @@ def parse_args(args: list[str]) -> TrafficArgs:
     if args and not args[0].startswith("-"):
         parsed.subcmd = args[0]
         idx = 1
-    if parsed.subcmd != "snapshot":
+    if parsed.subcmd not in VALID_SUBCMDS:
         _io.fail(f"traffic 暂不支持子命令：{parsed.subcmd}",
-                 hints=["proxyctl traffic",
-                        "proxyctl traffic snapshot --by line,app"],
+                 hints=["proxyctl traffic snapshot",
+                        "proxyctl traffic sample",
+                        "proxyctl traffic report --since 1h"],
                  doc="agent-protocol", code=_io.USAGE, cmd="traffic")
 
     explicit_group = False
@@ -96,16 +122,97 @@ def parse_args(args: list[str]) -> TrafficArgs:
             parsed.filters.all_apps = True
             idx += 1
             continue
+        if arg == "--interval":
+            parsed.interval = _parse_positive_float(args, idx, "--interval")
+            idx += 2
+            continue
+        if arg == "--count":
+            parsed.count = _parse_positive_int(args, idx, "--count")
+            idx += 2
+            continue
+        if arg == "--since":
+            if idx + 1 >= len(args):
+                _io.fail("traffic --since 需要一个时间窗口",
+                         hint="proxyctl traffic report --since 1h",
+                         doc="agent-protocol", code=_io.USAGE, cmd="traffic")
+            _parse_since(args[idx + 1])
+            parsed.since = args[idx + 1]
+            idx += 2
+            continue
+        if arg == "--store":
+            if idx + 1 >= len(args):
+                _io.fail("traffic --store 需要一个目录路径",
+                         hint="proxyctl traffic sample --store /tmp/proxyctl-traffic",
+                         doc="agent-protocol", code=_io.USAGE, cmd="traffic")
+            parsed.store_dir = args[idx + 1]
+            idx += 2
+            continue
         if arg in FILTER_VALUE_FLAGS:
             _append_filter_arg(parsed.filters, arg, args, idx)
             idx += 2
             continue
         _io.fail(f"未识别 traffic 参数：{arg}",
                  hints=["proxyctl traffic --by line,app",
+                        "proxyctl traffic sample",
+                        "proxyctl traffic report --since 1h",
                         "proxyctl traffic --chain residential-sg",
                         "proxyctl traffic --route proxy --preset ai"],
                  doc="agent-protocol", code=_io.USAGE, cmd="traffic")
     return parsed
+
+
+def _parse_positive_float(args: list[str], idx: int, flag: str) -> float:
+    """Parse a positive float flag value."""
+    if idx + 1 >= len(args):
+        _io.fail(f"traffic {flag} 需要一个数字",
+                 hint=f"proxyctl traffic watch {flag} 5",
+                 doc="agent-protocol", code=_io.USAGE, cmd="traffic")
+    try:
+        value = float(args[idx + 1])
+    except ValueError:
+        value = 0.0
+    if value <= 0:
+        _io.fail(f"traffic {flag} 必须大于 0",
+                 hint=f"proxyctl traffic watch {flag} 5",
+                 doc="agent-protocol", code=_io.USAGE, cmd="traffic")
+    return value
+
+
+def _parse_positive_int(args: list[str], idx: int, flag: str) -> int:
+    """Parse a positive integer flag value."""
+    if idx + 1 >= len(args):
+        _io.fail(f"traffic {flag} 需要一个整数",
+                 hint=f"proxyctl traffic watch {flag} 12",
+                 doc="agent-protocol", code=_io.USAGE, cmd="traffic")
+    try:
+        value = int(args[idx + 1])
+    except ValueError:
+        value = 0
+    if value <= 0:
+        _io.fail(f"traffic {flag} 必须大于 0",
+                 hint=f"proxyctl traffic watch {flag} 12",
+                 doc="agent-protocol", code=_io.USAGE, cmd="traffic")
+    return value
+
+
+def _parse_since(value: str) -> timedelta:
+    """Parse report window text such as ``1h`` / ``30m`` / ``2d``."""
+    text = value.strip().lower()
+    if len(text) < 2:
+        _io.fail(f"traffic --since 格式错误：{value}",
+                 hint="示例: --since 30m / --since 1h / --since 2d",
+                 doc="agent-protocol", code=_io.USAGE, cmd="traffic")
+    unit = text[-1]
+    try:
+        amount = float(text[:-1])
+    except ValueError:
+        amount = 0.0
+    if amount <= 0 or unit not in ("s", "m", "h", "d"):
+        _io.fail(f"traffic --since 格式错误：{value}",
+                 hint="示例: --since 30m / --since 1h / --since 2d",
+                 doc="agent-protocol", code=_io.USAGE, cmd="traffic")
+    scale = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+    return timedelta(seconds=amount * scale)
 
 
 def _parse_group_by(value: str, explicit: bool,
@@ -202,19 +309,110 @@ def build_snapshot(backend_name: str, config: dict[str, Any],
         "backend": backend_name,
         "proxy_port": proxy_port,
         "group_by": args.group_by,
-        "filters": {
-            "app": args.filters.app_filters,
-            "host": args.filters.host_filters,
-            "chain": args.filters.chain_filters,
-            "route": args.filters.route_filters,
-            "preset": args.filters.preset_filters,
-            "agent": args.filters.agent_filters,
-            "query": args.filters.query_filters,
-        },
+        "filters": _filter_dict(args.filters),
         "api": api_status,
         "totals": _totals(rows),
         "groups": groups,
         "connections": rows,
+    }
+
+
+def record_sample(backend_name: str, config: dict[str, Any],
+                  args: TrafficArgs) -> dict[str, Any]:
+    """Record one traffic delta sample into the local cache."""
+    snapshot_args = TrafficArgs(subcmd="snapshot", filters=args.filters)
+    snapshot = build_snapshot(backend_name, config, snapshot_args)
+    store = _store_paths(config, args)
+    now = _now()
+    state = _load_state(store["state_path"])
+    events, baseline_count = _delta_events(snapshot["connections"], state, now)
+    if events:
+        _append_events(store["events_path"], events)
+    _save_state(store["state_path"], state, now)
+    return {
+        "scope": "traffic_delta_sample",
+        "backend": backend_name,
+        "store": store,
+        "api": snapshot["api"],
+        "active_connection_count": len(snapshot["connections"]),
+        "baseline_connection_count": baseline_count,
+        "recorded_event_count": len(events),
+        "totals": _totals(events),
+        "events": events,
+    }
+
+
+def run_watch(backend_name: str, config: dict[str, Any],
+              args: TrafficArgs) -> dict[str, Any]:
+    """Record traffic samples repeatedly."""
+    sample_count = 0
+    totals = {"connection_count": 0, "upload": 0, "download": 0, "total": 0}
+    last: dict[str, Any] | None = None
+    try:
+        while args.count is None or sample_count < args.count:
+            last = record_sample(backend_name, config, args)
+            sample_count += 1
+            _merge_totals(totals, last["totals"])
+            if args.count is not None and sample_count >= args.count:
+                break
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        pass
+    return {
+        "scope": "traffic_watch",
+        "backend": backend_name,
+        "sample_count": sample_count,
+        "interval": args.interval,
+        "totals": totals,
+        "last_sample": last,
+    }
+
+
+def build_report(backend_name: str, config: dict[str, Any],
+                 args: TrafficArgs) -> dict[str, Any]:
+    """Build a traffic report from locally recorded sample events."""
+    store = _store_paths(config, args)
+    since_delta = _parse_since(args.since)
+    cutoff = _now() - since_delta
+    events = [
+        event for event in _read_events(store["events_path"])
+        if _parse_ts(event.get("sample_ts")) >= cutoff
+    ]
+    filtered = [event for event in events if _row_matches_filters(event, args.filters)]
+    groups = _aggregate_rows(filtered, args.group_by)
+    return {
+        "scope": "traffic_recorded_report",
+        "scope_note": (
+            "This report uses locally recorded traffic delta samples. It only "
+            "covers periods where proxyctl traffic sample/watch was running."
+        ),
+        "backend": backend_name,
+        "store": store,
+        "since": args.since,
+        "cutoff": cutoff.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "group_by": args.group_by,
+        "filters": _filter_dict(args.filters),
+        "totals": _totals(filtered),
+        "groups": groups,
+        "events": filtered,
+    }
+
+
+def _store_paths(config: dict[str, Any], args: TrafficArgs) -> dict[str, str]:
+    """Return traffic cache paths."""
+    return _raw_store_paths(config, args.store_dir)
+
+
+def _filter_dict(filters: ConnectionArgs) -> dict[str, list[str]]:
+    """Return the JSON filter contract."""
+    return {
+        "app": filters.app_filters,
+        "host": filters.host_filters,
+        "chain": filters.chain_filters,
+        "route": filters.route_filters,
+        "preset": filters.preset_filters,
+        "agent": filters.agent_filters,
+        "query": filters.query_filters,
     }
 
 
@@ -382,7 +580,15 @@ def _aggregate_rows(rows: list[dict[str, Any]],
         _add_row(bucket, row)
     return sorted(
         buckets.values(),
-        key=lambda item: (-item["total"], item["dimensions"]),
+        key=lambda item: (-item["total"], _dimension_sort_key(item)),
+    )
+
+
+def _dimension_sort_key(bucket: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    """Return a stable aggregate sort key for dimension values."""
+    return tuple(
+        (name, str(value))
+        for name, value in bucket["dimensions"].items()
     )
 
 
@@ -560,7 +766,22 @@ def _format_bytes(value: int) -> str:
 
 
 def emit_human(report: dict[str, Any]) -> None:
-    """Render a human-readable traffic snapshot."""
+    """Render human-readable traffic output for all scopes."""
+    scope = report.get("scope")
+    if scope == "traffic_delta_sample":
+        _emit_sample_human(report)
+        return
+    if scope == "traffic_watch":
+        _emit_watch_human(report)
+        return
+    if scope == "traffic_recorded_report":
+        _emit_report_human(report)
+        return
+    _emit_snapshot_human(report)
+
+
+def _emit_snapshot_human(report: dict[str, Any]) -> None:
+    """Render a human-readable active traffic snapshot."""
     totals = report["totals"]
     print(
         "proxyctl traffic snapshot  "
@@ -579,6 +800,75 @@ def emit_human(report: dict[str, Any]) -> None:
         return
     if not report["groups"]:
         print("  没有匹配的活跃连接流量")
+        return
+    for group in report["groups"]:
+        _emit_group(group)
+
+
+def _emit_sample_human(report: dict[str, Any]) -> None:
+    """Render one recorded sample result."""
+    totals = report["totals"]
+    store = report["store"]
+    print(f"proxyctl traffic sample  backend={report['backend']}")
+    print("  说明：新增连接先建立基线；只有连续两次采样之间的字节增量会入库。")
+    print(
+        "  本次："
+        f"活跃={report['active_connection_count']} 条  "
+        f"新基线={report['baseline_connection_count']} 条  "
+        f"记录增量={report['recorded_event_count']} 条"
+    )
+    print(
+        "  增量："
+        f"下载={_format_bytes(totals['download'])}  "
+        f"上传={_format_bytes(totals['upload'])}  "
+        f"合计={_format_bytes(totals['total'])}"
+    )
+    print(f"  状态文件：{store['state_path']}")
+    print(f"  事件文件：{store['events_path']}")
+
+
+def _emit_watch_human(report: dict[str, Any]) -> None:
+    """Render repeated sampling summary."""
+    totals = report["totals"]
+    last = report.get("last_sample") or {}
+    store = (last.get("store") or {}) if isinstance(last, dict) else {}
+    print(
+        "proxyctl traffic watch  "
+        f"backend={report['backend']}  "
+        f"采样={report['sample_count']} 次  "
+        f"间隔={report['interval']}s"
+    )
+    print(
+        "  增量："
+        f"记录={totals['connection_count']} 条  "
+        f"下载={_format_bytes(totals['download'])}  "
+        f"上传={_format_bytes(totals['upload'])}  "
+        f"合计={_format_bytes(totals['total'])}"
+    )
+    if store.get("events_path"):
+        print(f"  事件文件：{store['events_path']}")
+
+
+def _emit_report_human(report: dict[str, Any]) -> None:
+    """Render a report built from recorded events."""
+    totals = report["totals"]
+    store = report["store"]
+    print(
+        "proxyctl traffic report  "
+        f"backend={report['backend']}  "
+        f"窗口={report['since']}  分组={','.join(report['group_by'])}"
+    )
+    print("  说明：只统计本机已记录的采样增量；未运行 sample/watch 的时间段无法补算。")
+    print(
+        "  总计："
+        f"{totals['connection_count']} 条增量  "
+        f"下载={_format_bytes(totals['download'])}  "
+        f"上传={_format_bytes(totals['upload'])}  "
+        f"合计={_format_bytes(totals['total'])}"
+    )
+    print(f"  事件文件：{store['events_path']}")
+    if not report["groups"]:
+        print("  没有匹配的已记录流量")
         return
     for group in report["groups"]:
         _emit_group(group)
@@ -618,8 +908,41 @@ def _emit_group(group: dict[str, Any]) -> None:
 def cmd_traffic(args: list[str], backend, config: dict[str, Any]) -> None:
     """Entry point for ``proxyctl traffic``."""
     parsed = parse_args(args)
-    report = build_snapshot(backend.name, config, parsed)
+    report = _build_report_with_optional_lock(backend.name, config, parsed)
     if _io.is_json_mode():
         _io.emit_json(_io.envelope("traffic", data=report))
         return
     emit_human(report)
+
+
+def _build_report_with_optional_lock(backend_name: str, config: dict[str, Any],
+                                     args: TrafficArgs) -> dict[str, Any]:
+    """Build traffic output, locking sampler writes."""
+    if args.subcmd not in ("sample", "watch"):
+        return _build_report_for_subcmd(backend_name, config, args)
+    try:
+        with _io.with_lock("traffic"):
+            return _build_report_for_subcmd(backend_name, config, args)
+    except _io.LockedError as error:
+        _io.fail(
+            "另一个 proxyctl traffic 采样写操作正在进行（lock: traffic）",
+            hints=[
+                f"锁文件: {error.lock_path}",
+                f"排查: lsof {error.lock_path}",
+            ],
+            doc="locks",
+            code=_io.LOCKED,
+            cmd="traffic",
+        )
+
+
+def _build_report_for_subcmd(backend_name: str, config: dict[str, Any],
+                             args: TrafficArgs) -> dict[str, Any]:
+    """Dispatch parsed traffic args to the matching builder."""
+    if args.subcmd == "snapshot":
+        return build_snapshot(backend_name, config, args)
+    if args.subcmd == "sample":
+        return record_sample(backend_name, config, args)
+    if args.subcmd == "watch":
+        return run_watch(backend_name, config, args)
+    return build_report(backend_name, config, args)
