@@ -89,6 +89,36 @@ def test_proxy_groups_section_default_group_when_none(fake_subprocess):
     assert check._proxy_groups_section("http://x", "s") is True
 
 
+def test_rule_target_groups_from_mihomo_config(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+proxy-groups:
+  - name: proxy
+    type: select
+  - name: claude
+    type: fallback
+  - name: residential-sg
+    type: url-test
+rules:
+  - DOMAIN-SUFFIX,anthropic.com,claude
+  - DOMAIN-SUFFIX,github.com,proxy
+  - IP-CIDR,1.1.1.1/32,DIRECT,no-resolve
+  - MATCH,proxy
+""",
+        encoding="utf-8",
+    )
+
+    assert check._rule_target_groups_from_config(str(cfg)) == ["claude", "proxy"]
+
+
+def test_merge_check_groups_adds_rule_targets():
+    assert check._merge_check_groups(["proxy"], ["claude", "proxy"]) == [
+        "proxy",
+        "claude",
+    ]
+
+
 def test_proxy_groups_section_shows_sibling_subgroups(fake_subprocess, capsys):
     """v0.5.5：fallback/selector 含多个子组时，每个子组都要打 summary 行
     （让用户看到 now 之外的兄弟子组存在），但只对 now 子组展开叶子。
@@ -286,3 +316,29 @@ def test_fetch_probe_timeout(monkeypatch):
     monkeypatch.setattr(_sp, "run", boom)
     out = check._fetch_probe(OutboundProbe(name="x"), {})
     assert out == ""
+
+
+def test_target_uses_expected_proxy(fake_subprocess):
+    fake_subprocess.set_default(stdout=json.dumps({
+        "connections": [{
+            "metadata": {"host": "api.anthropic.com"},
+            "chains": ["SG-Residential-01", "residential-sg", "claude"],
+        }]
+    }))
+    ok, msg = check._target_uses_expected_proxy(
+        "http://127.0.0.1:9090", "", "https://api.anthropic.com", "claude")
+    assert ok is True
+    assert "claude" in msg
+
+
+def test_target_uses_expected_proxy_mismatch(fake_subprocess):
+    fake_subprocess.set_default(stdout=json.dumps({
+        "connections": [{
+            "metadata": {"host": "api.anthropic.com"},
+            "chains": ["日本1", "proxy"],
+        }]
+    }))
+    ok, msg = check._target_uses_expected_proxy(
+        "http://127.0.0.1:9090", "", "https://api.anthropic.com", "claude")
+    assert ok is False
+    assert "expected claude" in msg
