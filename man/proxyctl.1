@@ -133,11 +133,14 @@ Linux systemctl --user）。
 .TP
 \fBproxyctl connections\fR [\fB--app\fR \fINAME\fR ...] [\fB--all\fR] [\fB--json\fR]
 把本机 App/进程的 TCP 连接与 \fIproxy_port\fR、mihomo \fB/connections\fR
-API 的 \fIsourcePort\fR 连接详情关联。默认过滤 Codex / Claude / ChatGPT；
-\fB--all\fR 查看所有进程。macOS 上还会用 \fBnetstat -anv\fR 反查被
+API 的 \fIsourcePort\fR 连接详情关联。默认过滤 Codex App / Codex CLI /
+Claude App / Claude CLI / ChatGPT App；\fB--app Codex\fR 与
+\fB--app Claude\fR 分别兼容匹配 App + CLI，\fB--all\fR 查看所有进程。
+macOS 上还会用 \fBnetstat -anv\fR 反查被
 Network/System Extension 接管后的 socket owner，并在 JSON 中输出
 \fBproxy_owner_connections\fR 与 \fBproxy_owner_groups\fR。后者按
-rulePayload / host / IP 聚合目的地，并标出 mixed_chains / mixed_route_kind。
+rulePayload / host / IP 聚合目的地，输出 app_contexts / candidate_contexts，
+并标出 mixed_chains / mixed_route_kind。
 只读；非 mihomo 后端或本地 API 不可用时降级输出 unmatched。
 .TP
 \fBproxyctl trace\fR \fIDOMAIN\fR [\fB--json\fR]

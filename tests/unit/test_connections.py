@@ -151,6 +151,7 @@ def test_connections_join_matches_proxy_port_source_port(fake_subprocess, monkey
     }
     row = report["connections"][0]
     assert row["app"] == "Codex"
+    assert row["app_contexts"] == ["codex_app"]
     assert row["local_source_port"] == 54321
     assert row["connects_proxy_port"] is True
     assert row["matched"] is True
@@ -177,6 +178,7 @@ def test_connections_unmatched_when_source_port_missing(fake_subprocess, monkeyp
 
     row = report["connections"][0]
     assert row["app"] == "Claude"
+    assert row["app_contexts"] == ["claude_app"]
     assert row["matched"] is False
     assert row["unmatched_reason"] == "no_mihomo_source_port_match"
     assert row["mihomo"] is None
@@ -240,8 +242,40 @@ def test_connections_all_ignores_proxy_server_side_socket(fake_subprocess, monke
 
 def test_connections_default_filters_are_ai_apps():
     parsed = connections.parse_args([])
-    assert parsed.app_filters == ["Codex", "Claude", "ChatGPT"]
+    assert parsed.app_filters == [
+        "Codex App",
+        "Codex CLI",
+        "Claude App",
+        "Claude CLI",
+        "ChatGPT App",
+    ]
     assert parsed.all_apps is False
+
+
+def test_connections_detects_app_and_cli_contexts():
+    assert connections._detect_app_contexts(
+        "/Applications/Codex.app/Contents/MacOS/Codex"
+    ) == ["codex_app"]
+    assert connections._detect_app_contexts(
+        "/Users/me/.local/bin/codex-aarch64-apple-darwin"
+    ) == ["codex_cli"]
+    assert connections._detect_app_contexts(
+        "/Applications/Claude.app/Contents/MacOS/Claude"
+    ) == ["claude_app"]
+    assert connections._detect_app_contexts(
+        "node /opt/homebrew/bin/claude --dangerously-skip-permissions"
+    ) == ["claude_cli"]
+
+
+def test_connections_legacy_app_filter_expands_to_app_and_cli():
+    assert connections._effective_contexts(["Codex"]) == [
+        "codex_app",
+        "codex_cli",
+    ]
+    assert connections._effective_contexts(["Claude"]) == [
+        "claude_app",
+        "claude_cli",
+    ]
 
 
 def test_connections_all_disables_default_filters():
@@ -383,6 +417,7 @@ def test_connections_reports_network_extension_owner(fake_subprocess, monkeypatc
     assert report["summary"]["mixed_route_group_count"] == 0
     row = report["proxy_owner_connections"][0]
     assert row["owner"]["app"] == "com.antgroup.asp"
+    assert row["candidate_contexts"] == ["codex_app", "codex_cli"]
     assert row["owner"]["system_extension_owner"] is True
     assert row["owner"]["matches_app_filter"] is False
     assert row["attribution"] == "system_extension_owner_original_app_hidden"
@@ -396,6 +431,9 @@ def test_connections_reports_network_extension_owner(fake_subprocess, monkeypatc
     assert group["key_type"] == "rule_payload"
     assert group["connection_count"] == 2
     assert group["hosts"] == ["ab.chatgpt.com", "chatgpt.com"]
+    assert group["contexts"] == ["codex_app", "codex_cli"]
+    assert group["candidate_contexts"] == ["codex_app", "codex_cli"]
+    assert group["owner_contexts"] == []
     assert group["consistent_chains"] is True
     assert group["consistent_route_kind"] is True
     assert group["warning"] is None

@@ -28,13 +28,117 @@ NC = "\033[0m"
 
 maybe_disable_module_colors(__name__)
 
-DEFAULT_APP_FILTERS = ["Codex", "Claude", "ChatGPT"]
+APP_CONTEXTS = ["codex_app", "codex_cli", "claude_app",
+                "claude_cli", "chatgpt_app"]
+APP_CONTEXT_LABELS = {
+    "codex_app": "Codex App",
+    "codex_cli": "Codex CLI",
+    "claude_app": "Claude App",
+    "claude_cli": "Claude CLI",
+    "chatgpt_app": "ChatGPT App",
+}
+DEFAULT_APP_FILTERS = [APP_CONTEXT_LABELS[name] for name in APP_CONTEXTS]
+APP_FILTER_ALIASES = {
+    "codex": ["codex_app", "codex_cli"],
+    "codex app": ["codex_app"],
+    "codex cli": ["codex_cli"],
+    "claude": ["claude_app", "claude_cli"],
+    "claude app": ["claude_app"],
+    "claude cli": ["claude_cli"],
+    "chatgpt": ["chatgpt_app"],
+    "chatgpt app": ["chatgpt_app"],
+}
 APP_REMOTE_PATTERNS = {
-    "codex": re.compile(r"openai|chatgpt", re.I),
-    "chatgpt": re.compile(r"openai|chatgpt", re.I),
-    "claude": re.compile(r"anthropic|mcp-proxy", re.I),
+    "codex_app": re.compile(r"openai|chatgpt|oaistatic|oaiusercontent", re.I),
+    "codex_cli": re.compile(r"openai|chatgpt|oaistatic|oaiusercontent", re.I),
+    "chatgpt_app": re.compile(r"openai|chatgpt|oaistatic|oaiusercontent", re.I),
+    "claude_app": re.compile(r"anthropic|claude|mcp-proxy", re.I),
+    "claude_cli": re.compile(r"anthropic|claude|mcp-proxy", re.I),
 }
 KNOWN_SYSTEM_EXTENSION_OWNERS = ("com.antgroup.asp",)
+
+
+def _normalize_app_filter(value: str) -> str:
+    """Normalize a user-facing app filter for alias lookup."""
+    return re.sub(r"[\s_-]+", " ", value.strip().lower())
+
+
+def _contexts_for_filter(value: str) -> list[str]:
+    """Return canonical app contexts selected by one ``--app`` filter."""
+    return APP_FILTER_ALIASES.get(_normalize_app_filter(value), [])
+
+
+def _effective_contexts(filters: list[str]) -> list[str]:
+    """Expand user filters to canonical app contexts, preserving priority."""
+    contexts: list[str] = []
+    for app_context in APP_CONTEXTS:
+        if any(app_context in _contexts_for_filter(item) for item in filters):
+            contexts.append(app_context)
+    return contexts
+
+
+def _detect_app_contexts(text: str) -> list[str]:
+    """Detect known AI app/CLI contexts from process text."""
+    lowered = text.lower()
+    contexts: list[str] = []
+    if "/applications/codex.app/" in lowered or "codex helper" in lowered:
+        contexts.append("codex_app")
+    elif re.search(r"(^|[/\s])codex(-aarch64|$|\s)", lowered):
+        contexts.append("codex_cli")
+    if "/applications/claude.app/" in lowered or "claude helper" in lowered:
+        contexts.append("claude_app")
+    elif re.search(r"(^|[/\s])claude($|[\s-])", lowered):
+        contexts.append("claude_cli")
+    if "/applications/chatgpt.app/" in lowered or "chatgpthelper" in lowered:
+        contexts.append("chatgpt_app")
+    return contexts
+
+
+def _matches_app_text(text: str, filters: list[str]) -> bool:
+    """Return whether process text matches requested app filters."""
+    if not filters:
+        return True
+    detected = set(_detect_app_contexts(text))
+    requested = set(_effective_contexts(filters))
+    if requested and detected & requested:
+        return True
+    lowered = text.lower()
+    return any(
+        app_filter.lower() in lowered
+        for app_filter in filters
+        if not _contexts_for_filter(app_filter)
+    )
+
+
+def _remote_target_text(conn: dict[str, Any]) -> str:
+    """Return searchable destination text for one Mihomo connection."""
+    metadata = conn.get("metadata") or {}
+    return " ".join([
+        str(metadata.get("host") or ""),
+        str(metadata.get("destinationIP") or ""),
+    ])
+
+
+def _remote_candidate_contexts(conn: dict[str, Any],
+                               filters: list[str]) -> list[str]:
+    """Infer possible app contexts from a remote destination."""
+    requested = _effective_contexts(filters)
+    candidates = requested or APP_CONTEXTS
+    target = _remote_target_text(conn)
+    return [
+        app_context for app_context in candidates
+        if APP_REMOTE_PATTERNS[app_context].search(target)
+    ]
+
+
+def _merge_contexts(items: list[dict[str, Any]], field: str) -> list[str]:
+    """Merge canonical app context lists while preserving display order."""
+    seen = {
+        app_context
+        for item in items
+        for app_context in item.get(field, [])
+    }
+    return [app_context for app_context in APP_CONTEXTS if app_context in seen]
 
 
 @dataclass
@@ -63,14 +167,15 @@ class LocalConnection:
     process: str = ""
     command: str = ""
 
+    def _match_text(self) -> str:
+        """Return searchable process text for context detection."""
+        return " ".join(
+            [self.app, os.path.basename(self.process), self.process, self.command]
+        )
+
     def matches_app(self, filters: list[str]) -> bool:
         """Return whether this row matches any requested ``--app`` filter."""
-        if not filters:
-            return True
-        haystack = " ".join(
-            [self.app, os.path.basename(self.process), self.process, self.command]
-        ).lower()
-        return any(f.lower() in haystack for f in filters)
+        return _matches_app_text(self._match_text(), filters)
 
     def to_dict(self, proxy_port: int) -> dict[str, Any]:
         """Convert the lsof row to the JSON contract used by this command."""
@@ -79,6 +184,7 @@ class LocalConnection:
             "pid": self.pid,
             "fd": self.fd,
             "process": self.process,
+            "app_contexts": _detect_app_contexts(self._match_text()),
             "local_source_port": self.source_port,
             "target_host": self.target_host,
             "target_port": self.target_port,
@@ -111,14 +217,15 @@ class ProxyOwner:
     process: str = ""
     command: str = ""
 
+    def _match_text(self) -> str:
+        """Return searchable owner text for context detection."""
+        return " ".join(
+            [self.app, os.path.basename(self.process), self.process, self.command]
+        )
+
     def matches_app(self, filters: list[str]) -> bool:
         """Return whether this owner matches any requested ``--app`` filter."""
-        if not filters:
-            return True
-        haystack = " ".join(
-            [self.app, os.path.basename(self.process), self.process, self.command]
-        ).lower()
-        return any(f.lower() in haystack for f in filters)
+        return _matches_app_text(self._match_text(), filters)
 
     def to_dict(self, app_filters: list[str]) -> dict[str, Any]:
         """Convert the owner row to the JSON contract used by this command."""
@@ -127,6 +234,7 @@ class ProxyOwner:
             "pid": self.pid,
             "process": self.process,
             "command": self.command,
+            "app_contexts": _detect_app_contexts(self._match_text()),
             "source": "netstat",
             "state": self.state,
             "local_source_port": self.source_port,
@@ -547,11 +655,13 @@ def _proxy_owner_connections(remote_rows: list[dict[str, Any]], proxy_port: int,
         if not selection_reason:
             continue
         detail = _mihomo_detail(conn) or {}
+        candidate_contexts = _remote_candidate_contexts(conn, app_filters)
         items.append({
             "local_source_port": port,
             "connects_proxy_port": True,
             "target_port": proxy_port,
             "owner": owner.to_dict(app_filters),
+            "candidate_contexts": candidate_contexts,
             "attribution": _owner_attribution(owner, app_filters),
             "selection_reason": selection_reason,
             "original_app_visible": owner.matches_app(app_filters),
@@ -569,15 +679,8 @@ def _proxy_owner_selection_reason(conn: dict[str, Any], owner: ProxyOwner,
         return "owner_matches_app_filter"
     if not app_filters:
         return "all_apps"
-    metadata = conn.get("metadata") or {}
-    target = " ".join([
-        str(metadata.get("host") or ""),
-        str(metadata.get("destinationIP") or ""),
-    ])
-    for app_filter in app_filters:
-        pattern = APP_REMOTE_PATTERNS.get(app_filter.lower())
-        if pattern and pattern.search(target):
-            return "host_matches_app_context"
+    if _remote_candidate_contexts(conn, app_filters):
+        return "host_matches_app_context"
     return None
 
 
@@ -648,11 +751,17 @@ def _proxy_owner_groups(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         consistent_route_kind = len(route_kinds) <= 1
         hosts = sorted({(row.get("mihomo") or {}).get("host") or ""
                         for row in rows if (row.get("mihomo") or {}).get("host")})
+        candidate_contexts = _merge_contexts(rows, "candidate_contexts")
+        owner_contexts = _merge_contexts(
+            [row.get("owner") or {} for row in rows], "app_contexts")
         groups.append({
             "key": key,
             "key_type": key_type,
             "connection_count": len(rows),
             "hosts": hosts,
+            "contexts": candidate_contexts or owner_contexts,
+            "candidate_contexts": candidate_contexts,
+            "owner_contexts": owner_contexts,
             "owner_apps": sorted({row["owner"]["app"] for row in rows}),
             "route_kinds": route_kinds,
             "routed_via_proxy_count": sum(1 for row in rows if row["routed_via_proxy"]),
@@ -769,9 +878,10 @@ def emit_human(report: dict[str, Any]) -> None:
     for item in report["connections"]:
         status = f"{GREEN}matched{NC}" if item["matched"] else f"{YELLOW}unmatched{NC}"
         target = "proxy" if item["connects_proxy_port"] else item["target_host"]
+        contexts = ",".join(item.get("app_contexts") or []) or "-"
         print(f"  {CYAN}{item['app']}{NC} pid={item['pid']} fd={item['fd']} "
               f"src={item['local_source_port']} -> {target}:{item['target_port']} "
-              f"{status}")
+              f"contexts={contexts} {status}")
         if item["matched"]:
             m = item["mihomo"] or {}
             dest = m.get("host") or m.get("destination_ip") or "?"
@@ -797,8 +907,11 @@ def _emit_proxy_owner_groups_human(report: dict[str, Any]) -> None:
         route = ",".join(group["route_kinds"]) or "unknown"
         first_variant = (group["chain_variants"] or [{"chains": []}])[0]
         chains = ",".join(first_variant["chains"]) or "-"
+        contexts = ",".join(group.get("contexts") or []) or "-"
+        context_label = "candidates" if group.get("candidate_contexts") else "contexts"
         print(f"  {marker} {CYAN}{group['key']}{NC} "
-              f"count={group['connection_count']} route={route} chains={chains}")
+              f"count={group['connection_count']} {context_label}={contexts} "
+              f"route={route} chains={chains}")
         if group["hosts"]:
             print(f"    hosts={','.join(group['hosts'][:6])}")
         if group["warning"]:
@@ -817,9 +930,12 @@ def _emit_proxy_owner_human(report: dict[str, Any]) -> None:
         m = item["mihomo"] or {}
         dest = m.get("host") or m.get("destination_ip") or "?"
         route = m.get("route_kind") or "unknown"
+        contexts = item.get("candidate_contexts") or owner.get("app_contexts") or []
+        context_text = ",".join(contexts) or "-"
+        context_label = "candidates" if item.get("candidate_contexts") else "contexts"
         print(f"  {CYAN}{owner['app']}{NC} pid={owner['pid']} "
               f"src={item['local_source_port']} -> proxy:{report['proxy_port']} "
-              f"state={owner['state']} route={route}")
+              f"state={owner['state']} {context_label}={context_text} route={route}")
         print(f"    dest={dest} rule={m.get('rule') or '?'} "
               f"payload={m.get('rule_payload') or '-'} "
               f"chains={','.join(m.get('chains') or []) or '-'} "

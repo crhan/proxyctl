@@ -18,6 +18,13 @@
   / `mixed_route_kind` 和 summary 里的
   `inconsistent_proxy_owner_group_count`，从而能判断连接是否经过 Mihomo、
   最终是 `proxy` 还是 `direct` 路由，以及同一组线路是否一致。
+- **`proxyctl connections` 默认区分 Codex App / Codex CLI / Claude App /
+  Claude CLI。** `connections[]`、`proxy_owner_connections[]` 与
+  `proxy_owner_groups[]` 现在输出 `app_contexts` / `candidate_contexts` /
+  `contexts`，可区分可见进程属于 App 还是 CLI。被 macOS Network/System
+  Extension 遮蔽原始进程时，命令只按目的地给出候选上下文，不把候选结果
+  误报成已确认进程；`--app Codex` / `--app Claude` 保持向后兼容，分别匹配
+  App 与 CLI 两类上下文。
 
 ## [0.5.5] — 2026-05-21
 
@@ -42,7 +49,9 @@
   查看所有进程；`--json` 输出 envelope v2，包含进程、PID、fd、本地源端口、
   是否连接到 `proxy_port`、mihomo host/destination/rule/rulePayload/chains/
   upload/download/start，以及 unmatched 原因。非 mihomo 后端或本地 API 不可用
-  时降级输出本机连接并标注 unmatched。
+  时降级输出本机连接并标注 unmatched。默认过滤 Codex App / Codex CLI /
+  Claude App / Claude CLI / ChatGPT App；`--app Codex` / `--app Claude`
+  继续分别匹配对应 App 与 CLI。
 
 ## [0.5.4] — 2026-05-21
 

@@ -1055,7 +1055,7 @@ COMMANDS_META: list[dict] = [
      "needs_sudo": False, "interactive": False, "exit_codes": [0, 2, 10],
      "examples": ["proxyctl connections --app Codex --app Claude",
                   "proxyctl connections --all --json",
-                  "proxyctl connections --app Codex --json"]},
+                  "proxyctl connections --app 'Codex CLI' --json"]},
     {"name": "trace", "group": "diagnostic", "summary": "域名链路诊断",
      "args": [{"name": "domain", "required": True}],
      "supports_json": True, "side_effects": ["network-io"],
