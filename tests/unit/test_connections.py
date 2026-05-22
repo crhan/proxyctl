@@ -478,6 +478,53 @@ def test_connections_proxy_owner_group_warns_on_mixed_chains():
     assert group["upload_sum"] == 30
 
 
+def test_connections_human_output_uses_chinese_proxy_owner_labels():
+    report = {
+        "backend": "mihomo",
+        "proxy_port": 7890,
+        "api": {"ok": True},
+        "summary": {"all_via_proxy_port": False},
+        "connections": [],
+        "proxy_owner_groups": [{
+            "key": "chatgpt.com",
+            "connection_count": 1,
+            "contexts": ["codex_app"],
+            "candidate_contexts": ["codex_app"],
+            "route_kinds": ["proxy"],
+            "chain_variants": [{"chains": ["proxy-tuic", "proxy"]}],
+            "hosts": ["chatgpt.com"],
+            "warning": None,
+        }],
+        "proxy_owner_connections": [{
+            "owner": {"app": "com.antgroup.asp", "pid": 47283,
+                      "state": "ESTABLISHED", "app_contexts": []},
+            "local_source_port": 58380,
+            "candidate_contexts": ["codex_app"],
+            "attribution": "system_extension_owner_original_app_hidden",
+            "mihomo": {
+                "host": "chatgpt.com",
+                "rule": "DomainSuffix",
+                "rule_payload": "chatgpt.com",
+                "route_kind": "proxy",
+                "chains": ["proxy-tuic", "proxy"],
+            },
+        }],
+    }
+
+    _io.set_no_color(True)
+    out = io.StringIO()
+    with redirect_stdout(out):
+        connections.emit_human(report)
+    text = out.getvalue()
+
+    assert "按目的地归组的代理入口连接" in text
+    assert "代理入口连接明细" in text
+    assert "候选=codex_app" in text
+    assert "路由=代理" in text
+    assert "归因=系统扩展持有，原始 App 被隐藏" in text
+    assert "proxy-owned" not in text
+
+
 def test_connections_lsof_missing_falls_back_to_linux_ss(monkeypatch):
     calls = []
 
