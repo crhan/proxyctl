@@ -2,8 +2,8 @@
 
 支持 Mihomo 后端（首发）/ Sing-box 后端（预留）
 
-用法：proxyctl [start|stop|restart|status|log|check|fix|recover|
-               mode|audit|trace|bench|dns-lock|dns-unlock]
+用法：proxyctl [start|stop|restart|status|log|check|connections|traffic|
+               fix|recover|mode|audit|trace|bench|dns-lock|dns-unlock]
 """
 
 import functools
@@ -1680,6 +1680,7 @@ def cmd_version_print() -> None:
                 "doctor_since_filter":             True,   # 0.5.0: --since <version> 屏蔽未来规则
                 "suggestions_ignore_file":         True,   # 0.5.0: ~/.config/proxyctl/suggestions.ignore
                 "proxy_group_dead_check":          True,   # 0.5.0: proxy_group.mostly_dead 规则
+                "traffic_snapshot":                True,   # 0.5.5+: active /connections traffic grouping
             },
         }
         _io.emit_json(_io.envelope("version", data=data))
@@ -2749,6 +2750,10 @@ def _h_connections(ctx):
     from proxyctl.connections import cmd_connections
     cmd_connections(ctx["args"], ctx["backend"], ctx["config"])
 
+def _h_traffic(ctx):
+    from proxyctl.traffic import cmd_traffic
+    cmd_traffic(ctx["args"], ctx["backend"], ctx["config"])
+
 def _h_bench(ctx):
     from proxyctl.check import cmd_bench
     bench_groups = ctx["args"] or None
@@ -2916,6 +2921,7 @@ DISPATCH: dict = {
     "log":             _h_log,
     "check":           _h_check,
     "connections":     _h_connections,
+    "traffic":         _h_traffic,
     "bench":           _h_bench,
     "fix":             _h_fix,
     "recover":         _h_recover,

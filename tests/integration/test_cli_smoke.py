@@ -65,17 +65,20 @@ def patched_env(monkeypatch):
     import proxyctl.check as check_mod
     import proxyctl.audit as audit_mod
     import proxyctl.trace as trace_mod
+    import proxyctl.traffic as traffic_mod
 
     mocks["cmd_status"] = MagicMock()
     mocks["cmd_check"]  = MagicMock()
     mocks["cmd_bench"]  = MagicMock()
     mocks["cmd_audit"]  = MagicMock()
     mocks["cmd_trace"]  = MagicMock()
+    mocks["cmd_traffic"] = MagicMock()
     monkeypatch.setattr(status_mod, "cmd_status", mocks["cmd_status"])
     monkeypatch.setattr(check_mod,  "cmd_check",  mocks["cmd_check"])
     monkeypatch.setattr(check_mod,  "cmd_bench",  mocks["cmd_bench"])
     monkeypatch.setattr(audit_mod,  "cmd_audit",  mocks["cmd_audit"])
     monkeypatch.setattr(trace_mod,  "cmd_trace",  mocks["cmd_trace"])
+    monkeypatch.setattr(traffic_mod, "cmd_traffic", mocks["cmd_traffic"])
 
     return mocks
 
@@ -133,6 +136,7 @@ def test_unknown_command_did_you_mean(monkeypatch, patched_env, capsys):
     ("stop",     "cmd_stop"),
     ("status",   "cmd_status"),
     ("check",    "cmd_check"),
+    ("traffic",  "cmd_traffic"),
     ("fix",      "cmd_fix"),
     ("recover",  "cmd_recover"),
     ("dns-unlock", "cmd_dns_unlock"),

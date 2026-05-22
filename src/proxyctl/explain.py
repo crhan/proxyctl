@@ -736,7 +736,7 @@ Step 6  proxyctl explain <topic>          # 深入概念（topic 见下）
 
 | 类别 | sudo | 命令 |
 |---|---|---|
-| **只读** (side_effects=[]) | 否 | `status doctor connections audit env log plugins explain agent-guide commands config path|get help version` |
+| **只读** (side_effects=[]) | 否 | `status doctor connections traffic audit env log plugins explain agent-guide commands config path|get help version` |
 | **只读 + 网络 IO** (network-io) | 否 | `check trace bench recover`（curl/HTTP，不改本地状态） |
 | **写 proxyctl 自身配置** | 否 | `config set <key> <value>`（原子写 + .bak + YAML 校验） |
 | **写引擎配置** (config-write) | 是 | `mode tun|proxy` `audit apply` |
@@ -1067,6 +1067,27 @@ COMMANDS_META: list[dict] = [
                   "proxyctl connections --chain SG-Residential-01",
                   "proxyctl connections --route proxy",
                   "proxyctl connections --agent codex --json"]},
+    {"name": "traffic", "group": "diagnostic",
+     "summary": "按线路/软件统计当前活跃 Mihomo 连接流量快照",
+     "args": [{"name": "snapshot", "required": False},
+              {"name": "--by", "required": False, "repeatable": True},
+              {"name": "--host", "required": False, "repeatable": True},
+              {"name": "--chain", "required": False, "repeatable": True},
+              {"name": "--line", "required": False, "repeatable": True},
+              {"name": "--route", "required": False, "repeatable": True},
+              {"name": "--preset", "required": False, "repeatable": True},
+              {"name": "--agent", "required": False, "repeatable": True},
+              {"name": "--query", "required": False, "repeatable": True},
+              {"name": "--filter", "required": False, "repeatable": True},
+              {"name": "--app", "required": False, "repeatable": True},
+              {"name": "--all", "required": False}],
+     "supports_json": True, "side_effects": [],
+     "needs_sudo": False, "interactive": False, "exit_codes": [0, 2],
+     "examples": ["proxyctl traffic",
+                  "proxyctl traffic --by line,app",
+                  "proxyctl traffic --chain residential-sg",
+                  "proxyctl traffic --route proxy --preset ai",
+                  "proxyctl traffic --json"]},
     {"name": "trace", "group": "diagnostic", "summary": "域名链路诊断",
      "args": [{"name": "domain", "required": True}],
      "supports_json": True, "side_effects": ["network-io"],

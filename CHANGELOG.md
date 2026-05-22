@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- **新增 `proxyctl traffic` 活跃连接流量快照。** 命令读取 Mihomo
+  `/connections` 的 `upload` / `download`，默认按线路（链路首节点）聚合，
+  支持 `--by line,app` 进一步按软件归因，也支持复用 `connections` 的
+  `--host` / `--chain` / `--route` / `--preset` / `--agent` 过滤。JSON 输出
+  明确标注 `scope=active_connections_snapshot`，避免把当前活跃连接误认为
+  历史累计。
+
 ### Fixed
 
 - **`proxyctl connections` 现在能显示 macOS Network/System Extension
