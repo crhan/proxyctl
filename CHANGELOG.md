@@ -5,6 +5,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`proxyctl connections` 现在能显示 macOS Network/System Extension
+  接管后的 Mihomo 连接 owner 与实际代理链路。** 当 OpenAI / ChatGPT 等
+  连接被本机网络扩展接管时，`lsof` 只能看到扩展进程而不是原始 App。
+  本版在 macOS 上补充 `netstat -anv` 反向归因，JSON 新增
+  `proxy_owner_connections[]`，包含 socket owner、是否为系统扩展、
+  Mihomo `route_kind` / `chains` / `routed_via_proxy`，从而能判断连接是否
+  经过 Mihomo 以及最终是 `proxy` 还是 `direct` 路由。
+
 ## [0.5.5] — 2026-05-21
 
 ### Fixed

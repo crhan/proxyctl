@@ -1048,7 +1048,7 @@ COMMANDS_META: list[dict] = [
      "needs_sudo": False, "interactive": False, "exit_codes": [0, 1, 5, 7],
      "examples": ["proxyctl check", "proxyctl check --json"]},
     {"name": "connections", "group": "diagnostic",
-     "summary": "本机 App/进程连接与 proxy_port、mihomo /connections 按 sourcePort 关联",
+     "summary": "本机 App/进程连接、macOS socket owner 与 mihomo /connections 关联",
      "args": [{"name": "--app", "required": False, "repeatable": True},
               {"name": "--all", "required": False}],
      "supports_json": True, "side_effects": [],

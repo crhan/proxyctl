@@ -70,6 +70,10 @@ def _install_lsof_and_ps(fake_subprocess):
         ["ps", "-p", "999", "-o", "command="],
         stdout="/opt/homebrew/bin/mihomo -d ~/.config/mihomo\n",
     )
+    fake_subprocess.set_result(
+        ["netstat", "-anv", "-p", "tcp"],
+        stdout="",
+    )
 
 
 def _install_connections_api(monkeypatch, payload: dict):
@@ -138,6 +142,9 @@ def test_connections_join_matches_proxy_port_source_port(fake_subprocess, monkey
         "all_via_proxy_port": False,
         "matched_count": 1,
         "unmatched_count": 1,
+        "proxy_owner_connection_count": 0,
+        "system_extension_owner_count": 0,
+        "routed_via_proxy_count": 0,
     }
     row = report["connections"][0]
     assert row["app"] == "Codex"
@@ -147,6 +154,8 @@ def test_connections_join_matches_proxy_port_source_port(fake_subprocess, monkey
     assert row["mihomo"]["host"] == "api.openai.com"
     assert row["mihomo"]["rule_payload"] == "openai.com"
     assert row["mihomo"]["chains"] == ["OpenAI", "Proxy"]
+    assert row["mihomo"]["route_kind"] == "proxy"
+    assert row["mihomo"]["routed_via_proxy"] is True
     direct = report["connections"][1]
     assert direct["connects_proxy_port"] is False
     assert direct["matched"] is False
@@ -253,6 +262,111 @@ def test_connections_parse_linux_ss_output():
     assert rows[0].source_port == 54321
     assert rows[0].target_port == 7890
     assert rows[1].target_host == "203.0.113.10"
+
+
+def test_connections_parse_netstat_proxy_owner():
+    text = (
+        "tcp4 0 0 127.0.0.1.58380 127.0.0.1.7890 ESTABLISHED "
+        "130 322 392384 131072 com.antgroup.asp:47283 "
+        "00182 00000008 00000000075bc7fb 00000081 04000900 2 0 000000\n"
+        "tcp4 0 0 127.0.0.1.7890 127.0.0.1.58380 ESTABLISHED "
+        "748 39 408064 146988 mihomo:77574 "
+        "00182 0000000c 00000000075bc7fd 00000080 01000800 2 0 000000\n"
+    )
+
+    owners = connections.parse_netstat_proxy_owners(text, 7890, {58380})
+
+    owner = owners[58380]
+    assert owner.app == "com.antgroup.asp"
+    assert owner.pid == 47283
+    assert owner.state == "ESTABLISHED"
+
+
+def test_connections_reports_network_extension_owner(fake_subprocess, monkeypatch):
+    monkeypatch.setattr(connections.sys, "platform", "darwin")
+    fake_subprocess.set_result(
+        ["lsof", "-nP", "-iTCP", "-sTCP:ESTABLISHED", "-Fpcfn"],
+        stdout="",
+        returncode=1,
+    )
+    fake_subprocess.set_result(
+        ["netstat", "-anv", "-p", "tcp"],
+        stdout=(
+            "tcp4 0 0 127.0.0.1.58380 127.0.0.1.7890 ESTABLISHED "
+            "130 322 392384 131072 com.antgroup.asp:47283 "
+            "00182 00000008 00000000075bc7fb 00000081 04000900 2 0 000000\n"
+        ),
+    )
+    fake_subprocess.set_result(
+        ["ps", "-p", "47283", "-o", "comm="],
+        stdout=(
+            "/Library/SystemExtensions/uuid/"
+            "com.antgroup.aspect.server.extension.systemextension/"
+            "Contents/MacOS/com.antgroup.aspect.server.extension\n"
+        ),
+    )
+    fake_subprocess.set_result(
+        ["ps", "-p", "47283", "-o", "command="],
+        stdout=(
+            "/Library/SystemExtensions/uuid/"
+            "com.antgroup.aspect.server.extension.systemextension/"
+            "Contents/MacOS/com.antgroup.aspect.server.extension\n"
+        ),
+    )
+    _install_connections_api(monkeypatch, {
+        "connections": [{
+            "id": "openai",
+            "metadata": {
+                "sourcePort": "58380",
+                "host": "chatgpt.com",
+                "destinationPort": "443",
+                "network": "tcp",
+                "type": "HTTP",
+            },
+            "rule": "DomainSuffix",
+            "rulePayload": "chatgpt.com",
+            "chains": ["电信专用(直连)", "proxy-tuic", "proxy"],
+            "upload": 130,
+            "download": 322,
+            "start": "2026-05-22T08:23:41+08:00",
+        }, {
+            "id": "other",
+            "metadata": {
+                "sourcePort": "58381",
+                "host": "example.com",
+                "destinationPort": "443",
+                "network": "tcp",
+                "type": "HTTPS",
+            },
+            "rule": "Match",
+            "rulePayload": "",
+            "chains": ["proxy-tuic", "proxy"],
+            "upload": 1,
+            "download": 2,
+            "start": "2026-05-22T08:23:42+08:00",
+        }]
+    })
+
+    report = connections.build_report(
+        "mihomo",
+        {"proxy_port": 7890, "api_base": "http://127.0.0.1:9090"},
+        connections.ConnectionArgs(["Codex"]),
+    )
+
+    assert report["connections"] == []
+    assert report["summary"]["proxy_owner_connection_count"] == 1
+    assert report["summary"]["system_extension_owner_count"] == 1
+    assert report["summary"]["routed_via_proxy_count"] == 1
+    row = report["proxy_owner_connections"][0]
+    assert row["owner"]["app"] == "com.antgroup.asp"
+    assert row["owner"]["system_extension_owner"] is True
+    assert row["owner"]["matches_app_filter"] is False
+    assert row["attribution"] == "system_extension_owner_original_app_hidden"
+    assert row["selection_reason"] == "host_matches_app_context"
+    assert row["original_app_visible"] is False
+    assert row["routed_via_proxy"] is True
+    assert row["mihomo"]["route_kind"] == "proxy"
+    assert row["mihomo"]["chains"] == ["电信专用(直连)", "proxy-tuic", "proxy"]
 
 
 def test_connections_lsof_missing_falls_back_to_linux_ss(monkeypatch):

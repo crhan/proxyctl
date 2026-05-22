@@ -10,6 +10,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -28,6 +29,12 @@ NC = "\033[0m"
 maybe_disable_module_colors(__name__)
 
 DEFAULT_APP_FILTERS = ["Codex", "Claude", "ChatGPT"]
+APP_REMOTE_PATTERNS = {
+    "codex": re.compile(r"openai|chatgpt", re.I),
+    "chatgpt": re.compile(r"openai|chatgpt", re.I),
+    "claude": re.compile(r"anthropic|mcp-proxy", re.I),
+}
+KNOWN_SYSTEM_EXTENSION_OWNERS = ("com.antgroup.asp",)
 
 
 @dataclass
@@ -77,6 +84,56 @@ class LocalConnection:
             "target_port": self.target_port,
             "connects_proxy_port": self.target_port == proxy_port,
             "raw_lsof_name": self.raw_name,
+        }
+
+
+@dataclass
+class ProxyOwner:
+    """One proxy-client socket owner reported by macOS ``netstat``.
+
+    Attributes:
+        source_port: Local client port that connects to ``proxy_port``.
+        target_port: Local proxy listener port.
+        state: Kernel TCP state, for example ``ESTABLISHED``.
+        app: Process name as reported by ``netstat``.
+        pid: Process id as reported by ``netstat`` when available.
+        raw_line: Original ``netstat`` row.
+        process: Full executable path from ``ps``, when available.
+        command: Full command line from ``ps``, when available.
+    """
+
+    source_port: int
+    target_port: int
+    state: str
+    app: str
+    pid: int | None
+    raw_line: str
+    process: str = ""
+    command: str = ""
+
+    def matches_app(self, filters: list[str]) -> bool:
+        """Return whether this owner matches any requested ``--app`` filter."""
+        if not filters:
+            return True
+        haystack = " ".join(
+            [self.app, os.path.basename(self.process), self.process, self.command]
+        ).lower()
+        return any(f.lower() in haystack for f in filters)
+
+    def to_dict(self, app_filters: list[str]) -> dict[str, Any]:
+        """Convert the owner row to the JSON contract used by this command."""
+        return {
+            "app": self.app,
+            "pid": self.pid,
+            "process": self.process,
+            "command": self.command,
+            "source": "netstat",
+            "state": self.state,
+            "local_source_port": self.source_port,
+            "target_port": self.target_port,
+            "matches_app_filter": self.matches_app(app_filters),
+            "system_extension_owner": _is_system_extension_owner(self),
+            "raw_netstat_line": self.raw_line,
         }
 
 
@@ -233,6 +290,60 @@ def parse_ss_lines(text: str) -> list[LocalConnection]:
     return rows
 
 
+def _parse_netstat_endpoint(endpoint: str) -> tuple[str, int] | None:
+    """Parse macOS ``netstat`` endpoints such as ``127.0.0.1.54321``."""
+    host, sep, port_text = endpoint.rpartition(".")
+    if not sep or not host:
+        return None
+    try:
+        return host, int(port_text)
+    except ValueError:
+        return None
+
+
+def _split_netstat_owner(owner: str) -> tuple[str, int | None]:
+    """Split ``netstat`` owner text into ``(process_name, pid)``."""
+    name, sep, pid_text = owner.rpartition(":")
+    if not sep:
+        return owner, None
+    try:
+        return name, int(pid_text)
+    except ValueError:
+        return owner, None
+
+
+def parse_netstat_proxy_owners(text: str, proxy_port: int,
+                               source_ports: set[int]) -> dict[int, ProxyOwner]:
+    """Parse macOS ``netstat -anv -p tcp`` rows for proxy-client owners."""
+    owners: dict[int, ProxyOwner] = {}
+    row_re = re.compile(
+        r"^tcp\d?\s+\S+\s+\S+\s+(?P<local>\S+)\s+(?P<peer>\S+)\s+"
+        r"(?P<state>\S+)\s+\S+\s+\S+\s+\S+\s+\S+\s+"
+        r"(?P<owner>.+?)\s+[0-9a-fA-F]{3,}(?:\s|$)"
+    )
+    for line in text.splitlines():
+        match = row_re.match(line)
+        if not match:
+            continue
+        local = _parse_netstat_endpoint(match.group("local"))
+        peer = _parse_netstat_endpoint(match.group("peer"))
+        if not local or not peer:
+            continue
+        if local[0] not in ("127.0.0.1", "::1"):
+            continue
+        if peer[0] not in ("127.0.0.1", "::1"):
+            continue
+        if local[1] not in source_ports or peer[1] != proxy_port:
+            continue
+        app, pid = _split_netstat_owner(match.group("owner").strip())
+        owners[local[1]] = ProxyOwner(
+            source_port=local[1], target_port=peer[1],
+            state=match.group("state"), app=app, pid=pid,
+            raw_line=line,
+        )
+    return owners
+
+
 def collect_lsof_connections(app_filters: list[str]) -> list[LocalConnection]:
     """Collect local established TCP connections for the requested apps."""
     cmd = ["lsof", "-nP", "-iTCP", "-sTCP:ESTABLISHED", "-Fpcfn"]
@@ -250,6 +361,23 @@ def collect_lsof_connections(app_filters: list[str]) -> list[LocalConnection]:
     rows = parse_lsof_fields(proc.stdout)
     _enrich_with_ps(rows)
     return [row for row in rows if row.matches_app(app_filters)]
+
+
+def collect_netstat_proxy_owners(proxy_port: int,
+                                 source_ports: set[int]) -> dict[int, ProxyOwner]:
+    """Collect macOS proxy-client owners for selected Mihomo source ports."""
+    if sys.platform != "darwin" or not source_ports:
+        return {}
+    try:
+        proc = subprocess.run(["netstat", "-anv", "-p", "tcp"],
+                              capture_output=True, text=True, timeout=3)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return {}
+    if proc.returncode != 0:
+        return {}
+    owners = parse_netstat_proxy_owners(proc.stdout, proxy_port, source_ports)
+    _enrich_proxy_owners(owners.values())
+    return owners
 
 
 def collect_ss_connections(app_filters: list[str]) -> list[LocalConnection]:
@@ -285,6 +413,17 @@ def _enrich_with_ps(rows: list[LocalConnection]) -> None:
             if same_pid.pid == row.pid:
                 same_pid.process = process
                 same_pid.command = command
+
+
+def _enrich_proxy_owners(rows) -> None:
+    """Add process path and command line to netstat owners when possible."""
+    seen: set[int] = set()
+    for row in rows:
+        if row.pid is None or row.pid in seen:
+            continue
+        seen.add(row.pid)
+        row.process = _ps_field(row.pid, "comm=")
+        row.command = _ps_field(row.pid, "command=")
 
 
 def _ps_field(pid: int, field: str) -> str:
@@ -338,6 +477,7 @@ def _mihomo_detail(conn: dict[str, Any] | None) -> dict[str, Any] | None:
     if not conn:
         return None
     metadata = conn.get("metadata") or {}
+    route_kind = _mihomo_route_kind(conn)
     return {
         "host": metadata.get("host") or "",
         "destination_ip": metadata.get("destinationIP") or "",
@@ -351,7 +491,94 @@ def _mihomo_detail(conn: dict[str, Any] | None) -> dict[str, Any] | None:
         "download": conn.get("download"),
         "start": conn.get("start") or "",
         "id": conn.get("id") or "",
+        "route_kind": route_kind,
+        "via_proxy_engine": True,
+        "routed_via_proxy": route_kind == "proxy",
     }
+
+
+def _mihomo_route_kind(conn: dict[str, Any]) -> str:
+    """Classify whether Mihomo routed a connection through a proxy or DIRECT."""
+    chains = conn.get("chains") or []
+    upper = {str(item).upper() for item in chains}
+    if "REJECT" in upper:
+        return "reject"
+    if "DIRECT" in upper:
+        return "direct"
+    if chains:
+        return "proxy"
+    return "unknown"
+
+
+def _is_system_extension_owner(owner: ProxyOwner) -> bool:
+    """Return whether a socket owner is likely a macOS System Extension."""
+    if owner.app in KNOWN_SYSTEM_EXTENSION_OWNERS:
+        return True
+    text = " ".join([owner.app, owner.process, owner.command]).lower()
+    return "/library/systemextensions/" in text or ".systemextension" in text
+
+
+def _owner_attribution(owner: ProxyOwner, app_filters: list[str]) -> str:
+    """Explain what the kernel owner means for app-level attribution."""
+    if owner.matches_app(app_filters):
+        return "owner_matches_app_filter"
+    if _is_system_extension_owner(owner):
+        return "system_extension_owner_original_app_hidden"
+    if app_filters:
+        return "owner_does_not_match_app_filter"
+    return "visible_owner"
+
+
+def _proxy_owner_connections(remote_rows: list[dict[str, Any]], proxy_port: int,
+                             app_filters: list[str]) -> list[dict[str, Any]]:
+    """Build reverse-owned proxy connections from Mihomo rows and netstat."""
+    ports = {
+        port for conn in remote_rows
+        if (port := _connection_source_port(conn)) is not None
+    }
+    owners = collect_netstat_proxy_owners(proxy_port, ports)
+    items: list[dict[str, Any]] = []
+    for conn in remote_rows:
+        port = _connection_source_port(conn)
+        owner = owners.get(port) if port is not None else None
+        if not owner:
+            continue
+        selection_reason = _proxy_owner_selection_reason(conn, owner, app_filters)
+        if not selection_reason:
+            continue
+        detail = _mihomo_detail(conn) or {}
+        items.append({
+            "local_source_port": port,
+            "connects_proxy_port": True,
+            "target_port": proxy_port,
+            "owner": owner.to_dict(app_filters),
+            "attribution": _owner_attribution(owner, app_filters),
+            "selection_reason": selection_reason,
+            "original_app_visible": owner.matches_app(app_filters),
+            "via_proxy_engine": True,
+            "routed_via_proxy": detail.get("routed_via_proxy"),
+            "mihomo": detail,
+        })
+    return items
+
+
+def _proxy_owner_selection_reason(conn: dict[str, Any], owner: ProxyOwner,
+                                  app_filters: list[str]) -> str | None:
+    """Return why a reverse-owned row belongs in the current report."""
+    if owner.matches_app(app_filters):
+        return "owner_matches_app_filter"
+    if not app_filters:
+        return "all_apps"
+    metadata = conn.get("metadata") or {}
+    target = " ".join([
+        str(metadata.get("host") or ""),
+        str(metadata.get("destinationIP") or ""),
+    ])
+    for app_filter in app_filters:
+        pattern = APP_REMOTE_PATTERNS.get(app_filter.lower())
+        if pattern and pattern.search(target):
+            return "host_matches_app_context"
+    return None
 
 
 def build_report(backend_name: str, config: dict[str, Any],
@@ -366,18 +593,13 @@ def build_report(backend_name: str, config: dict[str, Any],
         if row.source_port != proxy_port
     ]
     api_status: dict[str, Any]
+    remote_rows: list[dict[str, Any]] = []
     remote_by_port: dict[int, dict[str, Any]] = {}
-    proxy_rows = [row for row in local_rows if row.target_port == proxy_port]
     if backend_name != "mihomo":
         api_status = {
             "ok": False, "status": "skipped", "url": None,
             "error": f"connections join needs mihomo backend, current backend is {backend_name}",
             "count": 0,
-        }
-    elif not proxy_rows:
-        api_status = {
-            "ok": True, "status": "skipped_no_proxy_connections", "url": None,
-            "error": None, "count": 0,
         }
     else:
         remote_rows, api_status = fetch_mihomo_connections(api_base, api_secret)
@@ -408,6 +630,8 @@ def build_report(backend_name: str, config: dict[str, Any],
         })
 
     proxy_count = sum(1 for row in local_rows if row.target_port == proxy_port)
+    proxy_owner_rows = _proxy_owner_connections(
+        remote_rows, proxy_port, parsed_args.app_filters)
     return {
         "proxy_port": proxy_port,
         "backend": backend_name,
@@ -415,6 +639,7 @@ def build_report(backend_name: str, config: dict[str, Any],
         "all_apps": parsed_args.all_apps,
         "api": api_status,
         "connections": joined,
+        "proxy_owner_connections": proxy_owner_rows,
         "summary": {
             "local_count": len(local_rows),
             "proxy_port_count": proxy_count,
@@ -422,6 +647,12 @@ def build_report(backend_name: str, config: dict[str, Any],
             "all_via_proxy_port": bool(local_rows) and proxy_count == len(local_rows),
             "matched_count": sum(1 for item in joined if item["matched"]),
             "unmatched_count": sum(1 for item in joined if not item["matched"]),
+            "proxy_owner_connection_count": len(proxy_owner_rows),
+            "system_extension_owner_count": sum(
+                1 for item in proxy_owner_rows
+                if item["owner"]["system_extension_owner"]),
+            "routed_via_proxy_count": sum(
+                1 for item in proxy_owner_rows if item["routed_via_proxy"]),
         },
     }
 
@@ -435,9 +666,11 @@ def emit_human(report: dict[str, Any]) -> None:
           f"proxy_port={report['proxy_port']} all_via_proxy={all_proxy}")
     if not api.get("ok"):
         print(f"  {YELLOW}degraded:{NC} {api.get('error')}")
-    if not report["connections"]:
+    if not report["connections"] and not report["proxy_owner_connections"]:
         print(f"  {DIM}no local connections to proxy_port matched filters{NC}")
         return
+    if not report["connections"]:
+        print(f"  {DIM}no app-owned local sockets matched filters{NC}")
     for item in report["connections"]:
         status = f"{GREEN}matched{NC}" if item["matched"] else f"{YELLOW}unmatched{NC}"
         target = "proxy" if item["connects_proxy_port"] else item["target_host"]
@@ -454,6 +687,29 @@ def emit_human(report: dict[str, Any]) -> None:
                   f"start={m.get('start') or '-'}")
         else:
             print(f"    reason={item['unmatched_reason']}")
+    _emit_proxy_owner_human(report)
+
+
+def _emit_proxy_owner_human(report: dict[str, Any]) -> None:
+    """Render reverse-owned proxy connections from macOS netstat."""
+    rows = report["proxy_owner_connections"]
+    if not rows:
+        return
+    print(f"  {BOLD}proxy-owned mihomo connections{NC}")
+    for item in rows[:12]:
+        owner = item["owner"]
+        m = item["mihomo"] or {}
+        dest = m.get("host") or m.get("destination_ip") or "?"
+        route = m.get("route_kind") or "unknown"
+        print(f"  {CYAN}{owner['app']}{NC} pid={owner['pid']} "
+              f"src={item['local_source_port']} -> proxy:{report['proxy_port']} "
+              f"state={owner['state']} route={route}")
+        print(f"    dest={dest} rule={m.get('rule') or '?'} "
+              f"payload={m.get('rule_payload') or '-'} "
+              f"chains={','.join(m.get('chains') or []) or '-'} "
+              f"attribution={item['attribution']}")
+    if len(rows) > 12:
+        print(f"  {DIM}... {len(rows) - 12} more proxy-owned connections omitted{NC}")
 
 
 def cmd_connections(args: list[str], backend, config: dict[str, Any]) -> None:
