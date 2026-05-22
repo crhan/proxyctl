@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
@@ -55,6 +56,7 @@ from proxyctl.traffic_store import (
 
 VALID_GROUPS = ("line", "chain", "app", "route")
 VALID_SUBCMDS = ("snapshot", "sample", "watch", "report")
+WatchProgress = Callable[[int, dict[str, Any]], None]
 FILTER_VALUE_FLAGS = {
     "--app",
     "--host",
@@ -343,7 +345,8 @@ def record_sample(backend_name: str, config: dict[str, Any],
 
 
 def run_watch(backend_name: str, config: dict[str, Any],
-              args: TrafficArgs) -> dict[str, Any]:
+              args: TrafficArgs,
+              on_sample: WatchProgress | None = None) -> dict[str, Any]:
     """Record traffic samples repeatedly."""
     sample_count = 0
     totals = {"connection_count": 0, "upload": 0, "download": 0, "total": 0}
@@ -353,6 +356,8 @@ def run_watch(backend_name: str, config: dict[str, Any],
             last = record_sample(backend_name, config, args)
             sample_count += 1
             _merge_totals(totals, last["totals"])
+            if on_sample is not None:
+                on_sample(sample_count, last)
             if args.count is not None and sample_count >= args.count:
                 break
             time.sleep(args.interval)
@@ -833,7 +838,7 @@ def _emit_watch_human(report: dict[str, Any]) -> None:
     last = report.get("last_sample") or {}
     store = (last.get("store") or {}) if isinstance(last, dict) else {}
     print(
-        "proxyctl traffic watch  "
+        "proxyctl traffic watch summary  "
         f"backend={report['backend']}  "
         f"采样={report['sample_count']} 次  "
         f"间隔={report['interval']}s"
@@ -847,6 +852,23 @@ def _emit_watch_human(report: dict[str, Any]) -> None:
     )
     if store.get("events_path"):
         print(f"  事件文件：{store['events_path']}")
+
+
+def _emit_watch_progress(sample_index: int, sample: dict[str, Any]) -> None:
+    """Render one live watch progress line."""
+    totals = sample["totals"]
+    api_status = sample.get("api", {}).get("status", "unknown")
+    print(
+        f"[{sample_index}] "
+        f"api={api_status}  "
+        f"活跃={sample['active_connection_count']}  "
+        f"新基线={sample['baseline_connection_count']}  "
+        f"记录={sample['recorded_event_count']}  "
+        f"下载={_format_bytes(totals['download'])}  "
+        f"上传={_format_bytes(totals['upload'])}  "
+        f"合计={_format_bytes(totals['total'])}",
+        flush=True,
+    )
 
 
 def _emit_report_human(report: dict[str, Any]) -> None:
@@ -908,21 +930,33 @@ def _emit_group(group: dict[str, Any]) -> None:
 def cmd_traffic(args: list[str], backend, config: dict[str, Any]) -> None:
     """Entry point for ``proxyctl traffic``."""
     parsed = parse_args(args)
-    report = _build_report_with_optional_lock(backend.name, config, parsed)
+    progress = _watch_progress_callback(parsed)
+    report = _build_report_with_optional_lock(
+        backend.name, config, parsed, progress)
     if _io.is_json_mode():
         _io.emit_json(_io.envelope("traffic", data=report))
         return
     emit_human(report)
 
 
+def _watch_progress_callback(args: TrafficArgs) -> WatchProgress | None:
+    """Return the human watch progress callback when stdout may stream text."""
+    if args.subcmd == "watch" and not _io.is_json_mode():
+        return _emit_watch_progress
+    return None
+
+
 def _build_report_with_optional_lock(backend_name: str, config: dict[str, Any],
-                                     args: TrafficArgs) -> dict[str, Any]:
+                                     args: TrafficArgs,
+                                     on_sample: WatchProgress | None = None
+                                     ) -> dict[str, Any]:
     """Build traffic output, locking sampler writes."""
     if args.subcmd not in ("sample", "watch"):
         return _build_report_for_subcmd(backend_name, config, args)
     try:
         with _io.with_lock("traffic"):
-            return _build_report_for_subcmd(backend_name, config, args)
+            return _build_report_for_subcmd(
+                backend_name, config, args, on_sample)
     except _io.LockedError as error:
         _io.fail(
             "另一个 proxyctl traffic 采样写操作正在进行（lock: traffic）",
@@ -937,12 +971,14 @@ def _build_report_with_optional_lock(backend_name: str, config: dict[str, Any],
 
 
 def _build_report_for_subcmd(backend_name: str, config: dict[str, Any],
-                             args: TrafficArgs) -> dict[str, Any]:
+                             args: TrafficArgs,
+                             on_sample: WatchProgress | None = None
+                             ) -> dict[str, Any]:
     """Dispatch parsed traffic args to the matching builder."""
     if args.subcmd == "snapshot":
         return build_snapshot(backend_name, config, args)
     if args.subcmd == "sample":
         return record_sample(backend_name, config, args)
     if args.subcmd == "watch":
-        return run_watch(backend_name, config, args)
+        return run_watch(backend_name, config, args, on_sample)
     return build_report(backend_name, config, args)

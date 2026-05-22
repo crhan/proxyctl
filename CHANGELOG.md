@@ -10,7 +10,8 @@
 - **新增 `proxyctl traffic` 线路/软件流量统计。** `snapshot` 读取 Mihomo
   `/connections` 的 `upload` / `download` 并按线路、链路、软件或路由聚合；
   `sample` / `watch` 可把连接计数器增量写入本地缓存；`report --since 1h`
-  可按已记录增量生成历史窗口报表。命令复用 `connections` 的 `--host` /
+  可按已记录增量生成历史窗口报表。`watch` 在人类输出模式下会每次采样实时打印
+  进度行。命令复用 `connections` 的 `--host` /
   `--chain` / `--route` / `--preset` / `--agent` 过滤。首次采样只建立基线，
   不回填此前已经产生的字节，避免把活跃连接当前计数误算成历史累计。
 

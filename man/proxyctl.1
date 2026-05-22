@@ -154,8 +154,9 @@ rulePayload / host / IP 聚合目的地，输出 app_contexts / candidate_contex
 可见进程为 process/socket-owner，被 Network/System Extension 遮蔽时按目的域名
 给出 inferred 候选。\fBsample\fR 记录一次连接计数器增量，
 \fBwatch\fR 按间隔重复记录，\fBreport\fR 读取已记录增量并按
-\fB--since\fR 汇总。首次看到的连接只建立基线，不回填此前已经产生的字节；
-未运行 sample/watch 的时间段无法补算。
+\fB--since\fR 汇总。人类输出模式下 \fBwatch\fR 每次采样都会实时打印一行进度；
+\fB--json\fR 保持最终单个 envelope。首次看到的连接只建立基线，不回填此前已经
+产生的字节；未运行 sample/watch 的时间段无法补算。
 .TP
 \fBproxyctl trace\fR \fIDOMAIN\fR [\fB--json\fR]
 4 阶段域名链路诊断：DNS 解析 / 规则匹配预测 / 连通性 / 实际连接。

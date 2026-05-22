@@ -330,6 +330,7 @@ def _stored_event(line: str, app: str, host: str, total: int) -> dict:
 
 def test_traffic_watch_records_bounded_samples(monkeypatch, tmp_path):
     samples = [0, 10, 25]
+    progress: list[tuple[int, int, int]] = []
 
     def _fetch(*args, **kwargs):
         value = samples.pop(0)
@@ -347,12 +348,15 @@ def test_traffic_watch_records_bounded_samples(monkeypatch, tmp_path):
         traffic.parse_args([
             "watch", "--store", str(tmp_path), "--interval", "1", "--count", "3"
         ]),
+        lambda idx, sample: progress.append((
+            idx, sample["recorded_event_count"], sample["totals"]["total"])),
     )
 
     assert result["sample_count"] == 3
     assert result["totals"]["connection_count"] == 2
     assert result["totals"]["upload"] == 25
     assert result["totals"]["download"] == 50
+    assert progress == [(1, 0, 0), (2, 1, 30), (3, 1, 45)]
 
 
 def test_cmd_traffic_json_outputs_envelope(monkeypatch):
