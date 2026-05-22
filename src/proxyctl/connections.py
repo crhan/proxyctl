@@ -958,7 +958,9 @@ def _emit_proxy_owner_explain_human(report: dict[str, Any]) -> None:
     has_system_extension = any(
         (item.get("owner") or {}).get("system_extension_owner") for item in rows
     )
-    print(f"  {DIM}说明：下面看的是 本机入口 -> 代理端口 -> Mihomo -> 目的站点；"
+    print(f"  {DIM}说明：下面是同一批连接的两个视图：先按目的站点汇总，"
+          f"再列逐条连接明细。{NC}")
+    print(f"  {DIM}说明：每条连接链路是 本机入口 -> 代理端口 -> Mihomo -> 目的站点；"
           f"路由和链路来自 Mihomo。{NC}")
     if has_candidates or has_system_extension:
         print(f"  {DIM}说明：com.antgroup.asp 这类系统扩展会隐藏原始 App；"
@@ -970,7 +972,7 @@ def _emit_proxy_owner_groups_human(report: dict[str, Any]) -> None:
     groups = report["proxy_owner_groups"]
     if not groups:
         return
-    print(f"  {BOLD}按目的地归组的代理入口连接{NC}")
+    print(f"  {BOLD}目的站点汇总（同一批连接的聚合视图）{NC}")
     for group in groups:
         marker = f"{YELLOW}警告{NC}" if group["warning"] else f"{GREEN}正常{NC}"
         route = ",".join(_route_label(item) for item in group["route_kinds"])
@@ -994,7 +996,7 @@ def _emit_proxy_owner_human(report: dict[str, Any]) -> None:
     rows = report["proxy_owner_connections"]
     if not rows:
         return
-    print(f"  {BOLD}代理入口连接明细{NC}")
+    print(f"  {BOLD}逐条连接明细（同一批连接的明细视图）{NC}")
     for item in rows[:12]:
         owner = item["owner"]
         m = item["mihomo"] or {}
