@@ -3,7 +3,7 @@
 提供一组跨所有用户都通用的连通性测试点：
 - 海外（走代理）：google / github
 - 国内（直连）：baidu
-- AI 线路：anthropic（走 claude 规则组）
+- AI 线路：openai / anthropic（anthropic 走 claude 规则组）
 
 本机特例（discord/telegram、企业内网等）请走用户插件。
 
@@ -24,9 +24,12 @@ class ConnectivityBasic(Plugin):
         return [
             CheckTarget(name="google", url="https://www.google.com", mode="proxy"),
             CheckTarget(name="github", url="https://github.com",     mode="proxy"),
+            CheckTarget(name="openai",
+                        url="https://api.openai.com/v1/models",
+                        mode="proxy"),
             CheckTarget(name="baidu",  url="https://www.baidu.com",  mode="direct"),
             CheckTarget(name="anthropic",
-                        url="https://api.anthropic.com",
+                        url="https://api.anthropic.com/v1/models",
                         mode="proxy",
                         expected_proxy="claude"),
         ]

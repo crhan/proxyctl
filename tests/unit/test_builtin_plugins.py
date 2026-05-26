@@ -23,12 +23,17 @@ def test_connectivity_basic_targets():
     p = ConnectivityBasic()
     targets = p.check_targets({})
     names = {t.name for t in targets}
-    assert names == {"google", "github", "baidu", "anthropic"}
+    assert names == {"google", "github", "openai", "baidu", "anthropic"}
     modes = {t.name: t.mode for t in targets}
     assert modes["google"] == "proxy"
     assert modes["github"] == "proxy"
+    assert modes["openai"] == "proxy"
     assert modes["baidu"] == "direct"
+    urls = {t.name: t.url for t in targets}
+    assert urls["openai"] == "https://api.openai.com/v1/models"
+    assert urls["anthropic"] == "https://api.anthropic.com/v1/models"
     expected = {t.name: t.expected_proxy for t in targets}
+    assert expected["openai"] == ""
     assert expected["anthropic"] == "claude"
 
 

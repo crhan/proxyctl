@@ -46,6 +46,10 @@
   作为 `线路` 列；直连探测显示 `direct`，DNS/TCP 探测显示 `-`，拿不到活跃
   连接时显示 `?`。JSON 输出中的每个 connectivity row 同步新增 `line` 和
   `route_chain` 字段。
+- **`proxyctl check` 内置连通性基线新增 OpenAI API 探测。**
+  默认站点现在包含 `openai`（`https://api.openai.com/v1/models`），并将
+  `anthropic` 从根路径改为 `https://api.anthropic.com/v1/models`，让 AI
+  API 健康检查更接近真实调用路径；4xx 仍按“链路已通”处理。
 
 ### Changed
 
