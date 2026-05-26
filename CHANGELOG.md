@@ -5,6 +5,51 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`proxyctl connections` 支持位置参数关键字 + 跨字段智能匹配。**
+  现在可直接写 `proxyctl connections codex 443`，等价于
+  `--query codex --query 443`。每个关键字独立判定命中维度：纯数字关键字
+  对 `target_port` / `source_port` / `pid` 做精确比较，文本关键字对
+  `target_host` / `destination_ip` / `app` / `process` / `command` 做大小写
+  不敏感子串匹配；多关键字之间取 **AND**，每个关键字必须至少命中一个维度。
+  JSON 输出在每条命中行新增 `match_reasons: {keyword: [dimensions]}` 字段，
+  显示是哪个关键字命中了哪些维度（当本次调用没有任何关键字时，该字段不会
+  出现在 row dict 上——消费方应按 "key may be absent" 处理）。人类视图启用
+  ANSI 高亮（黄底黑字）标出命中子串，并在 0 行命中时打印关键字 + 尝试过的
+  维度提示（仅在本次提供了关键字时打印；仅有 `--app` 等结构化过滤而无关键字
+  时不会打这个提示）。
+- **`LocalConnection.to_dict()` 的 JSON 输出新增 `command` 字段**，把
+  `ps -o command=` 抓到的完整命令行一并暴露，方便位置参数关键字按命令行匹配，
+  也便于消费方调试。
+- **`proxyctl connections --verbose` 在人类视图展开 socket 明细。**
+  默认 human 视图只渲染目的站点汇总（数量、路由、链路、持有进程计数）；加上
+  `--verbose` 后会在每个目的站点下逐条展开 socket 明细：完整进程路径、命令行、
+  Mihomo rule / rule_payload / chains / upload / download / start / route_kind，
+  以及本次位置参数关键字的命中维度（`命中: kw=dim1+dim2`）。JSON 输出不受
+  此 flag 影响，明细一直在 `proxy_owner_connections[]` 里。
+- **`proxyctl connections` 人类视图的上传/下载/开始时间改用人类单位。**
+  上传/下载字节数现在显示为 `8.0 KiB` / `1.5 MiB` 等二进制单位，而不再是
+  原始字节数；开始时间在 ISO 8601 时间戳后追加相对时长，如
+  `2026-05-23T17:20:27.854916+08:00 (5m20s 前)`，方便快速判断连接生命周期。
+  解析失败时回退到原始时间戳，不掩盖原数据。
+- **`proxyctl connections --verbose` 自动读取 traffic store 历史数据。**
+  开启 `--verbose` 后，命令会去 `~/.cache/proxyctl/traffic_events.ndjson`
+  （或 `traffic_store_dir` 指向的位置）加载 `proxyctl traffic sample/watch`
+  采样积累的事件流，按 host 索引后挂到每条 socket 上。每个 socket 明细下方
+  会展开历史块：累计上传/下载、首次/末次见到的时间（含相对时长）、
+  历史连接数、出现过的进程列表。`build_report` 输出顶层新增 `history_status`
+  字段记录是否加载成功、读取到几条事件，便于 JSON 消费方判断；human 视图
+  在 traffic events 为空时一次性提示用户先跑 `proxyctl traffic watch`。
+
+### Changed
+
+- **`proxyctl connections --query` 语义升级（行为变化）。** 之前 `--query`
+  是把多个值在 `process + target + contexts` 拼成的大串上做 OR 子串匹配；
+  现在与位置参数共用 AND + 跨字段独立判定逻辑。多值场景下结果可能比旧版本
+  更窄（旧 OR → 新 AND），但单值场景下匹配范围反而更宽（不再依赖字段被拼接
+  的顺序）。脚本里使用 `--query` 的用户请确认这一语义变化。
+
 ## [0.5.6] — 2026-05-22
 
 ### Added

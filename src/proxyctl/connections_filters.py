@@ -254,6 +254,65 @@ def _contains_any(text: str, terms: list[str]) -> bool:
     return any(term.strip().lower() in lowered for term in terms if term.strip())
 
 
+# Dimensions a positional/--query keyword can match against.
+# Numeric fields are compared exactly; text fields use case-insensitive substring.
+MATCH_NUMERIC_DIMENSIONS = ("target_port", "source_port", "pid")
+MATCH_TEXT_DIMENSIONS = (
+    "target_host", "destination_ip", "app", "process", "command",
+)
+MATCH_DIMENSIONS = MATCH_NUMERIC_DIMENSIONS + MATCH_TEXT_DIMENSIONS
+
+
+def _keyword_dimensions(keyword: str, fields: dict[str, Any]) -> list[str]:
+    """Return dimension names a single keyword hits on one row's fields.
+
+    For digit-only keywords, the numeric branch runs first and tries exact
+    equality on each port/pid field; **the text branch then runs unconditionally**
+    and adds any text-field substring hits to the same result list (so e.g.
+    ``443`` can simultaneously hit ``target_port`` and ``target_host`` when
+    the host string also contains ``443``). Non-digit keywords skip the
+    numeric branch entirely. The returned list mirrors ``MATCH_DIMENSIONS``
+    order so callers can render reasons deterministically.
+    """
+    kw = keyword.strip()
+    if not kw:
+        return []
+    dims: list[str] = []
+    if kw.isdigit():
+        n = int(kw)
+        for f in MATCH_NUMERIC_DIMENSIONS:
+            val = fields.get(f)
+            if val is not None and val == n:
+                dims.append(f)
+    kw_low = kw.lower()
+    for f in MATCH_TEXT_DIMENSIONS:
+        val = fields.get(f)
+        if val and kw_low in str(val).lower():
+            dims.append(f)
+    return dims
+
+
+def row_match_reasons(keywords: list[str],
+                      fields: dict[str, Any]) -> dict[str, list[str]] | None:
+    """Compute keyword→dimensions hits for one row under AND semantics.
+
+    Returns ``None`` when at least one keyword fails to hit any dimension
+    (the row is dropped). Returns an empty dict when ``keywords`` is empty
+    (a match with no recorded reasons). Otherwise returns ``{keyword: dims}``.
+    """
+    if not keywords:
+        return {}
+    out: dict[str, list[str]] = {}
+    for kw in keywords:
+        if not kw.strip():
+            continue
+        dims = _keyword_dimensions(kw, fields)
+        if not dims:
+            return None
+        out[kw] = dims
+    return out
+
+
 def _detail_text(detail: dict[str, Any] | None) -> str:
     """Return searchable text for one Mihomo detail block."""
     m = detail or {}
@@ -277,24 +336,38 @@ def _route_kind_text(detail: dict[str, Any] | None) -> str:
     return str((detail or {}).get("route_kind") or "")
 
 
-def _matches_filter_dimensions(process_text: str, target_text: str,
-                               contexts: list[str], args: Any,
-                               chain_text: str = "",
-                               route_kind: str = "") -> bool:
-    """Return whether a row satisfies all active filter dimensions."""
+def _matches_filter_dimensions(
+    process_text: str, target_text: str,
+    contexts: list[str], args: Any,
+    chain_text: str = "",
+    route_kind: str = "",
+    row_fields: dict[str, Any] | None = None,
+) -> dict[str, list[str]] | None:
+    """Evaluate all active filter dimensions for one row.
+
+    Returns ``None`` when the row should be dropped. Returns a (possibly
+    empty) ``{keyword: [dimensions...]}`` dict when the row is kept, where
+    the dict records why each positional/--query keyword was retained.
+    Structural filters (host/chain/route/agent) do not contribute reasons.
+    """
     if not args.has_filters():
-        return True
+        return {}
     if args.host_filters and not _contains_any(target_text, args.host_filters):
-        return False
+        return None
     if args.chain_filters and not _contains_any(chain_text, args.chain_filters):
-        return False
+        return None
     if args.route_filters and not _matches_route_kind(route_kind, args.route_filters):
-        return False
+        return None
+    if not _matches_agent_dimension(process_text, target_text, contexts, args):
+        return None
     if args.query_filters:
-        query_text = " ".join([process_text, target_text, " ".join(contexts)])
-        if not _contains_any(query_text, args.query_filters):
-            return False
-    return _matches_agent_dimension(process_text, target_text, contexts, args)
+        if row_fields is None:
+            row_fields = {}
+        reasons = row_match_reasons(args.query_filters, row_fields)
+        if reasons is None:
+            return None
+        return reasons
+    return {}
 
 
 def _matches_route_kind(route_kind: str, filters: list[str]) -> bool:

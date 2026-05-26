@@ -87,6 +87,7 @@ class LocalConnection:
             "pid": self.pid,
             "fd": self.fd,
             "process": self.process,
+            "command": self.command,
             "app_contexts": _detect_app_contexts(self._match_text()),
             "local_source_port": self.source_port,
             "target_host": self.target_host,
@@ -163,6 +164,9 @@ class ConnectionArgs:
         agent_filters: Agent/tool filters from ``--agent``.
         query_filters: Free-text filters from ``--query`` / ``--filter``.
         all_apps: Whether ``--all`` was explicitly requested.
+        verbose: Whether ``--verbose`` was set — human view should expand
+            per-socket detail (rule / chains / upload / process / command /
+            match_reasons) instead of only the destination-group summary.
     """
 
     app_filters: list[str]
@@ -173,6 +177,7 @@ class ConnectionArgs:
     agent_filters: list[str] = field(default_factory=list)
     query_filters: list[str] = field(default_factory=list)
     all_apps: bool = False
+    verbose: bool = False
 
     def has_filters(self) -> bool:
         """Return whether any narrowing filter is active."""
@@ -194,6 +199,12 @@ def parse_args(args: list[str]) -> ConnectionArgs:
         ``--host`` / ``--chain`` / ``--route`` / ``--preset`` / ``--agent`` /
         ``--query`` are repeatable. ``--line`` aliases ``--chain``.
         ``--app`` is kept as a legacy alias for process/app filtering.
+
+    Positional keywords:
+        Any non-flag token (not starting with ``--``) is appended to
+        ``query_filters`` and behaves identically to ``--query <kw>``.
+        Multiple positional/--query keywords are combined with AND across
+        cross-field smart matching dimensions (IP/host, port, PID, process).
     """
     parsed = ConnectionArgs(app_filters=[])
     idx = 0
@@ -203,20 +214,27 @@ def parse_args(args: list[str]) -> ConnectionArgs:
             parsed.all_apps = True
             idx += 1
             continue
+        if arg == "--verbose":
+            parsed.verbose = True
+            idx += 1
+            continue
         if arg in ("--app", "--host", "--chain", "--line", "--route",
                    "--preset", "--agent",
                    "--query", "--filter"):
             _append_filter_arg(parsed, arg, args, idx)
             idx += 2
             continue
-        _io.fail(f"未识别 connections 参数：{arg}",
-                 hints=["proxyctl connections --host anthropic.com",
-                        "proxyctl connections --chain SG-Residential-01",
-                        "proxyctl connections --route proxy",
-                        "proxyctl connections --preset ai",
-                        "proxyctl connections --agent codex --json",
-                        "proxyctl connections --json"],
-                 doc="agent-protocol", code=_io.USAGE, cmd="connections")
+        if arg.startswith("--"):
+            _io.fail(f"未识别 connections 参数：{arg}",
+                     hints=["proxyctl connections codex",
+                            "proxyctl connections 443 anthropic",
+                            "proxyctl connections claude --verbose",
+                            "proxyctl connections --host anthropic.com",
+                            "proxyctl connections --preset ai",
+                            "proxyctl connections --json"],
+                     doc="agent-protocol", code=_io.USAGE, cmd="connections")
+        parsed.query_filters.append(arg)
+        idx += 1
     return parsed
 
 
@@ -665,7 +683,12 @@ def _proxy_owner_selection_reason(conn: dict[str, Any], owner: ProxyOwner,
 
 def _proxy_owner_item_matches_filters(item: dict[str, Any],
                                       args: ConnectionArgs) -> bool:
-    """Return whether a proxy-owner item satisfies active filters."""
+    """Return whether a proxy-owner item satisfies active filters.
+
+    Side effect: when keyword/--query filters match, the per-keyword
+    dimension hits are written into ``item["match_reasons"]`` so downstream
+    rendering (JSON, human highlight) can explain why the row was kept.
+    """
     owner = item.get("owner") or {}
     process_text = " ".join([
         str(owner.get("app") or ""),
@@ -675,32 +698,70 @@ def _proxy_owner_item_matches_filters(item: dict[str, Any],
     ])
     contexts = list(item.get("candidate_contexts") or [])
     contexts.extend(owner.get("app_contexts") or [])
-    detail = item.get("mihomo")
-    return _matches_filter_dimensions(
+    detail = item.get("mihomo") or {}
+    row_fields = {
+        "target_host": detail.get("host") or "",
+        "destination_ip": detail.get("destination_ip") or "",
+        "app": owner.get("app") or "",
+        "process": owner.get("process") or "",
+        "command": owner.get("command") or "",
+        "target_port": detail.get("destination_port") or item.get("target_port"),
+        "source_port": detail.get("source_port") or item.get("local_source_port"),
+        "pid": owner.get("pid"),
+    }
+    reasons = _matches_filter_dimensions(
         process_text, _detail_text(detail), contexts, args,
         chain_text=_chain_text(detail),
         route_kind=_route_kind_text(detail),
+        row_fields=row_fields,
     )
+    if reasons is None:
+        return False
+    if reasons:
+        item["match_reasons"] = reasons
+    return True
 
 
 def _local_item_matches_filters(item: dict[str, Any],
                                 args: ConnectionArgs) -> bool:
-    """Return whether a local lsof item satisfies active filters."""
+    """Return whether a local lsof item satisfies active filters.
+
+    Side effect: see ``_proxy_owner_item_matches_filters``.
+    """
     process_text = " ".join([
         str(item.get("app") or ""),
         os.path.basename(str(item.get("process") or "")),
         str(item.get("process") or ""),
+        str(item.get("command") or ""),
     ])
     target_text = " ".join([
         str(item.get("target_host") or ""),
         _detail_text(item.get("mihomo")),
     ])
-    detail = item.get("mihomo")
-    return _matches_filter_dimensions(
+    detail = item.get("mihomo") or {}
+    # When mihomo joined this socket, prefer its host/destination_ip over the
+    # lsof-side target (which for proxy traffic is just 127.0.0.1:7890).
+    row_fields = {
+        "target_host": detail.get("host") or item.get("target_host") or "",
+        "destination_ip": detail.get("destination_ip") or "",
+        "app": item.get("app") or "",
+        "process": item.get("process") or "",
+        "command": item.get("command") or "",
+        "target_port": detail.get("destination_port") or item.get("target_port"),
+        "source_port": item.get("local_source_port"),
+        "pid": item.get("pid"),
+    }
+    reasons = _matches_filter_dimensions(
         process_text, target_text, item.get("app_contexts") or [], args,
         chain_text=_chain_text(detail),
         route_kind=_route_kind_text(detail),
+        row_fields=row_fields,
     )
+    if reasons is None:
+        return False
+    if reasons:
+        item["match_reasons"] = reasons
+    return True
 
 
 def _proxy_group_key(item: dict[str, Any]) -> tuple[str, str]:
@@ -851,6 +912,10 @@ def build_report(backend_name: str, config: dict[str, Any],
     proxy_owner_rows = _proxy_owner_connections(
         remote_rows, proxy_port, parsed_args)
     proxy_owner_group_rows = _proxy_owner_groups(proxy_owner_rows)
+    history_status: dict[str, Any] = {"loaded": False}
+    if parsed_args.verbose:
+        history_status = _attach_history_to_rows(
+            config, joined, proxy_owner_rows)
     return {
         "proxy_port": proxy_port,
         "backend": backend_name,
@@ -865,6 +930,8 @@ def build_report(backend_name: str, config: dict[str, Any],
             "query": parsed_args.query_filters,
         },
         "all_apps": parsed_args.all_apps,
+        "verbose": parsed_args.verbose,
+        "history_status": history_status,
         "api": api_status,
         "connections": joined,
         "proxy_owner_connections": proxy_owner_rows,
@@ -888,6 +955,84 @@ def build_report(backend_name: str, config: dict[str, Any],
             "mixed_route_group_count": sum(
                 1 for item in proxy_owner_group_rows if item["warning"]),
         },
+    }
+
+
+def _attach_history_to_rows(config: dict[str, Any],
+                            local_rows: list[dict[str, Any]],
+                            proxy_owner_rows: list[dict[str, Any]]
+                            ) -> dict[str, Any]:
+    """Load traffic-store events and attach per-host history to each row.
+
+    Returns a small status dict that the human renderer can inspect to
+    decide whether to print a "history is empty — run traffic sample first"
+    hint. JSON consumers see the same status under report["history_status"].
+    """
+    from proxyctl import traffic_store
+    paths = traffic_store.store_paths(config, None)
+    events = traffic_store.read_events(paths["events_path"])
+    status: dict[str, Any] = {
+        "loaded": True,
+        "events_path": paths["events_path"],
+        "event_count": len(events),
+        "exists": os.path.exists(paths["events_path"]),
+    }
+    if not events:
+        return status
+    by_host: dict[str, list[dict[str, Any]]] = {}
+    for ev in events:
+        host_key = str(ev.get("host") or ev.get("destination_ip") or "")
+        if not host_key:
+            continue
+        by_host.setdefault(host_key, []).append(ev)
+    for row_list in (local_rows, proxy_owner_rows):
+        for item in row_list:
+            host = ""
+            mihomo = item.get("mihomo") or {}
+            host = (mihomo.get("host")
+                    or mihomo.get("destination_ip")
+                    or item.get("target_host") or "")
+            host = str(host)
+            if not host:
+                continue
+            matched = by_host.get(host)
+            if matched:
+                item["history"] = _summarize_history_events(matched)
+    return status
+
+
+def _summarize_history_events(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate traffic-store events for one host into a compact summary."""
+    upload_total = 0
+    download_total = 0
+    sample_times: list[str] = []
+    owner_apps: set[str] = set()
+    connection_keys: set[str] = set()
+    for ev in events:
+        try:
+            upload_total += int(ev.get("upload") or 0)
+            download_total += int(ev.get("download") or 0)
+        except (TypeError, ValueError):
+            pass
+        ts = ev.get("sample_ts")
+        if isinstance(ts, str) and ts:
+            sample_times.append(ts)
+        attribution = ev.get("attribution") or {}
+        app_name = attribution.get("app") or attribution.get("owner_app")
+        if app_name:
+            owner_apps.add(str(app_name))
+        key = ev.get("state_key") or ev.get("id")
+        if key:
+            connection_keys.add(str(key))
+    sample_times.sort()
+    return {
+        "event_count": len(events),
+        "upload_total": upload_total,
+        "download_total": download_total,
+        "first_seen": sample_times[0] if sample_times else "",
+        "last_seen": sample_times[-1] if sample_times else "",
+        "owner_apps": sorted(owner_apps),
+        "connection_count": len(connection_keys),
     }
 
 

@@ -564,6 +564,16 @@ def _row_matches_filters(row: dict[str, Any], filters: ConnectionArgs) -> bool:
         "route_kind": row["route_kind"],
         "chains": row["chains"],
     }
+    row_fields = {
+        "target_host": row["host"] or "",
+        "destination_ip": row["destination_ip"] or "",
+        "app": str(attribution.get("app") or ""),
+        "process": str(attribution.get("owner_app") or ""),
+        "command": "",
+        "target_port": None,
+        "source_port": None,
+        "pid": attribution.get("owner_pid"),
+    }
     return _matches_filter_dimensions(
         process_text,
         " ".join([target_text, _detail_text(detail)]),
@@ -571,7 +581,8 @@ def _row_matches_filters(row: dict[str, Any], filters: ConnectionArgs) -> bool:
         filters,
         chain_text=_chain_text(detail),
         route_kind=_route_kind_text(detail),
-    )
+        row_fields=row_fields,
+    ) is not None
 
 
 def _aggregate_rows(rows: list[dict[str, Any]],
