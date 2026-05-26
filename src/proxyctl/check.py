@@ -137,9 +137,8 @@ def _route_matches_expected_proxy(route: dict,
         return False, f" expected {expected_proxy}, no active connection found"
 
     actual = str(route.get("group") or "")
-    chain = str(route.get("chain") or "?")
     if actual.lower() == expected_proxy.lower():
-        return True, f" via {chain}"
+        return True, ""
     return False, f" expected {expected_proxy}, got {actual or '?'}"
 
 
@@ -164,6 +163,46 @@ def _append_line_column(line: str, route_line: str) -> str:
     """Append the observed route line as a stable human column."""
     value = route_line or "-"
     return f"{line}  {DIM}线路{NC} {value:<24s}"
+
+
+def _dedupe_check_targets(targets: list) -> list:
+    """Drop exact duplicate connectivity targets from multiple plugins.
+
+    Builtin plugins load before user plugins. Keep the first target's display
+    order, but merge an expected_proxy from a duplicate if the first one lacks
+    it, so a stale user plugin cannot remove route validation by accident.
+    """
+    out = []
+    seen = {}
+    for target in targets:
+        key = (getattr(target, "name", ""),
+               getattr(target, "url", ""),
+               getattr(target, "mode", ""))
+        if key in seen:
+            kept = seen[key]
+            expected = getattr(target, "expected_proxy", "")
+            if expected and not getattr(kept, "expected_proxy", ""):
+                kept.expected_proxy = expected
+            continue
+        seen[key] = target
+        out.append(target)
+    return out
+
+
+def _dedupe_outbound_probes(probes: list) -> list:
+    """Drop exact duplicate outbound probes from multiple plugins."""
+    out = []
+    seen = set()
+    for probe in probes:
+        key = (getattr(probe, "name", ""),
+               getattr(probe, "mode", ""),
+               getattr(probe, "url", ""),
+               getattr(probe, "extract_re", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(probe)
+    return out
 
 
 def _test_dns(desc: str, server: str, domain: str) -> tuple:
@@ -847,7 +886,8 @@ def cmd_check(engine, api: str, api_secret: str,
     # [4/4] 出口 IP 探测：从插件收集到的 probes 决定有哪些出口
     probes = []
     if registry is not None:
-        probes = registry.collect("check_outbound_probes", ctx={})
+        probes = _dedupe_outbound_probes(
+            registry.collect("check_outbound_probes", ctx={}))
     probe_ips: dict[str, str] = {p.name: "" for p in probes}
 
     # 临时常量：probes 在端口解析之前启动，所以这里用 config 直接拿
@@ -1104,7 +1144,8 @@ def cmd_check(engine, api: str, api_secret: str,
     ctx = {"corp_net": corp_net, "mode": mode, "engine": engine.name}
     targets = []
     if registry is not None:
-        targets = registry.collect("check_targets", ctx=ctx)
+        targets = _dedupe_check_targets(
+            registry.collect("check_targets", ctx=ctx))
 
     # 应用 only_when 过滤
     def _target_enabled(t):

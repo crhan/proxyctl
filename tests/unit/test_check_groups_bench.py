@@ -14,7 +14,7 @@ import json
 import pytest
 
 from proxyctl import check
-from proxyctl.core.plugin import OutboundProbe
+from proxyctl.core.plugin import CheckTarget, OutboundProbe
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -328,8 +328,7 @@ def test_target_uses_expected_proxy(fake_subprocess):
     ok, msg = check._target_uses_expected_proxy(
         "http://127.0.0.1:9090", "", "https://api.anthropic.com", "claude")
     assert ok is True
-    assert "claude" in msg
-    assert "SG-Residential-01" in msg
+    assert msg == ""
 
 
 def test_target_route_extracts_leaf_line(fake_subprocess):
@@ -352,6 +351,58 @@ def test_target_route_no_active_connection(fake_subprocess):
     route = check._target_route(
         "http://127.0.0.1:9090", "", "https://api.anthropic.com")
     assert route == {"found": False, "line": "?", "group": "", "chain": ""}
+
+
+def test_dedupe_check_targets_drops_exact_duplicates():
+    targets = [
+        CheckTarget(name="anthropic",
+                    url="https://api.anthropic.com/v1/models",
+                    mode="proxy",
+                    expected_proxy="claude"),
+        CheckTarget(name="anthropic",
+                    url="https://api.anthropic.com/v1/models",
+                    mode="proxy"),
+        CheckTarget(name="anthropic-alt",
+                    url="https://api.anthropic.com/v1/models",
+                    mode="proxy"),
+    ]
+    out = check._dedupe_check_targets(targets)
+    assert [target.name for target in out] == ["anthropic", "anthropic-alt"]
+    assert out[0].expected_proxy == "claude"
+
+
+def test_dedupe_check_targets_merges_expected_proxy_from_duplicate():
+    targets = [
+        CheckTarget(name="anthropic",
+                    url="https://api.anthropic.com/v1/models",
+                    mode="proxy"),
+        CheckTarget(name="anthropic",
+                    url="https://api.anthropic.com/v1/models",
+                    mode="proxy",
+                    expected_proxy="claude"),
+    ]
+    out = check._dedupe_check_targets(targets)
+    assert len(out) == 1
+    assert out[0].expected_proxy == "claude"
+
+
+def test_dedupe_outbound_probes_drops_exact_duplicates():
+    probes = [
+        OutboundProbe(name="direct", mode="direct",
+                      url="https://myip.ipip.net",
+                      extract_re=r"\d+\.\d+\.\d+\.\d+"),
+        OutboundProbe(name="direct", mode="direct",
+                      url="https://myip.ipip.net",
+                      extract_re=r"\d+\.\d+\.\d+\.\d+"),
+        OutboundProbe(name="direct", mode="proxy",
+                      url="https://myip.ipip.net",
+                      extract_re=r"\d+\.\d+\.\d+\.\d+"),
+    ]
+    out = check._dedupe_outbound_probes(probes)
+    assert [(probe.name, probe.mode) for probe in out] == [
+        ("direct", "direct"),
+        ("direct", "proxy"),
+    ]
 
 
 def test_target_uses_expected_proxy_mismatch(fake_subprocess):
