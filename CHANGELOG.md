@@ -50,6 +50,33 @@
   更窄（旧 OR → 新 AND），但单值场景下匹配范围反而更宽（不再依赖字段被拼接
   的顺序）。脚本里使用 `--query` 的用户请确认这一语义变化。
 
+## [0.5.8] — 2026-05-22
+
+### Fixed
+
+- **`proxyctl check` 的出口 IP 归属地补全不再依赖被测代理线路。**
+  第 4 阶段会直连查询已探测到的 IP 归属地，避免 `claude` 出口失败时影响
+  `direct` 或 `proxy` 的归属地显示。
+
+### Changed
+
+- **出口 IP 归属地补全现在并发执行。** `proxy` / `claude` / `direct`
+  的归属地查询互不阻塞，单个出口查询慢或失败不会拖慢其他出口的显示。
+
+## [0.5.7] — 2026-05-22
+
+### Changed
+
+- **`proxyctl check` 现在会显示 mihomo 规则实际引用的代理组。** 像
+  `claude` 这类不挂在默认 `proxy` 组下面、但被 `DOMAIN-SUFFIX,...,claude`
+  规则命中的业务组，会和 `proxy` 一起出现在代理组检查段，方便维护者从同一个
+  视图确认规则、组和节点状态。
+- **`proxyctl check` 现在会验证 Anthropic 连通性及 Claude 线路命中。**
+  连通性阶段新增 `anthropic` 检查，并在请求后通过本地 mihomo `/connections`
+  确认链路末端为 `claude`。
+- **出口 IP 探测现在覆盖 `proxy`、`claude`、`direct` 三类出口。** 第 4 阶段
+  会同时显示默认代理出口、Claude 规则出口和直连出口，方便确认分流是否生效。
+
 ## [0.5.6] — 2026-05-22
 
 ### Added
@@ -1026,7 +1053,14 @@ Env var `PROXYCTL_SUBSCRIPTION_PATH` 覆盖默认契约文件路径（测试用�
 - `cli.main()` 处理 `--help/-h/help` 后未 return，导致继续落入默认 else
   分支二次调用 `cmd_help()`，help 输出重复两次。
 
-[Unreleased]: https://github.com/crhan/proxyctl/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/crhan/proxyctl/compare/v0.5.8...HEAD
+[0.5.8]: https://github.com/crhan/proxyctl/compare/v0.5.7...v0.5.8
+[0.5.7]: https://github.com/crhan/proxyctl/compare/v0.5.6...v0.5.7
+[0.5.6]: https://github.com/crhan/proxyctl/compare/v0.5.5...v0.5.6
+[0.5.5]: https://github.com/crhan/proxyctl/compare/v0.5.4...v0.5.5
+[0.5.4]: https://github.com/crhan/proxyctl/compare/v0.5.3...v0.5.4
+[0.5.3]: https://github.com/crhan/proxyctl/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/crhan/proxyctl/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/crhan/proxyctl/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/crhan/proxyctl/compare/v0.4.7...v0.5.0
 [0.4.7]: https://github.com/crhan/proxyctl/compare/v0.4.6...v0.4.7

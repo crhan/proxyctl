@@ -76,6 +76,43 @@ def _test_url(url: str, desc: str, mode: str = "proxy", timeout: int = 8,
         return False, f"  {YELLOW}?{NC} {desc:<18s} {url:<44s} {YELLOW}{code}{NC}"
 
 
+def _api_connections(api_base: str, api_secret: str) -> list[dict]:
+    r = subprocess.run(
+        ["curl", "-s", "--noproxy", "*",
+         "-H", f"Authorization: Bearer {api_secret}",
+         f"{api_base.rstrip('/')}/connections"],
+        capture_output=True, text=True, timeout=2
+    )
+    try:
+        data = json.loads(r.stdout or "{}")
+    except Exception:
+        return []
+    conns = data.get("connections")
+    return conns if isinstance(conns, list) else []
+
+
+def _target_uses_expected_proxy(api_base: str, api_secret: str, url: str,
+                                expected_proxy: str) -> tuple[bool, str]:
+    host = urllib.parse.urlparse(url).hostname or ""
+    if not host or not expected_proxy:
+        return True, ""
+
+    for _ in range(3):
+        for conn in _api_connections(api_base, api_secret):
+            meta = conn.get("metadata") or {}
+            conn_host = meta.get("host") or ""
+            if conn_host != host and not conn_host.endswith("." + host):
+                continue
+            chains = conn.get("chains") or []
+            actual = chains[-1] if chains else ""
+            chain_str = " → ".join(reversed(chains)) if chains else "?"
+            if actual.lower() == expected_proxy.lower():
+                return True, f" via {chain_str}"
+            return False, f" expected {expected_proxy}, got {actual or '?'}"
+        time.sleep(0.2)
+    return False, f" expected {expected_proxy}, no active connection found"
+
+
 def _test_dns(desc: str, server: str, domain: str) -> tuple:
     """通用 DNS 可达性测试：dig @server domain（用于 CheckTarget mode='dns'）。
 
@@ -100,6 +137,73 @@ def _test_tcp(host: str, port: int, desc: str) -> tuple:
             return True,  f"  {GREEN}✓{NC} {desc:<18s} {addr:<44s} {GREEN}ok{NC}"
     except OSError:
         return False, f"  {RED}✗{NC} {desc:<18s} {addr:<44s} {RED}unreachable{NC}"
+
+
+def _rule_target_groups_from_config(config_path: str) -> list[str]:
+    """Return proxy groups that are used as mihomo rule targets.
+
+    `check` is a maintenance view: if a top-level rule can route traffic into a
+    group, that group should be visible even when it is not a child of `proxy`.
+    """
+    if not config_path or not os.path.isfile(config_path):
+        return []
+
+    try:
+        import yaml
+        with open(config_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception:
+        return []
+
+    if not isinstance(data, dict):
+        return []
+
+    group_names: set[str] = set()
+    for group in data.get("proxy-groups") or []:
+        if isinstance(group, dict) and isinstance(group.get("name"), str):
+            group_names.add(group["name"])
+
+    if not group_names:
+        return []
+
+    # Mihomo rule strings use comma-separated fields; the policy is normally
+    # the last field, except trailing options such as `no-resolve`.
+    option_tokens = {"no-resolve", "src", "dst", "in", "out"}
+    targets: list[str] = []
+    seen: set[str] = set()
+
+    def add_target(name: str) -> None:
+        if name in group_names and name not in seen:
+            seen.add(name)
+            targets.append(name)
+
+    for rule in data.get("rules") or []:
+        if isinstance(rule, str):
+            parts = [p.strip() for p in rule.split(",") if p.strip()]
+            for token in reversed(parts[1:]):
+                if token.lower() in option_tokens:
+                    continue
+                add_target(token)
+                break
+        elif isinstance(rule, dict):
+            for key in ("policy", "target", "proxy", "outbound"):
+                value = rule.get(key)
+                if isinstance(value, str):
+                    add_target(value)
+                    break
+
+    return targets
+
+
+def _merge_check_groups(base: list[str] | None, rule_targets: list[str]) -> list[str]:
+    """Merge plugin groups and config-derived rule target groups preserving order."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    for name in list(base or []) + list(rule_targets or []):
+        if name and name not in seen:
+            seen.add(name)
+            merged.append(name)
+    return merged
 
 
 def _proxy_groups_section(api_base: str, api_secret: str,
@@ -354,10 +458,13 @@ def _ipgeo(ip: str, cache_file: str, api_secret: str,
     env = {k: v for k, v in os.environ.items()
            if k not in ("http_proxy", "https_proxy", "all_proxy",
                         "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")}
+    # Geo lookup is metadata lookup for an already-known IP; it should not be
+    # routed through the proxy under test. In particular, users may route
+    # ipinfo.io itself through the claude group, so a claude outage must not
+    # hide the direct/proxy geo labels.
     r = subprocess.run(
-        ["curl", "-s", "--max-time", "6",
-         "--proxy", f"socks5h://127.0.0.1:{proxy_port}",
-         f"https://ipinfo.io/{ip}/json"],
+        ["curl", "-s", "--max-time", "6", "--noproxy", "*",
+         f"http://ip-api.com/json/{ip}?fields=status,countryCode,city,isp,org,query"],
         capture_output=True, text=True, env=env, timeout=10
     )
     if not r.stdout:
@@ -365,9 +472,9 @@ def _ipgeo(ip: str, cache_file: str, api_secret: str,
     try:
         d = json.loads(r.stdout)
         city    = d.get("city", "")
-        country = d.get("country", "")
-        org     = d.get("org", "")
-        if org:
+        country = d.get("countryCode") or d.get("country", "")
+        org     = d.get("isp") or d.get("org", "")
+        if org and _re_mod.match(r"^AS\d+\s+", org):
             parts = org.split(" ", 1)
             org = parts[1] if len(parts) > 1 else org
         loc = ",".join(filter(None, [city, country]))
@@ -909,6 +1016,10 @@ def cmd_check(engine, api: str, api_secret: str,
     groups = []
     if registry is not None:
         groups = registry.collect("check_groups")
+    groups = _merge_check_groups(
+        groups,
+        _rule_target_groups_from_config(getattr(engine, "config_file", "")),
+    )
     groups_data: list = []
     _proxy_groups_section(api, api_secret, groups=groups,
                           collect_into=groups_data if as_json else None)
@@ -975,6 +1086,15 @@ def cmd_check(engine, api: str, api_secret: str,
                 ok, line = _test_url(target.url, target.name,
                                      target.mode, target.timeout,
                                      proxy_port=proxy_port)
+                expected = getattr(target, "expected_proxy", "")
+                if ok and expected:
+                    route_ok, route_msg = _target_uses_expected_proxy(
+                        api, api_secret, target.url, expected)
+                    ok = route_ok
+                    if route_ok:
+                        line += f"  {GREEN}{route_msg}{NC}"
+                    else:
+                        line += f"  {RED}{route_msg}{NC}"
         except Exception as e:
             ok, line = False, f"  {RED}✗{NC} {target.name}  error: {e}"
         results[idx] = (line, ok)
@@ -1006,9 +1126,24 @@ def cmd_check(engine, api: str, api_secret: str,
     cache_file = os.path.join(sb_dir, ".ipgeo-cache")
     if not probes:
         print(f"  {YELLOW}—{NC} 无出口探测项")
+    geo_results: dict[str, str] = {p.name: "" for p in probes}
+    geo_threads = [
+        threading.Thread(
+            target=lambda p=probe: geo_results.__setitem__(
+                p.name,
+                _ipgeo(probe_ips.get(p.name, ""), cache_file, api_secret,
+                       proxy_port=proxy_port),
+            )
+        )
+        for probe in probes
+    ]
+    for t in geo_threads:
+        t.start()
+    for t in geo_threads:
+        t.join()
     for probe in probes:
         ip = probe_ips.get(probe.name, "")
-        geo = _ipgeo(ip, cache_file, api_secret, proxy_port=proxy_port)
+        geo = geo_results.get(probe.name, "")
         print(f"  {probe.name:<7s}{_fmt_ip(ip, geo)}")
         collector["stages"]["outbound_ip"][probe.name] = {
             "ip": ip, "geo": geo, "mode": getattr(probe, "mode", ""),

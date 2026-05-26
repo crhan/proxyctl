@@ -23,20 +23,26 @@ def test_connectivity_basic_targets():
     p = ConnectivityBasic()
     targets = p.check_targets({})
     names = {t.name for t in targets}
-    assert names == {"google", "github", "baidu"}
+    assert names == {"google", "github", "baidu", "anthropic"}
     modes = {t.name: t.mode for t in targets}
     assert modes["google"] == "proxy"
     assert modes["github"] == "proxy"
     assert modes["baidu"] == "direct"
+    expected = {t.name: t.expected_proxy for t in targets}
+    assert expected["anthropic"] == "claude"
 
 
-def test_connectivity_basic_probes_only_proxy_out():
-    """direct 探测留给用户插件，core 只提供 proxy 出口。"""
+def test_connectivity_basic_probes_cover_proxy_claude_direct():
     p = ConnectivityBasic()
     probes = p.check_outbound_probes({})
-    assert len(probes) == 1
-    assert probes[0].name == "proxy"
-    assert probes[0].mode == "proxy"
+    modes = {probe.name: probe.mode for probe in probes}
+    assert modes == {
+        "proxy": "proxy",
+        "claude": "proxy",
+        "direct": "direct",
+    }
+    direct = next(probe for probe in probes if probe.name == "direct")
+    assert direct.extract_re
 
 
 # ────────────────────────────────────────────────────────────────────────────

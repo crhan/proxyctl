@@ -40,6 +40,7 @@ class CheckTarget:
     url: str
     mode: str = "proxy"
     timeout: int = 8
+    expected_proxy: str = ""
     only_when: Optional[Callable[[dict], bool]] = None  # ctx -> bool，控制是否启用
 
 
