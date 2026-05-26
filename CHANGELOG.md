@@ -41,6 +41,11 @@
   历史连接数、出现过的进程列表。`build_report` 输出顶层新增 `history_status`
   字段记录是否加载成功、读取到几条事件，便于 JSON 消费方判断；human 视图
   在 traffic events 为空时一次性提示用户先跑 `proxyctl traffic watch`。
+- **`proxyctl check` 连通性面板新增实际线路列。** proxy 模式的 URL 探测
+  会从本地 Mihomo `/connections` 读取该站点实际命中的链路，并显示叶子节点
+  作为 `线路` 列；直连探测显示 `direct`，DNS/TCP 探测显示 `-`，拿不到活跃
+  连接时显示 `?`。JSON 输出中的每个 connectivity row 同步新增 `line` 和
+  `route_chain` 字段。
 
 ### Changed
 

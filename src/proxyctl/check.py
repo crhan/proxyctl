@@ -91,26 +91,79 @@ def _api_connections(api_base: str, api_secret: str) -> list[dict]:
     return conns if isinstance(conns, list) else []
 
 
-def _target_uses_expected_proxy(api_base: str, api_secret: str, url: str,
-                                expected_proxy: str) -> tuple[bool, str]:
+def _route_from_connections(conns: list[dict], host: str) -> dict:
+    """Find one Mihomo route for host and expose leaf line + policy group.
+
+    Mihomo reports chains from leaf node to policy group, for example
+    ``["TW-Residential-01", "residential-tw", "claude"]``. The human
+    "line" is the leaf node, not the policy group.
+    """
+    for conn in conns:
+        meta = conn.get("metadata") or {}
+        conn_host = meta.get("host") or ""
+        if conn_host != host and not conn_host.endswith("." + host):
+            continue
+        chains = [str(c) for c in (conn.get("chains") or []) if c]
+        return {
+            "found": True,
+            "line": chains[0] if chains else "?",
+            "group": chains[-1] if chains else "",
+            "chain": " → ".join(reversed(chains)) if chains else "?",
+        }
+    return {"found": False, "line": "?", "group": "", "chain": ""}
+
+
+def _target_route(api_base: str, api_secret: str, url: str) -> dict:
+    """Return the observed route for a URL from local Mihomo connections."""
     host = urllib.parse.urlparse(url).hostname or ""
-    if not host or not expected_proxy:
-        return True, ""
+    if not host:
+        return {"found": False, "line": "?", "group": "", "chain": ""}
 
     for _ in range(3):
-        for conn in _api_connections(api_base, api_secret):
-            meta = conn.get("metadata") or {}
-            conn_host = meta.get("host") or ""
-            if conn_host != host and not conn_host.endswith("." + host):
-                continue
-            chains = conn.get("chains") or []
-            actual = chains[-1] if chains else ""
-            chain_str = " → ".join(reversed(chains)) if chains else "?"
-            if actual.lower() == expected_proxy.lower():
-                return True, f" via {chain_str}"
-            return False, f" expected {expected_proxy}, got {actual or '?'}"
+        route = _route_from_connections(_api_connections(api_base, api_secret),
+                                        host)
+        if route.get("found"):
+            return route
         time.sleep(0.2)
-    return False, f" expected {expected_proxy}, no active connection found"
+    return {"found": False, "line": "?", "group": "", "chain": ""}
+
+
+def _route_matches_expected_proxy(route: dict,
+                                  expected_proxy: str) -> tuple[bool, str]:
+    """Validate an observed route's terminal policy group."""
+    if not expected_proxy:
+        return True, ""
+    if not route.get("found"):
+        return False, f" expected {expected_proxy}, no active connection found"
+
+    actual = str(route.get("group") or "")
+    chain = str(route.get("chain") or "?")
+    if actual.lower() == expected_proxy.lower():
+        return True, f" via {chain}"
+    return False, f" expected {expected_proxy}, got {actual or '?'}"
+
+
+def _target_uses_expected_proxy(api_base: str, api_secret: str, url: str,
+                                expected_proxy: str) -> tuple[bool, str]:
+    if not urllib.parse.urlparse(url).hostname or not expected_proxy:
+        return True, ""
+    return _route_matches_expected_proxy(
+        _target_route(api_base, api_secret, url), expected_proxy)
+
+
+def _connectivity_line_value(mode: str) -> str:
+    """Return the default route-line label for one check target mode."""
+    if mode == "direct":
+        return "direct"
+    if mode == "proxy":
+        return "?"
+    return "-"
+
+
+def _append_line_column(line: str, route_line: str) -> str:
+    """Append the observed route line as a stable human column."""
+    value = route_line or "-"
+    return f"{line}  {DIM}线路{NC} {value:<24s}"
 
 
 def _test_dns(desc: str, server: str, domain: str) -> tuple:
@@ -716,7 +769,7 @@ def _collect_fail_hints(collector: dict, *, dns_bad: bool, failed: bool) -> list
     if basic.get("daemon_up") is False:
         hints.append("engine not running")
 
-    # connectivity: 列表形式，每项 {name, url, ok, message}
+    # connectivity: 列表形式，每项 {name, url, mode, line, route_chain, ok, message}
     conn = stages.get("connectivity") or []
     failed_conns = [c.get("name", "?") for c in conn
                     if isinstance(c, dict) and not c.get("ok")]
@@ -1074,6 +1127,9 @@ def cmd_check(engine, api: str, api_secret: str,
     ready    = [threading.Event() for _ in targets]
 
     def _run_test(idx, target):
+        route_line = _connectivity_line_value(target.mode)
+        route_chain = ""
+        route_note = ""
         try:
             if target.mode == "dns":
                 # url 格式: dns:<server>:<domain>
@@ -1087,17 +1143,24 @@ def cmd_check(engine, api: str, api_secret: str,
                                      target.mode, target.timeout,
                                      proxy_port=proxy_port)
                 expected = getattr(target, "expected_proxy", "")
-                if ok and expected:
-                    route_ok, route_msg = _target_uses_expected_proxy(
-                        api, api_secret, target.url, expected)
-                    ok = route_ok
-                    if route_ok:
-                        line += f"  {GREEN}{route_msg}{NC}"
-                    else:
-                        line += f"  {RED}{route_msg}{NC}"
+                if target.mode == "proxy" and ok:
+                    route = _target_route(api, api_secret, target.url)
+                    route_line = str(route.get("line") or "?")
+                    route_chain = str(route.get("chain") or "")
+                    if expected:
+                        route_ok, route_msg = _route_matches_expected_proxy(
+                            route, expected)
+                        ok = route_ok
+                        if route_ok:
+                            route_note = f"  {GREEN}{route_msg}{NC}"
+                        else:
+                            route_note = f"  {RED}{route_msg}{NC}"
+            line = _append_line_column(line, route_line)
+            line += route_note
         except Exception as e:
             ok, line = False, f"  {RED}✗{NC} {target.name}  error: {e}"
-        results[idx] = (line, ok)
+            line = _append_line_column(line, route_line)
+        results[idx] = (line, ok, route_line, route_chain)
         ready[idx].set()
 
     if targets:
@@ -1106,7 +1169,7 @@ def cmd_check(engine, api: str, api_secret: str,
                 pool.submit(_run_test, idx, target)
             for idx in range(len(targets)):
                 ready[idx].wait()
-                line, ok = results[idx]
+                line, ok, route_line, route_chain = results[idx]
                 print(line)
                 if not ok:
                     fail = True
@@ -1114,6 +1177,8 @@ def cmd_check(engine, api: str, api_secret: str,
                     "name": targets[idx].name,
                     "url": targets[idx].url,
                     "mode": targets[idx].mode,
+                    "line": route_line,
+                    "route_chain": route_chain,
                     "ok": bool(ok),
                     "message": _strip_ansi(line),
                 })

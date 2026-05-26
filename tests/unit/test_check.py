@@ -120,6 +120,12 @@ def test_test_url_strips_proxy_env(monkeypatch, fake_subprocess):
     assert "http_proxy" not in captured_env
 
 
+def test_append_line_column_adds_route_line():
+    line = check._append_line_column("  ✓ google https://x 200", "日本1")
+    assert "线路" in line
+    assert "日本1" in line
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # _test_tcp：纯 socket 连接
 # ────────────────────────────────────────────────────────────────────────────

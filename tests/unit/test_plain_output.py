@@ -111,7 +111,7 @@ def test_audit_plain_main_path_emits_tsv(monkeypatch, fake_subprocess, capsys):
 
 # ── check --plain connectivity detail 字段名正确（回归 0.3.1 错位） ──────
 def test_check_plain_connectivity_uses_real_keys(capsys):
-    """check 的 connectivity collector 字段是 name/url/mode/ok/message，
+    """check 的 connectivity collector 字段是 name/url/mode/line/ok/message，
     plain 渲染必须用真实字段，不能用从未存在过的 target/http_code。
     回归：v0.3.0 引入 --plain 时用错字段，输出全是 None=X。"""
     from proxyctl import _io as _pc_io

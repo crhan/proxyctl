@@ -329,6 +329,29 @@ def test_target_uses_expected_proxy(fake_subprocess):
         "http://127.0.0.1:9090", "", "https://api.anthropic.com", "claude")
     assert ok is True
     assert "claude" in msg
+    assert "SG-Residential-01" in msg
+
+
+def test_target_route_extracts_leaf_line(fake_subprocess):
+    fake_subprocess.set_default(stdout=json.dumps({
+        "connections": [{
+            "metadata": {"host": "api.anthropic.com"},
+            "chains": ["TW-Residential-01", "residential-tw", "claude"],
+        }]
+    }))
+    route = check._target_route(
+        "http://127.0.0.1:9090", "", "https://api.anthropic.com/v1/models")
+    assert route["found"] is True
+    assert route["line"] == "TW-Residential-01"
+    assert route["group"] == "claude"
+    assert route["chain"] == "claude → residential-tw → TW-Residential-01"
+
+
+def test_target_route_no_active_connection(fake_subprocess):
+    fake_subprocess.set_default(stdout=json.dumps({"connections": []}))
+    route = check._target_route(
+        "http://127.0.0.1:9090", "", "https://api.anthropic.com")
+    assert route == {"found": False, "line": "?", "group": "", "chain": ""}
 
 
 def test_target_uses_expected_proxy_mismatch(fake_subprocess):
