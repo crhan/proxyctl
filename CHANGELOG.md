@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.5.9] — 2026-05-27
+
 ### Added
 
 - **`proxyctl connections` 支持位置参数关键字 + 跨字段智能匹配。**
