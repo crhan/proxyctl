@@ -149,6 +149,20 @@ def test_append_route_column_falls_back_to_route_line():
     assert "direct" in line
 
 
+def test_append_route_column_aligns_via_by_visible_width():
+    short_status = check._append_route_column(
+        "  ✓ corp-dns           30.64.127.127                                ok",
+        "-",
+    )
+    long_status = check._append_route_column(
+        "  ✓ anthropic          https://api.anthropic.com/v1/models          401",
+        "TW-Residential-01",
+        "claude → TW-Residential-01",
+    )
+    assert check._strip_ansi(short_status).index("via") == \
+        check._strip_ansi(long_status).index("via")
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # _test_tcp：纯 socket 连接
 # ────────────────────────────────────────────────────────────────────────────

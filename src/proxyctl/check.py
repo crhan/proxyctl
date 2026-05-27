@@ -35,6 +35,11 @@ def _strip_ansi(s: str) -> str:
     return _ANSI_RE.sub("", s).strip()
 
 
+def _visible_len(s: str) -> int:
+    """Return printable width for simple check output alignment."""
+    return len(_ANSI_RE.sub("", s))
+
+
 def _port_listening(port: int) -> bool:
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=0.5):
@@ -174,7 +179,8 @@ def _append_route_column(line: str, route_line: str,
                          route_chain: str = "") -> str:
     """Append the observed route in the same style as Mihomo chains."""
     value = route_chain or route_line or "-"
-    return f"{line}  {DIM}via{NC} {value:<32s}"
+    pad = max(2, 74 - _visible_len(line))
+    return f"{line}{' ' * pad}{DIM}via{NC} {value:<32s}"
 
 
 def _dedupe_check_targets(targets: list) -> list:
