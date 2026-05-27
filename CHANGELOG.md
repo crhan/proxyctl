@@ -41,11 +41,11 @@
   历史连接数、出现过的进程列表。`build_report` 输出顶层新增 `history_status`
   字段记录是否加载成功、读取到几条事件，便于 JSON 消费方判断；human 视图
   在 traffic events 为空时一次性提示用户先跑 `proxyctl traffic watch`。
-- **`proxyctl check` 连通性面板新增实际线路列。** proxy 模式的 URL 探测
-  会从本地 Mihomo `/connections` 读取该站点实际命中的链路，并显示叶子节点
-  作为 `线路` 列；直连探测显示 `direct`，DNS/TCP 探测显示 `-`，拿不到活跃
-  连接时显示 `?`。JSON 输出中的每个 connectivity row 同步新增 `line` 和
-  `route_chain` 字段。
+- **`proxyctl check` 连通性面板新增实际路由显示。** proxy 模式的 URL 探测
+  会从本地 Mihomo `/connections` 读取该站点实际命中的链路，并在人类输出中
+  显示为 `via <group> → <leaf>`；直连探测显示 `via direct`，DNS/TCP 探测
+  显示 `via -`，拿不到活跃连接时显示 `via ?`。JSON 输出中的每个
+  connectivity row 同步新增 `line` 和 `route_chain` 字段。
 - **`proxyctl check` 内置连通性基线新增 OpenAI API 探测。**
   默认站点现在包含 `openai`（`https://api.openai.com/v1/models`），并将
   `anthropic` 从根路径改为 `https://api.anthropic.com/v1/models`，让 AI
@@ -58,9 +58,9 @@
   现在与位置参数共用 AND + 跨字段独立判定逻辑。多值场景下结果可能比旧版本
   更窄（旧 OR → 新 AND），但单值场景下匹配范围反而更宽（不再依赖字段被拼接
   的顺序）。脚本里使用 `--query` 的用户请确认这一语义变化。
-- **`proxyctl check` 连通性成功行不再重复打印 `via ...`。**
-  成功命中期望代理组时，人类输出只保留 `线路 <leaf>` 列；完整链路仍保留在
-  JSON 的 `route_chain` 字段中。只有期望组不匹配时才追加错误说明。
+- **`proxyctl check` 连通性成功行统一使用 `via ...` 表达。**
+  成功命中期望代理组时，人类输出不再同时显示 `线路 <leaf>` 和 `via ...`；
+  所有连通性行统一保留 `via <route>`。只有期望组不匹配时才追加错误说明。
 - **`proxyctl check` 会去重内置插件与用户插件提供的完全相同探测项。**
   当旧用户插件仍声明与内置插件相同的 connectivity target 或 outbound probe
   时，人类输出不再重复显示同一站点或同一出口 IP；不同 URL 或不同 mode 的

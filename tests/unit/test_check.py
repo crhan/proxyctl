@@ -120,10 +120,21 @@ def test_test_url_strips_proxy_env(monkeypatch, fake_subprocess):
     assert "http_proxy" not in captured_env
 
 
-def test_append_line_column_adds_route_line():
-    line = check._append_line_column("  ✓ google https://x 200", "日本1")
-    assert "线路" in line
-    assert "日本1" in line
+def test_append_route_column_prefers_route_chain():
+    line = check._append_route_column(
+        "  ✓ anthropic https://x 401",
+        "TW-Residential-01",
+        "claude → TW-Residential-01",
+    )
+    assert "via" in line
+    assert "claude → TW-Residential-01" in line
+    assert "线路" not in line
+
+
+def test_append_route_column_falls_back_to_route_line():
+    line = check._append_route_column("  ✓ baidu https://x 200", "direct")
+    assert "via" in line
+    assert "direct" in line
 
 
 # ────────────────────────────────────────────────────────────────────────────

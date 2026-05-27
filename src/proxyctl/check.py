@@ -159,10 +159,11 @@ def _connectivity_line_value(mode: str) -> str:
     return "-"
 
 
-def _append_line_column(line: str, route_line: str) -> str:
-    """Append the observed route line as a stable human column."""
-    value = route_line or "-"
-    return f"{line}  {DIM}线路{NC} {value:<24s}"
+def _append_route_column(line: str, route_line: str,
+                         route_chain: str = "") -> str:
+    """Append the observed route in the same style as Mihomo chains."""
+    value = route_chain or route_line or "-"
+    return f"{line}  {DIM}via{NC} {value:<32s}"
 
 
 def _dedupe_check_targets(targets: list) -> list:
@@ -1196,11 +1197,11 @@ def cmd_check(engine, api: str, api_secret: str,
                             route_note = f"  {GREEN}{route_msg}{NC}"
                         else:
                             route_note = f"  {RED}{route_msg}{NC}"
-            line = _append_line_column(line, route_line)
+            line = _append_route_column(line, route_line, route_chain)
             line += route_note
         except Exception as e:
             ok, line = False, f"  {RED}✗{NC} {target.name}  error: {e}"
-            line = _append_line_column(line, route_line)
+            line = _append_route_column(line, route_line, route_chain)
         results[idx] = (line, ok, route_line, route_chain)
         ready[idx].set()
 
