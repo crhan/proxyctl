@@ -49,6 +49,7 @@ def test_test_url_proxy_mode_builds_socks(fake_subprocess):
     ok, line = check._test_url("https://x", "google", mode="proxy")
     assert ok
     last_cmd = fake_subprocess.calls[-1]
+    assert "--http1.1" in last_cmd
     assert "--proxy" in last_cmd
     assert "socks5h://127.0.0.1:7890" in last_cmd
     assert "200" in line
@@ -89,6 +90,17 @@ def test_test_url_empty_stdout_means_failure(fake_subprocess):
     fake_subprocess.set_default(stdout="")
     ok, _ = check._test_url("https://x", "x")
     assert ok is False
+
+
+def test_test_url_000_includes_curl_error(fake_subprocess):
+    fake_subprocess.set_default(
+        stdout="000",
+        stderr=("curl: (16) Remote peer returned unexpected data while we "
+                "expected SETTINGS frame.\n"),
+    )
+    ok, line = check._test_url("https://x", "x")
+    assert ok is False
+    assert "Remote peer returned unexpected data" in line
 
 
 def test_test_url_unknown_code(fake_subprocess):

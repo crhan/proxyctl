@@ -66,6 +66,13 @@
   时，人类输出不再重复显示同一站点或同一出口 IP；不同 URL 或不同 mode 的
   同名自定义探测项仍会保留。
 
+### Fixed
+
+- **`proxyctl check` 的 URL 连通性探测改用 HTTP/1.1，避免 Discord 一类站点
+  因 HTTP/2 协商异常被误报为 timeout。** 当 `curl` 返回 HTTP code `000`
+  时，人类输出现在会显示 stderr 中的简短错误原因；没有 stderr 时仍显示
+  `timeout`。
+
 ## [0.5.8] — 2026-05-22
 
 ### Fixed

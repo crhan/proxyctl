@@ -54,7 +54,7 @@ def _test_url(url: str, desc: str, mode: str = "proxy", timeout: int = 8,
     env = {k: v for k, v in os.environ.items()
            if k not in ("http_proxy", "https_proxy", "all_proxy",
                         "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")}
-    cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+    cmd = ["curl", "--http1.1", "-s", "-o", "/dev/null", "-w", "%{http_code}",
            "--max-time", str(timeout)]
     if mode == "proxy":
         cmd += ["--proxy", f"socks5h://127.0.0.1:{proxy_port}"]
@@ -66,7 +66,8 @@ def _test_url(url: str, desc: str, mode: str = "proxy", timeout: int = 8,
     code = r.stdout.strip()
 
     if code == "000" or not code:
-        return False, f"  {RED}✗{NC} {desc:<18s} {url:<44s} {RED}timeout{NC}"
+        reason = _curl_failure_reason(r.stderr)
+        return False, f"  {RED}✗{NC} {desc:<18s} {url:<44s} {RED}{reason}{NC}"
     elif code.startswith(("2", "3", "4")):
         return True,  f"  {GREEN}✓{NC} {desc:<18s} {url:<44s} {GREEN}{code}{NC}"
     elif code.startswith("5"):
@@ -74,6 +75,16 @@ def _test_url(url: str, desc: str, mode: str = "proxy", timeout: int = 8,
         return True,  f"  {YELLOW}✓{NC} {desc:<18s} {url:<44s} {YELLOW}{code} (server error){NC}"
     else:
         return False, f"  {YELLOW}?{NC} {desc:<18s} {url:<44s} {YELLOW}{code}{NC}"
+
+
+def _curl_failure_reason(stderr: str) -> str:
+    """Return a concise curl failure reason for HTTP code 000."""
+    text = (stderr or "").strip()
+    if not text:
+        return "timeout"
+    first = text.splitlines()[0].strip()
+    first = first.removeprefix("curl: ").strip()
+    return first[:120] if first else "timeout"
 
 
 def _api_connections(api_base: str, api_secret: str) -> list[dict]:
