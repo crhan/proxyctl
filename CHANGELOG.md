@@ -9,6 +9,38 @@
 
 - **`proxyctl check` 连通性面板的 `via` 列现在按可见宽度对齐。**
   彩色状态码和 `ok` / `200` / `401` 这类不同长度状态不再导致 `via` 列左右漂移。
+- **`proxyctl check` 连通性 `via` 列不再普遍显示 `?`。** v0.5.9 引入的
+  反查是在 `curl` 测试**结束之后**才查 mihomo `/connections`，而短连接
+  curl 一退出连接就从连接表移除，几乎抓不到自己刚发的请求 —— 只有恰好
+  有外部进程在持续访问同一 host（如 Claude Code 长连 `api.anthropic.com`）
+  时才会被"蹭"到显示出来。本版改为在 curl 测试**进行中**并发轮询
+  `/connections`，趁连接还活着抓到真实链路；抓不到时回退到既有的外部
+  连接探测；都没找到时显示 `via —`（em dash 友好占位）而非 `via ?`。
+- **内置 `connectivity-basic` 插件不再 hardcode 个人代理组名 `claude`。**
+  原先 `anthropic` target 写死了 `expected_proxy="claude"`，且出口探测里
+  写死了 `OutboundProbe(name="claude", …)`，导致没有 `claude` 组的用户
+  跑 `check` 会被误判 `expected claude, got …` 且出口 IP 段多一行无意义
+  的 `claude`。命名组校验和命名出口探测属本机特例，请在
+  `~/.config/proxyctl/plugins/` 的用户插件里追加。
+- **`proxyctl check` 出口 IP 不再出现同名 `direct` 行重复。** 旧的去重
+  key 把 `url` 也算进比较，内置插件的 `https://myip.ipip.net` 和用户
+  插件的 `http://myip.ipip.net` 仅协议不同就漏了去重 → 同一出口显示
+  两行。本版按 `(name, mode)` 折叠：同名同模式视为同一出口行，后加载的
+  用户插件覆盖内置同名探测（本机特例优先），显示顺序保持稳定。
+- **`proxyctl audit` 现在能识别任意命名代理组下的 `DOMAIN-SUFFIX` 规则。**
+  `_load_rules` 原本只把 `outbound ∈ {direct, proxy, claude}` 三个名字
+  归类，其它命名组（如 `residential-tw` / `jp-streaming` 等）的规则被
+  完全忽略 → audit 统计偏低、推荐误报。本版改为"非 `direct`、非
+  `block`/`reject` 即视为代理类"，任何命名代理组的规则都正确进入
+  `proxy_suffixes`。
+
+### Changed
+
+- `_connectivity_line_value("proxy")` 默认值从 `"?"` 改为 `"—"`（em dash），
+  仅影响 `check` 连通性表 `via` 列**反查失败时**的占位字符。JSON 字段
+  `data.stages.connectivity[].line` 在该场景下从字符串 `"?"` 变为 `"—"`；
+  消费方判断"是否有真实链路"建议改用 `route_chain` 非空，而不要 string-match
+  这个占位。
 
 ## [0.5.9] — 2026-05-27
 

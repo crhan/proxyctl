@@ -32,20 +32,24 @@ def test_connectivity_basic_targets():
     urls = {t.name: t.url for t in targets}
     assert urls["openai"] == "https://api.openai.com/v1/models"
     assert urls["anthropic"] == "https://api.anthropic.com/v1/models"
+    # 通用基线插件不得 hardcode 个人代理组名（如 "claude"）作为 expected_proxy；
+    # 命名组校验是本机特例，属用户插件。
     expected = {t.name: t.expected_proxy for t in targets}
     assert expected["openai"] == ""
-    assert expected["anthropic"] == "claude"
+    assert expected["anthropic"] == ""
+    assert all(t.expected_proxy == "" for t in targets)
 
 
-def test_connectivity_basic_probes_cover_proxy_claude_direct():
+def test_connectivity_basic_probes_cover_proxy_direct_only():
+    """内置出口探测只含通用的 proxy / direct 两路，不含个人命名组（如 claude）。"""
     p = ConnectivityBasic()
     probes = p.check_outbound_probes({})
     modes = {probe.name: probe.mode for probe in probes}
     assert modes == {
         "proxy": "proxy",
-        "claude": "proxy",
         "direct": "direct",
     }
+    assert "claude" not in modes
     direct = next(probe for probe in probes if probe.name == "direct")
     assert direct.extract_re
 

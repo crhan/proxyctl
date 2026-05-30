@@ -167,11 +167,15 @@ def _target_uses_expected_proxy(api_base: str, api_secret: str, url: str,
 
 
 def _connectivity_line_value(mode: str) -> str:
-    """Return the default route-line label for one check target mode."""
+    """Return the default route-line label for one check target mode.
+
+    proxy 模式默认值是 em dash ("—") 而非问号——含义是"反查不到活动连接"，
+    比裸 "?" 信息密度更高、视觉更安静。真实反查命中时会被实际链路覆盖。
+    """
     if mode == "direct":
         return "direct"
     if mode == "proxy":
-        return "?"
+        return "—"
     return "-"
 
 
@@ -208,17 +212,23 @@ def _dedupe_check_targets(targets: list) -> list:
 
 
 def _dedupe_outbound_probes(probes: list) -> list:
-    """Drop exact duplicate outbound probes from multiple plugins."""
-    out = []
-    seen = set()
+    """Collapse outbound probes that share a (name, mode) identity.
+
+    A probe answers one question — "what IP does this egress show?" — so two
+    probes with the same ``name`` and ``mode`` are the same egress row even if
+    they hit different URLs (e.g. a builtin ``https://myip.ipip.net`` vs a user
+    plugin's ``http://`` variant). User plugins load after builtins, so the
+    later probe wins on conflict (本机特例覆盖通用基线), while the original
+    display position is preserved so row order stays stable across runs.
+    """
+    out: list = []
+    index: dict = {}  # (name, mode) -> position in out
     for probe in probes:
-        key = (getattr(probe, "name", ""),
-               getattr(probe, "mode", ""),
-               getattr(probe, "url", ""),
-               getattr(probe, "extract_re", ""))
-        if key in seen:
+        key = (getattr(probe, "name", ""), getattr(probe, "mode", ""))
+        if key in index:
+            out[index[key]] = probe  # later (user) probe overrides earlier
             continue
-        seen.add(key)
+        index[key] = len(out)
         out.append(probe)
     return out
 
@@ -1198,14 +1208,49 @@ def cmd_check(engine, api: str, api_secret: str,
                 parts = target.url.removeprefix("tcp:").rsplit(":", 1)
                 ok, line = _test_tcp(parts[0], int(parts[1]), target.name)
             else:
+                # proxy 模式：在 curl 测试**进行中**并发轮询 mihomo 的
+                # /connections，趁连接还活着抓到自己请求走的链路。
+                # curl 短连接测完即从 mihomo 连接表移除，如果等 curl 结束
+                # 后再查（旧实现），几乎抓不到自己刚发的请求 —— 这是
+                # google/github/openai 的 via 列长期显示 "?" 的根因。
+                host = urllib.parse.urlparse(target.url).hostname or ""
+                captured: dict = {}
+                stop_evt = threading.Event()
+                poller = None
+                if target.mode == "proxy" and host:
+                    def _poll():
+                        # Event.wait(timeout) 在 set 时立即返回 True，
+                        # 不会被 sleep 拖住停止响应。
+                        while not stop_evt.is_set():
+                            r = _route_from_connections(
+                                _api_connections(api, api_secret), host)
+                            if r.get("found"):
+                                captured.update(r)
+                                return
+                            stop_evt.wait(0.08)
+                    poller = threading.Thread(target=_poll, daemon=True)
+                    poller.start()
+
                 ok, line = _test_url(target.url, target.name,
                                      target.mode, target.timeout,
                                      proxy_port=proxy_port)
+
+                if poller is not None:
+                    stop_evt.set()
+                    poller.join(timeout=0.5)
+
                 expected = getattr(target, "expected_proxy", "")
                 if target.mode == "proxy" and ok:
-                    route = _target_route(api, api_secret, target.url)
-                    route_line = str(route.get("line") or "?")
-                    route_chain = str(route.get("chain") or "")
+                    # 优先取 curl 期间并发抓到的；抓不到时回退 _target_route，
+                    # 它可能从外部进程的活动长连接里命中（如用户的浏览器/
+                    # Claude Code 正在访问同一 host）。两者都没找到时
+                    # route_line 保留默认的 "—" 占位（_connectivity_line_value
+                    # 提供的友好兜底），而不是裸 "?"。
+                    route = (captured if captured.get("found")
+                             else _target_route(api, api_secret, target.url))
+                    if route.get("found"):
+                        route_line = str(route.get("line") or route_line)
+                        route_chain = str(route.get("chain") or "")
                     if expected:
                         route_ok, route_msg = _route_matches_expected_proxy(
                             route, expected)

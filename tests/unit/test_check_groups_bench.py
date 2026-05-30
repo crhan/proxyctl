@@ -386,7 +386,8 @@ def test_dedupe_check_targets_merges_expected_proxy_from_duplicate():
     assert out[0].expected_proxy == "claude"
 
 
-def test_dedupe_outbound_probes_drops_exact_duplicates():
+def test_dedupe_outbound_probes_collapses_by_name_mode():
+    # 同 (name, mode) 视为同一出口行；不同 mode 各占一行。
     probes = [
         OutboundProbe(name="direct", mode="direct",
                       url="https://myip.ipip.net",
@@ -403,6 +404,34 @@ def test_dedupe_outbound_probes_drops_exact_duplicates():
         ("direct", "direct"),
         ("direct", "proxy"),
     ]
+
+
+def test_dedupe_outbound_probes_collapses_http_vs_https():
+    # builtin 'direct' (https) 与 user plugin 'direct' (http) 只差协议，
+    # 是同一出口探测，必须折叠成一行——这是出口 IP 重复显示的真实根因。
+    builtin = OutboundProbe(name="direct", mode="direct",
+                            url="https://myip.ipip.net",
+                            extract_re=r"\d+\.\d+\.\d+\.\d+")
+    user = OutboundProbe(name="direct", mode="direct",
+                         url="http://myip.ipip.net",
+                         extract_re=r"\d+\.\d+\.\d+\.\d+")
+    out = check._dedupe_outbound_probes([builtin, user])
+    assert len(out) == 1
+    # 用户插件后加载，应覆盖内置（本机特例优先），但显示位置不变。
+    assert out[0].url == "http://myip.ipip.net"
+
+
+def test_dedupe_outbound_probes_user_overrides_builtin_preserves_order():
+    # builtin proxy/direct 先加载，user 覆盖 proxy 探测；顺序保持 proxy, direct。
+    probes = [
+        OutboundProbe(name="proxy", mode="proxy", url="https://api.ipify.org"),
+        OutboundProbe(name="direct", mode="direct", url="https://myip.ipip.net"),
+        OutboundProbe(name="proxy", mode="proxy", url="https://ifconfig.me/ip"),
+    ]
+    out = check._dedupe_outbound_probes(probes)
+    assert [(p.name, p.mode) for p in out] == [("proxy", "proxy"), ("direct", "direct")]
+    proxy = next(p for p in out if p.name == "proxy")
+    assert proxy.url == "https://ifconfig.me/ip"
 
 
 def test_target_uses_expected_proxy_mismatch(fake_subprocess):

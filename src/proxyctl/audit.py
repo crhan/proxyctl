@@ -180,8 +180,18 @@ def _is_covered(host: str, suffix_set: set) -> bool:
     return any(".".join(parts[i:]) in suffix_set for i in range(len(parts)))
 
 
+_AUDIT_DENY_OUTBOUNDS = {"block", "reject"}
+
+
 def _load_rules() -> tuple:
-    """从双 config 读取 direct/proxy 域名后缀规则集。"""
+    """从双 config 读取 direct/proxy 域名后缀规则集。
+
+    分类策略：``direct`` outbound 归 direct；``block`` / ``reject`` 忽略；
+    其它任意 outbound 名（用户的命名组如 ``proxy`` / ``residential-tw`` /
+    个人命名组等）一律视为"代理类"，归入 ``proxy_suffixes``。
+    这里**不 hardcode 任何具体的代理组名**——通用基线插件和 audit 都不
+    应假设用户配置里有某个特定名字的组。
+    """
     direct_suffixes: set = set()
     proxy_suffixes: set = set()
 
@@ -189,12 +199,15 @@ def _load_rules() -> tuple:
     try:
         cfg = json.load(open(SB_CONFIG))
         for rule in cfg.get("route", {}).get("rules", []):
-            ob = rule.get("outbound", "")
+            ob = (rule.get("outbound") or "").strip()
+            if not ob:
+                continue
+            ob_lc = ob.lower()
             for s in rule.get("domain_suffix", []):
                 s = s.lstrip(".")
-                if ob == "direct":
+                if ob_lc == "direct":
                     direct_suffixes.add(s)
-                elif ob in ("proxy", "claude"):
+                elif ob_lc not in _AUDIT_DENY_OUTBOUNDS:
                     proxy_suffixes.add(s)
     except Exception:
         pass
@@ -202,13 +215,17 @@ def _load_rules() -> tuple:
     # mihomo YAML (文本扫描，无需解析完整 YAML)
     try:
         for line in open(MH_CONFIG):
-            m = re.match(r'\s*-\s+DOMAIN-SUFFIX,([^,]+),(DIRECT|proxy|claude)', line, re.I)
-            if m:
-                dom, target = m.group(1), m.group(2)
-                if target.upper() == "DIRECT":
-                    direct_suffixes.add(dom)
-                else:
-                    proxy_suffixes.add(dom)
+            # group(2) 取第一个 outbound 段（到下一个逗号或空白），
+            # 避免把 "proxy,no-resolve" 整体当作 outbound 名。
+            m = re.match(r'\s*-\s+DOMAIN-SUFFIX,([^,]+),([^,\s]+)', line, re.I)
+            if not m:
+                continue
+            dom, target = m.group(1), m.group(2)
+            target_lc = target.lower()
+            if target_lc == "direct":
+                direct_suffixes.add(dom)
+            elif target_lc not in _AUDIT_DENY_OUTBOUNDS:
+                proxy_suffixes.add(dom)
     except Exception:
         pass
 

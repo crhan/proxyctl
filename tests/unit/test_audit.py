@@ -239,6 +239,41 @@ def test_load_rules_robust_to_missing_configs(tmp_path: Path, monkeypatch):
     assert proxy == set()
 
 
+def test_load_rules_treats_any_named_outbound_as_proxy(tmp_path: Path, monkeypatch):
+    """audit 不应 hardcode 某个具体代理组名（如 'claude'）：任意非 direct/
+    非 block/reject 的 outbound 名都应归 proxy_suffixes。"""
+    sb_cfg = tmp_path / "sb.json"
+    sb_cfg.write_text(json.dumps({
+        "route": {"rules": [
+            {"outbound": "direct", "domain_suffix": ["baidu.com"]},
+            {"outbound": "claude", "domain_suffix": ["anthropic.com"]},
+            {"outbound": "residential-tw", "domain_suffix": ["chatgpt.com"]},
+            {"outbound": "jp-streaming", "domain_suffix": ["netflix.com"]},
+            {"outbound": "reject", "domain_suffix": ["ad.example"]},
+            {"outbound": "block", "domain_suffix": ["malware.example"]},
+        ]}
+    }))
+    mh_cfg = tmp_path / "mh.yaml"
+    mh_cfg.write_text(
+        "rules:\n"
+        "  - DOMAIN-SUFFIX,gov.cn,DIRECT\n"
+        "  - DOMAIN-SUFFIX,openai.com,jp-streaming,no-resolve\n"
+        "  - DOMAIN-SUFFIX,anthropic.com,residential-sg\n"
+        "  - DOMAIN-SUFFIX,ad.example,REJECT\n"
+    )
+    monkeypatch.setattr(audit, "SB_CONFIG", str(sb_cfg))
+    monkeypatch.setattr(audit, "MH_CONFIG", str(mh_cfg))
+
+    direct, proxy = audit._load_rules()
+    assert direct == {"baidu.com", "gov.cn"}
+    # 各类命名组(claude/residential-*/jp-*) 都进 proxy_suffixes，
+    # block/reject 被排除。
+    assert proxy == {"anthropic.com", "chatgpt.com", "netflix.com",
+                     "openai.com"}
+    assert "ad.example" not in proxy
+    assert "malware.example" not in proxy
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # _apply_to_configs: 写入双 config
 # ────────────────────────────────────────────────────────────────────────────
