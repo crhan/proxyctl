@@ -5,6 +5,16 @@
 
 ## [Unreleased]
 
+## [0.5.11] — 2026-05-31
+
+### Fixed
+
+- **`proxyctl trace` 的规则预测现在尊重 `no-resolve` 标志。**
+  域名经 HTTP 代理 / fake-ip 连接时，带 `no-resolve` 的 IP 规则（如
+  `IP-CIDR,100.64.0.0/10,DIRECT,no-resolve`）会被引擎跳过；`[2/4] 规则匹配`
+  不再误报命中这类规则，预测出口与 `[4/4]` 实际链路一致。命中其他规则时，
+  会提示有哪些 `no-resolve` IP 规则因当前连接为域名而被跳过。
+
 ## [0.5.10] — 2026-05-30
 
 ### Fixed
