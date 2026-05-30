@@ -121,6 +121,72 @@ def test_section_rules_skips_unsupported_types(monkeypatch):
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# no-resolve IP 规则在域名连接下的跳过逻辑
+# ────────────────────────────────────────────────────────────────────────────
+
+def test_section_rules_noresolve_skipped_on_domain(monkeypatch, capsys):
+    """域名连接（noresolve_can_match=False）下，no-resolve 的 IP 规则被跳过，落兜底。"""
+    _mock_rules(monkeypatch, [
+        {"type": "IPCIDR", "payload": "100.64.0.0/10", "proxy": "DIRECT", "index": 1},
+        {"type": "Match", "payload": "", "proxy": "proxy", "index": 2},
+    ])
+    rule, proxy = trace._section_rules(
+        "home.ts.net", ["100.110.226.97"], "x", "y",
+        noresolve_can_match=False, noresolve_payloads={"100.64.0.0/10"},
+    )
+    # IP 落在网段内，但 no-resolve + 域名连接 → 跳过 → 命中 Match
+    assert proxy == "proxy"
+    out = capsys.readouterr().out
+    assert "no-resolve" in out
+
+
+def test_section_rules_noresolve_matches_when_ip_present(monkeypatch):
+    """连接带真实 IP（noresolve_can_match=True，如 TUN 模式 / 目标即 IP）时正常命中。"""
+    _mock_rules(monkeypatch, [
+        {"type": "IPCIDR", "payload": "100.64.0.0/10", "proxy": "DIRECT", "index": 1},
+        {"type": "Match", "payload": "", "proxy": "proxy", "index": 2},
+    ])
+    rule, proxy = trace._section_rules(
+        "100.110.226.97", ["100.110.226.97"], "x", "y",
+        noresolve_can_match=True, noresolve_payloads={"100.64.0.0/10"},
+    )
+    assert proxy == "DIRECT"
+
+
+def test_section_rules_noresolve_default_backward_compat(monkeypatch):
+    """默认 noresolve_can_match=True，不传 payloads → 老行为不变（IP 规则照常命中）。"""
+    _mock_rules(monkeypatch, [
+        {"type": "IPCIDR", "payload": "100.64.0.0/10", "proxy": "DIRECT", "index": 1},
+    ])
+    rule, proxy = trace._section_rules("x", ["100.110.226.97"], "x", "y")
+    assert proxy == "DIRECT"
+
+
+def test_load_noresolve_payloads(tmp_path):
+    """从 mihomo 配置 rules 段解析出带 no-resolve 的 IP payload。"""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "dns:\n"
+        "  enable: true\n"
+        "rules:\n"
+        "- DOMAIN-SUFFIX,ts.net,DIRECT\n"
+        "- IP-CIDR,100.64.0.0/10,DIRECT,no-resolve\n"
+        "- IP-CIDR,8.8.8.8/32,proxy\n"
+        "- IP-CIDR6,fd00::/8,DIRECT,no-resolve\n"
+        "- MATCH,proxy\n"
+        "proxies:\n"
+        "- name: x\n"
+    )
+    payloads = trace._load_noresolve_payloads(str(cfg))
+    assert payloads == {"100.64.0.0/10", "fd00::/8"}
+
+
+def test_load_noresolve_payloads_missing_file():
+    """配置文件不存在时返回空集合，不抛。"""
+    assert trace._load_noresolve_payloads("/nonexistent/config.yaml") == set()
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # _section_connectivity: stdout 解析
 # ────────────────────────────────────────────────────────────────────────────
 

@@ -93,6 +93,52 @@ def _is_ip(s: str) -> bool:
         return False
 
 
+def _cidr_contains_any(cidr: str, ips: list) -> bool:
+    """resolved_ips 里是否有任一 IP 落在 cidr 网段内。"""
+    try:
+        net = ipaddress.ip_network(cidr, strict=False)
+    except ValueError:
+        return False
+    for ip in ips:
+        try:
+            if ipaddress.ip_address(ip) in net:
+                return True
+        except ValueError:
+            pass
+    return False
+
+
+def _load_noresolve_payloads(config_path: str = None) -> set:
+    """读取 mihomo 配置 rules 段，返回带 no-resolve 的 IP 规则 payload 集合。
+
+    Clash /rules API 不暴露 no-resolve 标志，预测器只能从配置文件解析。
+    这些规则在域名连接（HTTP 代理 / fake-ip）下引擎不会解析域名，故不命中——
+    预测器必须据此跳过，否则会误报命中（典型：100.64.0.0/10,DIRECT,no-resolve）。
+    """
+    import os
+    if config_path is None:
+        config_path = os.path.expanduser("~/.config/mihomo/config.yaml")
+    payloads: set = set()
+    try:
+        text = open(config_path).read()
+    except OSError:
+        return payloads
+    in_rules = False
+    for line in text.splitlines():
+        if re.match(r'^rules:\s*$', line):
+            in_rules = True
+            continue
+        if not in_rules:
+            continue
+        # rules 段结束：遇到顶格的新顶层键（非缩进、非列表项）
+        if line and not line[0].isspace() and not line.lstrip().startswith('-'):
+            break
+        m = re.match(r'\s*-\s*(?:IP-CIDR6?|IP-SUFFIX),([^,]+),[^,]+,\s*no-resolve\b', line)
+        if m:
+            payloads.add(m.group(1).strip())
+    return payloads
+
+
 def _section_dns(domain: str, api: str, secret: str,
                  fakeip_active: bool = False, corp_dns: dict = None) -> list:
     """
@@ -208,9 +254,16 @@ def _section_dns(domain: str, api: str, secret: str,
     return resolved_ips
 
 
-def _section_rules(domain: str, resolved_ips: list, api: str, secret: str) -> tuple:
+def _section_rules(domain: str, resolved_ips: list, api: str, secret: str,
+                   noresolve_can_match: bool = True,
+                   noresolve_payloads: set = None) -> tuple:
     """
     [2/4] 规则匹配 — 按引擎规则顺序逐条预测。
+
+    Args:
+        noresolve_can_match: 当前连接是否带真实目的 IP。域名经 HTTP 代理 / fake-ip
+            进来时为 False——此时引擎走到 no-resolve 的 IP 规则尚未解析，会跳过它们。
+        noresolve_payloads: 配置里带 no-resolve 的 IP 规则 payload 集合（_load_noresolve_payloads）。
     返回 (predicted_rule, predicted_proxy)。
     """
     print(f"\n{BOLD}[2/4] 规则匹配{NC}")
@@ -218,6 +271,9 @@ def _section_rules(domain: str, resolved_ips: list, api: str, secret: str) -> tu
     if not rules_data:
         print(f"  {RED}无法获取规则列表{NC}")
         return None, None
+
+    noresolve_payloads = noresolve_payloads or set()
+    skipped_noresolve: list = []   # 因 no-resolve 被跳过、但本可命中的规则（用于提示）
 
     predicted_rule = predicted_proxy = None
     for rule in rules_data.get("rules", []):
@@ -241,6 +297,14 @@ def _section_rules(domain: str, resolved_ips: list, api: str, secret: str) -> tu
                 matched = True
                 detail  = f"精确域名 {payload}"
         elif rtype == "IPCIDR" and resolved_ips:
+            # no-resolve 的 IP 规则只在连接本身带真实目的 IP 时才会被引擎匹配。
+            # 域名经 HTTP 代理 / fake-ip 进来时，引擎走到这条还没解析 → 跳过，
+            # 否则误报命中（典型坑：100.64.0.0/10,DIRECT,no-resolve 被预测成 DIRECT，
+            # 实际却落兜底走 proxy）。
+            if (not noresolve_can_match) and payload in noresolve_payloads:
+                if _cidr_contains_any(payload, resolved_ips):
+                    skipped_noresolve.append((rtype, payload, proxy))
+                continue
             try:
                 net = ipaddress.ip_network(payload, strict=False)
                 for ip in resolved_ips:
@@ -276,6 +340,13 @@ def _section_rules(domain: str, resolved_ips: list, api: str, secret: str) -> tu
                 )
                 print(f"  {DIM}注: 跳过了 {len(uncertain)} 条 GeoSite/GeoIP 规则 "
                       f"(无法客户端匹配): {types_str}{NC}")
+
+            if skipped_noresolve:
+                nr_str = ", ".join(
+                    f"{t}({p})→{pr}" for t, p, pr in skipped_noresolve[-3:]
+                )
+                print(f"  {YELLOW}注: 跳过了 {len(skipped_noresolve)} 条 no-resolve IP 规则 "
+                      f"(域名连接下引擎不解析，本应命中却不命中): {nr_str}{NC}")
             break
 
     if not predicted_rule:
@@ -568,7 +639,17 @@ def cmd_trace(raw_input: str, api: str, secret: str, config: dict = None):
         resolved_ips = _section_dns(domain, api, secret, fakeip_active, corp_dns)
         collector["stages"]["dns"] = {"resolved": list(resolved_ips), "skipped": False}
 
-    predicted_rule, predicted_proxy = _section_rules(domain, resolved_ips, api, secret)
+    # no-resolve 的 IP 规则只在连接带真实目的 IP 时才会被引擎匹配：
+    #   - 目标输入就是 IP
+    #   - redir-host + TUN on（内核按真实 IP 路由）
+    # 域名经 HTTP 代理 / fake-ip 进来时尚未解析 → 这些规则被引擎跳过
+    noresolve_can_match = _is_ip(domain) or (
+        mode["enhanced_mode"] != "fake-ip" and mode["tun_enabled"]
+    )
+    predicted_rule, predicted_proxy = _section_rules(
+        domain, resolved_ips, api, secret,
+        noresolve_can_match, _load_noresolve_payloads(),
+    )
     collector["stages"]["rules"] = {
         "predicted_rule": predicted_rule,
         "predicted_proxy": predicted_proxy,
