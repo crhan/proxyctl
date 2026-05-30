@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.5.10] — 2026-05-30
+
 ### Fixed
 
 - **`proxyctl check` 连通性面板的 `via` 列现在按可见宽度对齐。**
