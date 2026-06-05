@@ -513,15 +513,17 @@ def _section_connections(domain: str, resolved_ips: list,
         if data and isinstance(data, dict):
             for c in (data.get("connections") or []):
                 m  = c.get("metadata", {})
-                h  = m.get("host", "")
+                # sniffer/TUN 模式下 mihomo 可能把 host 留空、真实域名放在
+                # sniffHost（嗅探到的 SNI / HTTP Host）——取二者作为有效 host
+                h  = m.get("host", "") or m.get("sniffHost", "")
                 di = m.get("destinationIP", "")
                 if h == domain or h.endswith("." + domain):
                     host_conns.append(c)
                 elif not h and di and di in resolved_ips:
-                    # 仅当连接没带 host（典型 fake-ip 模式）才按 IP 回退；
-                    # host 非空但指向别的域名的连接，即使同 IP 也不算进来——
-                    # 否则 Cloudflare 等共享 IP 下，目标站没有 host 匹配连接时
-                    # 会把同 IP 别站的活跃连接误算成本域名
+                    # 仅当连接连 host 和 sniffHost 都没有（纯 IP，典型 fake-ip）
+                    # 才按 IP 回退；只要有效 host 非空但指向别的域名，即使同 IP
+                    # 也不算进来——否则 Cloudflare 等共享 IP 下，目标站没有 host
+                    # 匹配连接时会把同 IP 别站的活跃连接误算成本域名
                     ip_conns.append(c)
         if host_conns or ip_conns:
             break
