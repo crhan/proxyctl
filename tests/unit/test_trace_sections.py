@@ -409,3 +409,22 @@ def test_section_connections_falls_back_to_ip_when_no_host(monkeypatch, capsys):
         "aicodewith.com", ["198.18.0.5"], "proxy", "http://x", "s")
     out = trace._strip_ansi(capsys.readouterr().out)
     assert "活跃连接 1 条" in out
+
+
+def test_section_connections_ip_fallback_excludes_hosted_other_site(
+        monkeypatch, capsys):
+    """回归（codex P2）：目标站没有 host 匹配连接时，同 IP 上 host 指向别站的
+    连接不能被 IP 回退误收 —— 否则共享 IP 误报在这个边角依然复现。"""
+    _mock_connections(monkeypatch, [
+        # 同一个 Cloudflare 共享 IP，但 host 非空且指向别的站点
+        _conn("other-site.com", ["DIRECT"], up=999, down=999, ip="104.26.4.164"),
+    ])
+    # 隔离日志兜底，避免读到真实 mihomo.log 造成测试不稳定
+    monkeypatch.setattr(trace, "_grep_log_connections", lambda domain: [])
+    trace._section_connections(
+        "aicodewith.com", ["104.26.4.164"], "proxy", "http://x", "s")
+    out = trace._strip_ansi(capsys.readouterr().out)
+    # 别站连接被排除 → 视为无活跃连接，绝不把别站的 DIRECT 链路算成本域名
+    assert "无活跃连接" in out
+    assert "DIRECT" not in out
+    assert "other-site" not in out

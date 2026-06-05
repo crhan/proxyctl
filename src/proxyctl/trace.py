@@ -517,13 +517,16 @@ def _section_connections(domain: str, resolved_ips: list,
                 di = m.get("destinationIP", "")
                 if h == domain or h.endswith("." + domain):
                     host_conns.append(c)
-                elif di and di in resolved_ips:
+                elif not h and di and di in resolved_ips:
+                    # 仅当连接没带 host（典型 fake-ip 模式）才按 IP 回退；
+                    # host 非空但指向别的域名的连接，即使同 IP 也不算进来——
+                    # 否则 Cloudflare 等共享 IP 下，目标站没有 host 匹配连接时
+                    # 会把同 IP 别站的活跃连接误算成本域名
                     ip_conns.append(c)
         if host_conns or ip_conns:
             break
         time.sleep(0.3)
-    # host 精确匹配优先；只有拿不到 host（典型 fake-ip 模式）才回退按 IP 匹配，
-    # 避免 Cloudflare 等共享 IP 把同 IP 其他站点的连接误算进来
+    # host 精确匹配优先；只有全是无 host 的连接时才回退到按 IP 匹配的那批
     domain_conns = host_conns if host_conns else ip_conns
 
     if not domain_conns:
