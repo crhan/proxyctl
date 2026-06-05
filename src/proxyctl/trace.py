@@ -506,7 +506,8 @@ def _section_connections(domain: str, resolved_ips: list,
     """[4/4] 实际连接验证 — 从 Clash API 活跃连接 + 日志历史中取路由信息。"""
     print(f"\n{BOLD}[4/4] 实际连接{NC}")
 
-    domain_conns = []
+    host_conns = []
+    ip_conns = []
     for _ in range(3):
         data = _api_get(api, "/connections", secret)
         if data and isinstance(data, dict):
@@ -514,12 +515,16 @@ def _section_connections(domain: str, resolved_ips: list,
                 m  = c.get("metadata", {})
                 h  = m.get("host", "")
                 di = m.get("destinationIP", "")
-                if (h == domain or h.endswith("." + domain)
-                        or (di and di in resolved_ips)):
-                    domain_conns.append(c)
-        if domain_conns:
+                if h == domain or h.endswith("." + domain):
+                    host_conns.append(c)
+                elif di and di in resolved_ips:
+                    ip_conns.append(c)
+        if host_conns or ip_conns:
             break
         time.sleep(0.3)
+    # host 精确匹配优先；只有拿不到 host（典型 fake-ip 模式）才回退按 IP 匹配，
+    # 避免 Cloudflare 等共享 IP 把同 IP 其他站点的连接误算进来
+    domain_conns = host_conns if host_conns else ip_conns
 
     if not domain_conns:
         # 没有活跃连接，从引擎日志中捞历史记录
@@ -536,54 +541,64 @@ def _section_connections(domain: str, resolved_ips: list,
                 print(f"  {DIM}基于规则预测，该域名应走: {BOLD}{predicted_proxy}{NC}")
         return
 
-    # 去重：按 rule+chains
-    seen: set = set()
-    deduped = []
+    def fmt_bytes(b: int) -> str:
+        if b < 1024:        return f"{b}B"
+        if b < 1024 * 1024: return f"{b/1024:.1f}K"
+        return f"{b/1024/1024:.1f}M"
+
+    # 按完整链路聚合：相同链路的连接合并计数、流量累加，不再逐条平铺
+    groups: dict = {}
     for c in domain_conns:
-        rule   = c.get("rule", "?")
-        rp     = c.get("rulePayload", "")
         chains = c.get("chains", [])
-        key    = f"{rule}|{rp}|{','.join(chains)}"
-        if key not in seen:
-            seen.add(key)
-            deduped.append(c)
+        chain_str = " → ".join(reversed(chains)) if chains else "?"
+        g = groups.setdefault(chain_str, {"chains": chains, "count": 0,
+                                          "up": 0, "down": 0})
+        g["count"] += 1
+        g["up"]   += c.get("upload", 0)
+        g["down"] += c.get("download", 0)
 
-    for c in deduped:
-        rule       = c.get("rule", "?")
-        rp         = c.get("rulePayload", "")
-        chains     = c.get("chains", [])
-        chain_str  = " → ".join(reversed(chains)) if chains else "?"
-        rp_str     = f"({rp})" if rp else ""
-        print(f"  规则: {CYAN}{rule}{rp_str}{NC}")
-        print(f"  链路: {chain_str}")
+    # 是否符合预测：预测的组名出现在链路任意一跳即算命中。
+    #   proxy 链 chains=[节点, proxy-tuic, proxy] → 含 'proxy' → 符合
+    #   DIRECT 链 chains=['DIRECT']              → 不含       → 不符合
+    # （不再纠结 chains[0] 是末端节点还是 chains[-1] 是入口组——用集合判定消除歧义）
+    def _matches(chains: list):
+        if not predicted_proxy:
+            return None
+        return any(ch.lower() == predicted_proxy.lower() for ch in chains)
 
-    # 与预测对比
+    total = len(domain_conns)
+    print(f"  {DIM}(mihomo 当前活跃连接 {total} 条){NC}")
     if predicted_proxy:
-        actual_chains  = domain_conns[0].get("chains", [])
-        actual_outbound = actual_chains[-1] if actual_chains else "?"
-        if actual_outbound.lower() != predicted_proxy.lower():
-            print(f"  {YELLOW}⚠ 预测出口 {predicted_proxy}，实际出口 {actual_outbound}{NC}")
+        print(f"  应走(规则预测): {BOLD}{predicted_proxy}{NC}")
+    print("  实走:")
+
+    items = [(_matches(g["chains"]), s, g) for s, g in groups.items()]
+    items.sort(key=lambda x: (x[0] is not True, -x[2]["count"]))  # 符合在前，多的在前
+
+    match_n = mismatch_n = 0
+    for ok, chain_str, g in items:
+        if ok is True:
+            mark = f"{GREEN}✓{NC}"; match_n += g["count"]
+        elif ok is False:
+            mark = f"{YELLOW}✗{NC}"; mismatch_n += g["count"]
         else:
-            print(f"  {GREEN}✓ 与规则预测一致{NC}")
+            mark = " "
+        flow = f"↑{fmt_bytes(g['up'])} ↓{fmt_bytes(g['down'])}"
+        print(f"    {mark} {chain_str}  {DIM}·{NC}  {g['count']} 条  {DIM}{flow}{NC}")
 
-    # 连接详情
-    print(f"  {DIM}---{NC}")
-    domain_conns.sort(key=lambda x: x.get("start", ""), reverse=True)
-    for c in domain_conns[:5]:
-        m      = c.get("metadata", {})
-        host   = m.get("host", "?")
-        dport  = m.get("destinationPort", "?")
-        up     = c.get("upload", 0)
-        down   = c.get("download", 0)
-        chains = c.get("chains", [])
-        outbound = chains[0] if chains else "?"
-
-        def fmt_bytes(b: int) -> str:
-            if b < 1024:         return f"{b}B"
-            if b < 1024 * 1024:  return f"{b/1024:.1f}K"
-            return f"{b/1024/1024:.1f}M"
-
-        print(f"  {host}:{dport}  {outbound}  ↑{fmt_bytes(up)} ↓{fmt_bytes(down)}")
+    if not predicted_proxy:
+        return
+    if mismatch_n == 0:
+        print(f"  {GREEN}✓ 结论: 全部 {total} 条都走 {predicted_proxy}，与规则一致{NC}")
+    elif match_n == 0:
+        print(f"  {YELLOW}✗ 结论: {total} 条都没走 {predicted_proxy}；"
+              f"规则可能未生效，或被前置规则截胡{NC}")
+    else:
+        print(f"  {YELLOW}⚠ 结论: {match_n} 条新连接已走 {predicted_proxy}，"
+              f"另 {mismatch_n} 条仍走旧链路{NC}")
+        print(f"  {DIM}     旧链路是改规则前建立的连接（建连时已定死，不随规则切换），"
+              f"会随超时自然断开；{NC}")
+        print(f"  {DIM}     刷新页面后即全部走 {predicted_proxy}。{NC}")
 
 
 def cmd_trace(raw_input: str, api: str, secret: str, config: dict = None):

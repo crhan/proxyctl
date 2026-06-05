@@ -323,3 +323,89 @@ def test_grep_log_connections_parses_mihomo(_isolate_home: Path):
     assert isinstance(out, list)
     # 至少能找到一些
     assert len(out) >= 1
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# _section_connections: 活跃连接按链路聚合 + 与预测对比
+# ────────────────────────────────────────────────────────────────────────────
+
+def _mock_connections(monkeypatch, conns: list):
+    def fake_api_get(api, path, secret):
+        if path == "/connections":
+            return {"connections": conns}
+        return {}
+
+    monkeypatch.setattr(trace, "_api_get", fake_api_get)
+
+
+def _conn(host, chains, up=1, down=1, ip="", port="443"):
+    return {
+        "metadata": {"host": host, "destinationIP": ip, "destinationPort": port},
+        "chains": chains, "upload": up, "download": down,
+    }
+
+
+# mihomo chains 顺序：[末端节点, ..., 入口组]，proxy 链含组名 'proxy'
+_PROXY_CHAIN = ["电信专用(直连)", "proxy-tuic", "proxy"]
+
+
+def test_section_connections_all_match(monkeypatch, capsys):
+    """全部走预测出口 → ✓ 一致，相同链路聚合成一组计数。"""
+    _mock_connections(monkeypatch, [
+        _conn("aicodewith.com", _PROXY_CHAIN, up=590, down=3500),
+        _conn("aicodewith.com", _PROXY_CHAIN, up=100, down=200),
+    ])
+    trace._section_connections("aicodewith.com", [], "proxy", "http://x", "s")
+    out = trace._strip_ansi(capsys.readouterr().out)
+    assert "应走(规则预测): proxy" in out
+    assert "2 条" in out  # 两条相同链路聚合
+    assert "✓ 结论: 全部 2 条都走 proxy" in out
+
+
+def test_section_connections_mixed_old_and_new(monkeypatch, capsys):
+    """改规则后的过渡态：新连接走 proxy、旧连接仍走 DIRECT —— 给出明确结论而非自相矛盾。"""
+    _mock_connections(monkeypatch, [
+        _conn("aicodewith.com", _PROXY_CHAIN, up=590, down=3500),
+        _conn("aicodewith.com", ["DIRECT"], up=73400, down=18200),
+    ])
+    trace._section_connections("aicodewith.com", [], "proxy", "http://x", "s")
+    out = trace._strip_ansi(capsys.readouterr().out)
+    assert "1 条新连接已走 proxy" in out
+    assert "仍走旧链路" in out
+    assert "刷新页面后即全部走 proxy" in out
+
+
+def test_section_connections_none_match(monkeypatch, capsys):
+    """全部走 DIRECT、没有一条走预测出口 → 提示规则可能未生效。"""
+    _mock_connections(monkeypatch, [
+        _conn("aicodewith.com", ["DIRECT"], up=100, down=200),
+    ])
+    trace._section_connections("aicodewith.com", [], "proxy", "http://x", "s")
+    out = trace._strip_ansi(capsys.readouterr().out)
+    assert "都没走 proxy" in out
+    assert "规则可能未生效" in out
+
+
+def test_section_connections_host_match_excludes_shared_ip(monkeypatch, capsys):
+    """有 host 精确匹配时，不把同 IP 的其他站点连接（Cloudflare 共享 IP）误算进来。"""
+    _mock_connections(monkeypatch, [
+        _conn("aicodewith.com", _PROXY_CHAIN, ip="104.26.4.164"),
+        # 同一个 Cloudflare IP 上的别站，host 不匹配 → 应被排除
+        _conn("other-site.com", ["DIRECT"], up=999, down=999, ip="104.26.4.164"),
+    ])
+    trace._section_connections(
+        "aicodewith.com", ["104.26.4.164"], "proxy", "http://x", "s")
+    out = trace._strip_ansi(capsys.readouterr().out)
+    assert "活跃连接 1 条" in out
+    assert "✓ 结论: 全部 1 条都走 proxy" in out
+
+
+def test_section_connections_falls_back_to_ip_when_no_host(monkeypatch, capsys):
+    """fake-ip 模式 metadata 无 host 时，回退按 destinationIP 匹配。"""
+    _mock_connections(monkeypatch, [
+        _conn("", _PROXY_CHAIN, ip="198.18.0.5"),
+    ])
+    trace._section_connections(
+        "aicodewith.com", ["198.18.0.5"], "proxy", "http://x", "s")
+    out = trace._strip_ansi(capsys.readouterr().out)
+    assert "活跃连接 1 条" in out
