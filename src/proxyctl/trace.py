@@ -513,17 +513,17 @@ def _section_connections(domain: str, resolved_ips: list,
         if data and isinstance(data, dict):
             for c in (data.get("connections") or []):
                 m  = c.get("metadata", {})
-                # sniffer/TUN 模式下 mihomo 可能把 host 留空、真实域名放在
-                # sniffHost（嗅探到的 SNI / HTTP Host）——取二者作为有效 host
-                h  = m.get("host", "") or m.get("sniffHost", "")
                 di = m.get("destinationIP", "")
-                if h == domain or h.endswith("." + domain):
+                # sniffer/TUN 模式下 host 可能是目的 IP 或为空，真实域名落在
+                # sniffHost（嗅探到的 SNI / HTTP Host）。两字段独立判断、不互相
+                # 遮蔽：任一匹配即纳入；只有两者都缺失（纯 IP）才按目的 IP 回退
+                hosts = [x for x in (m.get("host", ""), m.get("sniffHost", "")) if x]
+                if any(x == domain or x.endswith("." + domain) for x in hosts):
                     host_conns.append(c)
-                elif not h and di and di in resolved_ips:
-                    # 仅当连接连 host 和 sniffHost 都没有（纯 IP，典型 fake-ip）
-                    # 才按 IP 回退；只要有效 host 非空但指向别的域名，即使同 IP
-                    # 也不算进来——否则 Cloudflare 等共享 IP 下，目标站没有 host
-                    # 匹配连接时会把同 IP 别站的活跃连接误算成本域名
+                elif not hosts and di and di in resolved_ips:
+                    # host/sniffHost 都没有的纯 IP 连接才回退；任一字段非空但
+                    # 指向别的域名的连接，即使同 IP 也不算进来——否则共享 IP 下
+                    # 会把同 IP 别站的活跃连接误算成本域名
                     ip_conns.append(c)
         if host_conns or ip_conns:
             break

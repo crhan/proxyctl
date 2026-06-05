@@ -458,3 +458,17 @@ def test_section_connections_ip_fallback_excludes_sniffhost_other_site(
     assert "无活跃连接" in out
     assert "DIRECT" not in out
     assert "other-site" not in out
+
+
+def test_section_connections_sniffhost_match_when_host_is_ip(monkeypatch, capsys):
+    """回归（codex P2#3）：host 被填成目的 IP、真实域名在 sniffHost 时，
+    host 非空也不能遮蔽 sniffHost —— 两字段独立判断，目标连接仍应纳入。"""
+    _mock_connections(monkeypatch, [
+        _conn("104.26.4.164", _PROXY_CHAIN, ip="104.26.4.164",
+              sniff="aicodewith.com"),
+    ])
+    trace._section_connections(
+        "aicodewith.com", ["104.26.4.164"], "proxy", "http://x", "s")
+    out = trace._strip_ansi(capsys.readouterr().out)
+    assert "活跃连接 1 条" in out
+    assert "✓ 结论: 全部 1 条都走 proxy" in out
