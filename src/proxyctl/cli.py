@@ -7,6 +7,7 @@
 """
 
 import functools
+import ipaddress
 import json
 import os
 import platform
@@ -1327,6 +1328,30 @@ def cmd_dns_unlock(config: dict):
 
 # ── 命令：env ────────────────────────────────────────────────────────────────
 
+def _normalize_no_proxy_extra(extra) -> list[str]:
+    """Return NO_PROXY extras compatible with Python/httpx environment parsing."""
+    if not extra:
+        return []
+    if isinstance(extra, str):
+        items = [s.strip() for s in extra.split(",")]
+    else:
+        items = [str(s).strip() for s in extra]
+
+    out: list[str] = []
+    for item in items:
+        if not item:
+            continue
+        try:
+            network = ipaddress.ip_network(item, strict=False)
+        except ValueError:
+            out.append(item)
+            continue
+        if network.version == 6 and "/" in item:
+            continue
+        out.append(item)
+    return out
+
+
 def cmd_env(config: dict, unset: bool = False):
     """输出设置/清除代理环境变量的 shell 语句。
 
@@ -1350,9 +1375,7 @@ def cmd_env(config: dict, unset: bool = False):
     proxy_socks = f"socks5://127.0.0.1:{port}"
     no_proxy = "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
     # 用户附加的 NO_PROXY 项（个人域名等）；接受 list[str] 或逗号分隔 str
-    extra = config.get("no_proxy_extra") or []
-    if isinstance(extra, str):
-        extra = [s.strip() for s in extra.split(",") if s.strip()]
+    extra = _normalize_no_proxy_extra(config.get("no_proxy_extra"))
     if extra:
         no_proxy = no_proxy + "," + ",".join(extra)
 

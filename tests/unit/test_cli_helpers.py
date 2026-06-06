@@ -55,6 +55,31 @@ def test_load_config_warning_goes_to_stderr(monkeypatch, tmp_path: Path, capsys)
     assert "读取配置文件失败" in captured.err
 
 
+def test_cmd_env_filters_ipv6_cidr_for_httpx_compat(capsys):
+    """NO_PROXY must not include bare IPv6 CIDR entries that httpx misparses."""
+    cli.cmd_env({
+        "proxy_port": 7890,
+        "no_proxy_extra": [
+            ".crhan.com",
+            ".ts.net",
+            "100.64.0.0/10",
+            "fd7a:115c::/48",
+        ],
+    })
+
+    out = capsys.readouterr().out
+    assert ".crhan.com" in out
+    assert ".ts.net" in out
+    assert "100.64.0.0/10" in out
+    assert "fd7a:115c::/48" not in out
+
+
+def test_normalize_no_proxy_extra_filters_ipv6_cidr_from_csv():
+    assert cli._normalize_no_proxy_extra(
+        ".crhan.com, .ts.net, 100.64.0.0/10, fd7a:115c::/48"
+    ) == [".crhan.com", ".ts.net", "100.64.0.0/10"]
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # wait_port
 # ────────────────────────────────────────────────────────────────────────────

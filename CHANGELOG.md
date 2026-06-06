@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+## [0.5.12] — 2026-06-07
+
+### Fixed
+
+- `proxyctl env` 不再把 `no_proxy_extra` 中的裸 IPv6 CIDR 写入 `NO_PROXY`。
+  这避免 Python/httpx 工具把类似 `fd7a:115c::/48` 的条目误解析为带非法端口的
+  URL；域名、IPv4 CIDR 和默认本地绕过项保持不变。
+
 ### Changed
 
 - **`proxyctl trace` 的 `[4/4] 实际连接` 改为按链路聚合并给出明确结论。**

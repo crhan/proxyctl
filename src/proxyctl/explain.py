@@ -217,7 +217,10 @@ def _t_env(backend, config) -> TopicCard:
             f"`proxyctl env` 输出 export 行，可 eval 进当前 shell（端口 {port}）。"
         ),
         "file": _io_proxyctl_config_path() + "  [no_proxy_extra: 字段]",
-        "edit": "  # no_proxy_extra: 追加内网域名 / Tailscale 段 / 企业 host",
+        "edit": (
+            "  # no_proxy_extra: 追加内网域名 / IPv4 CIDR / 企业 host\n"
+            "  # 裸 IPv6 CIDR 会被跳过，避免 Python/httpx 误解析 NO_PROXY"
+        ),
         "verify": "eval \"$(proxyctl env)\" && env | grep -i proxy",
         "next_commands": ["env", "env --unset"],
     }
