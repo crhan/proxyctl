@@ -113,13 +113,19 @@ def _route_from_connections(conns: list[dict], host: str) -> dict:
     Mihomo reports chains from leaf node to policy group, for example
     ``["TW-Residential-01", "residential-tw", "claude"]``. The human
     "line" is the leaf node, not the policy group.
+
+    /connections 的顺序是任意的，且热 reload 不会掐断旧 keep-alive 连接——
+    规则改过之后旧连接的 chains 还是旧路由。取 start 最新的一条匹配连接
+    （check 刚发完探测请求，最新的最接近当前规则的真实路由）。
     """
-    for conn in conns:
-        meta = conn.get("metadata") or {}
-        conn_host = meta.get("host") or ""
-        if conn_host != host and not conn_host.endswith("." + host):
-            continue
-        chains = [str(c) for c in (conn.get("chains") or []) if c]
+    matched = [
+        conn for conn in conns
+        if (h := (conn.get("metadata") or {}).get("host") or "") == host
+        or h.endswith("." + host)
+    ]
+    if matched:
+        newest = max(matched, key=lambda c: str(c.get("start") or ""))
+        chains = [str(c) for c in (newest.get("chains") or []) if c]
         return {
             "found": True,
             "line": chains[0] if chains else "?",

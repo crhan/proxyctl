@@ -346,6 +346,30 @@ def test_target_route_extracts_leaf_line(fake_subprocess):
     assert route["chain"] == "claude → residential-tw → TW-Residential-01"
 
 
+def test_target_route_prefers_newest_connection(fake_subprocess):
+    # 热 reload 后旧 keep-alive 连接还挂着旧路由链；/connections 顺序任意，
+    # 反查必须按 start 取最新一条，否则 via 显示残影（stale chain）。
+    fake_subprocess.set_default(stdout=json.dumps({
+        "connections": [
+            {
+                "metadata": {"host": "api.anthropic.com"},
+                "chains": ["TW-Residential-01", "residential-tw", "claude"],
+                "start": "2026-07-17T09:53:44.773897+08:00",
+            },
+            {
+                "metadata": {"host": "api.anthropic.com"},
+                "chains": ["电信专用(直连)", "proxy-tuic", "proxy"],
+                "start": "2026-07-17T10:38:33.950507+08:00",
+            },
+        ]
+    }))
+    route = check._target_route(
+        "http://127.0.0.1:9090", "", "https://api.anthropic.com/v1/models")
+    assert route["found"] is True
+    assert route["group"] == "proxy"
+    assert route["chain"] == "proxy → proxy-tuic → 电信专用(直连)"
+
+
 def test_target_route_no_active_connection(fake_subprocess):
     fake_subprocess.set_default(stdout=json.dumps({"connections": []}))
     route = check._target_route(
