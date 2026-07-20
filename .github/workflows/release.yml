@@ -21,7 +21,7 @@ jobs:
     name: Build sdist & wheel
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0   # 给 hatch-vcs 等动态版本工具留余地（即便目前不用）
 
@@ -133,7 +133,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download dist artifact
         uses: actions/download-artifact@v8
