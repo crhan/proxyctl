@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from proxyctl import cli
 
@@ -102,6 +103,22 @@ def test_normalize_proxy_env_extra_keeps_eval_output_safe(capsys):
     assert names == ["PI_PROXY_ANTHROPIC"]
     assert captured.out == ""
     assert "PI_PROXY;id" in captured.err
+
+
+def test_cmd_env_skips_yaml_scalars_that_are_not_names(capsys):
+    """YAML 把 yes / null 解析成 True / None：不能被导出成 True=… / None=…。"""
+    config = yaml.safe_load(
+        "proxy_port: 7890\n"
+        "proxy_env_extra: [PI_PROXY_ANTHROPIC, yes, null]\n"
+    )
+
+    cli.cmd_env(config)
+
+    names = [line.split("=", 1)[0] for line in capsys.readouterr().out.splitlines()]
+    assert "export PI_PROXY_ANTHROPIC" in names
+    assert "export True" not in names
+    assert "export None" not in names
+    assert cli._normalize_proxy_env_extra(True) == []
 
 
 # ────────────────────────────────────────────────────────────────────────────

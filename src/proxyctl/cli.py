@@ -1366,18 +1366,32 @@ def _normalize_proxy_env_extra(extra) -> list[str]:
 
     `proxyctl env` 的输出会被 eval：非法变量名一律跳过并在 stderr 提示；
     与内置代理变量同名的项跳过（内置那组已导出，不能被改写成 HTTP 地址）。
+    YAML 会把 yes / no / on / off / true / false / null 解析成 bool / None，
+    非字符串项同样跳过并提示，不能被 str() 成 True / None 再导出。
     """
+    def warn(msg: str) -> None:
+        print(f"{YELLOW}警告：proxy_env_extra {msg}{NC}", file=sys.stderr)
+
     if not extra:
         return []
-    items = extra.split(",") if isinstance(extra, str) else extra
+    if isinstance(extra, str):
+        items = extra.split(",")
+    elif isinstance(extra, (list, tuple)):
+        items = extra
+    else:
+        warn(f"应为列表或逗号分隔字符串，已忽略：{extra!r}")
+        return []
     out: list[str] = []
     for item in items:
-        name = str(item).strip()
+        if not isinstance(item, str):
+            warn(f"跳过非字符串项 {item!r}（YAML 会把 yes/no/on/off/true/false/null "
+                 "解析成布尔或空值，这类变量名请加引号）")
+            continue
+        name = item.strip()
         if not name or name in out or name in _ENV_PROXY_VARS:
             continue
         if not _ENV_VAR_NAME_RE.fullmatch(name):
-            print(f"{YELLOW}警告：proxy_env_extra 跳过非法变量名 {name!r}{NC}",
-                  file=sys.stderr)
+            warn(f"跳过非法变量名 {name!r}")
             continue
         out.append(name)
     return out
