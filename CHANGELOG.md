@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.5.14] — 2026-09-23
+
 ### Added
 
 - **新增 `proxy_env_extra` 配置：`proxyctl env` 可以额外导出指定的代理变量。**
