@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from proxyctl import cli
 
@@ -78,6 +79,46 @@ def test_normalize_no_proxy_extra_filters_ipv6_cidr_from_csv():
     assert cli._normalize_no_proxy_extra(
         ".crhan.com, .ts.net, 100.64.0.0/10, fd7a:115c::/48"
     ) == [".crhan.com", ".ts.net", "100.64.0.0/10"]
+
+
+def test_cmd_env_exports_and_unsets_proxy_env_extra(capsys):
+    """proxy_env_extra 的变量随 env 导出为 HTTP 代理地址，随 env --unset 清除。"""
+    config = {"proxy_port": 7891, "proxy_env_extra": ["PI_PROXY_ANTHROPIC"]}
+
+    cli.cmd_env(config)
+    exported = capsys.readouterr().out.splitlines()
+    assert "export PI_PROXY_ANTHROPIC=http://127.0.0.1:7891;" in exported
+
+    cli.cmd_env(config, unset=True)
+    assert "unset PI_PROXY_ANTHROPIC;" in capsys.readouterr().out.splitlines()
+
+
+def test_normalize_proxy_env_extra_keeps_eval_output_safe(capsys):
+    """env 输出会被 eval：非法名字不能进 stdout，内置代理变量不能被改写。"""
+    names = cli._normalize_proxy_env_extra(
+        "PI_PROXY_ANTHROPIC, PI_PROXY;id, $(id), 9LIVES, ALL_PROXY, PI_PROXY_ANTHROPIC"
+    )
+
+    captured = capsys.readouterr()
+    assert names == ["PI_PROXY_ANTHROPIC"]
+    assert captured.out == ""
+    assert "PI_PROXY;id" in captured.err
+
+
+def test_cmd_env_skips_yaml_scalars_that_are_not_names(capsys):
+    """YAML 把 yes / null 解析成 True / None：不能被导出成 True=… / None=…。"""
+    config = yaml.safe_load(
+        "proxy_port: 7890\n"
+        "proxy_env_extra: [PI_PROXY_ANTHROPIC, yes, null]\n"
+    )
+
+    cli.cmd_env(config)
+
+    names = [line.split("=", 1)[0] for line in capsys.readouterr().out.splitlines()]
+    assert "export PI_PROXY_ANTHROPIC" in names
+    assert "export True" not in names
+    assert "export None" not in names
+    assert cli._normalize_proxy_env_extra(True) == []
 
 
 # ────────────────────────────────────────────────────────────────────────────

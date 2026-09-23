@@ -186,6 +186,8 @@ rulePayload / host / IP 聚合目的地，输出 app_contexts / candidate_contex
 .TP
 .B proxyctl env [--unset]
 输出 / 清除 HTTP_PROXY / HTTPS_PROXY / NO_PROXY 环境变量（可 \fIeval\fR）。
+配置 \fBproxy_env_extra\fR 列出的变量名（如 omp 的 \fBPI_PROXY_ANTHROPIC\fR）
+一并导出为同一 HTTP 代理地址、一并清除。
 .TP
 .B proxyctl log [--tail \fIN\fR] [--no-follow] [--json]
 查看后端日志。默认 \fItail -f\fR；\fB--json\fR 为 NDJSON（首行 meta header + 数据行）。
@@ -271,7 +273,7 @@ DEPENDENCY_MISSING — 依赖二进制 / 脚本缺失
 .SH FILES
 .TP
 .I ~/.config/proxyctl/config.yaml
-proxyctl 自身配置（API token / 端口 / 企业 DNS / extra_daemons / no_proxy_extra / plugins_disabled）。
+proxyctl 自身配置（API token / 端口 / 企业 DNS / extra_daemons / no_proxy_extra / proxy_env_extra / plugins_disabled）。
 .TP
 .I ~/.config/mihomo/config.yaml
 mihomo 引擎配置（rules / proxies / proxy-providers / dns / tun）。

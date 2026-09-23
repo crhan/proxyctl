@@ -55,6 +55,9 @@ DEFAULTS = {
     # 个人附加的 NO_PROXY 项（追加到默认 localhost/私网集合之后）
     # 例: ["corp.example.com", "intranet.local"] 或 "corp.example.com,intranet.local"
     "no_proxy_extra": [],
+    # 额外导出为代理地址的环境变量名：`proxyctl env` 一并 export，`env --unset` 一并 unset。
+    # 给不读 HTTP(S)_PROXY、只认自家变量的工具，例: ["PI_PROXY_ANTHROPIC"]（omp）
+    "proxy_env_extra": [],
 }
 
 SCRIPTS_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -1352,6 +1355,48 @@ def _normalize_no_proxy_extra(extra) -> list[str]:
     return out
 
 
+_ENV_PROXY_VARS = ("http_proxy", "https_proxy", "all_proxy",
+                   "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                   "no_proxy", "NO_PROXY")
+_ENV_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _normalize_proxy_env_extra(extra) -> list[str]:
+    """proxy_env_extra → 可安全 eval 的变量名列表（去重、保序）。
+
+    `proxyctl env` 的输出会被 eval：非法变量名一律跳过并在 stderr 提示；
+    与内置代理变量同名的项跳过（内置那组已导出，不能被改写成 HTTP 地址）。
+    YAML 会把 yes / no / on / off / true / false / null 解析成 bool / None，
+    非字符串项同样跳过并提示，不能被 str() 成 True / None 再导出。
+    """
+    def warn(msg: str) -> None:
+        print(f"{YELLOW}警告：proxy_env_extra {msg}{NC}", file=sys.stderr)
+
+    if not extra:
+        return []
+    if isinstance(extra, str):
+        items = extra.split(",")
+    elif isinstance(extra, (list, tuple)):
+        items = extra
+    else:
+        warn(f"应为列表或逗号分隔字符串，已忽略：{extra!r}")
+        return []
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            warn(f"跳过非字符串项 {item!r}（YAML 会把 yes/no/on/off/true/false/null "
+                 "解析成布尔或空值，这类变量名请加引号）")
+            continue
+        name = item.strip()
+        if not name or name in out or name in _ENV_PROXY_VARS:
+            continue
+        if not _ENV_VAR_NAME_RE.fullmatch(name):
+            warn(f"跳过非法变量名 {name!r}")
+            continue
+        out.append(name)
+    return out
+
+
 def cmd_env(config: dict, unset: bool = False):
     """输出设置/清除代理环境变量的 shell 语句。
 
@@ -1359,14 +1404,16 @@ def cmd_env(config: dict, unset: bool = False):
         eval $(proxyctl env)         # 设置代理
         eval $(proxyctl env --unset) # 清除代理
 
+    config.proxy_env_extra 列出的变量名一并 export 为 HTTP 代理地址、一并 unset，
+    给不读 HTTP(S)_PROXY、只认自家变量的工具用（如 omp 的 PI_PROXY_ANTHROPIC）。
+
     Args:
         config: 全局配置字典
         unset: True 则输出 unset 语句
     """
+    extra_vars = _normalize_proxy_env_extra(config.get("proxy_env_extra"))
     if unset:
-        for var in ("http_proxy", "https_proxy", "all_proxy",
-                     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
-                     "no_proxy", "NO_PROXY"):
+        for var in _ENV_PROXY_VARS + tuple(extra_vars):
             print(f"unset {var};")
         return
 
@@ -1387,6 +1434,8 @@ def cmd_env(config: dict, unset: bool = False):
         print(f"export {var}={proxy_socks};")
     for var in ("no_proxy", "NO_PROXY"):
         print(f"export {var}={no_proxy};")
+    for var in extra_vars:
+        print(f"export {var}={proxy_http};")
 
 
 # ── 命令：log ─────────────────────────────────────────────────────────────────
