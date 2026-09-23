@@ -250,6 +250,8 @@ proxy_port: 7890                        # 自 0.1.4 起可配
 no_proxy_extra:                         # 自 0.1.5 起追加 NO_PROXY
   - "*.internal.example.com"
   - 10.0.0.0/8
+proxy_env_extra:                        # 自 0.5.14 起：额外导出为代理地址的变量名
+  - PI_PROXY_ANTHROPIC                  #   omp 的 Anthropic 请求只读它，不读 HTTPS_PROXY
 ```
 
 完整字段见 [config.yaml.example](config.yaml.example)。

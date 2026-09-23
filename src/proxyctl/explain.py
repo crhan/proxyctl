@@ -215,11 +215,15 @@ def _t_env(backend, config) -> TopicCard:
         "summary": (
             "代理环境变量（HTTP_PROXY / HTTPS_PROXY / NO_PROXY 等）。"
             f"`proxyctl env` 输出 export 行，可 eval 进当前 shell（端口 {port}）。"
+            "只认自家变量、不读 HTTP(S)_PROXY 的工具（如 omp 的 "
+            "PI_PROXY_ANTHROPIC）把变量名加进 proxy_env_extra，随 env 一并导出。"
         ),
-        "file": _io_proxyctl_config_path() + "  [no_proxy_extra: 字段]",
+        "file": _io_proxyctl_config_path() + "  [no_proxy_extra / proxy_env_extra 字段]",
         "edit": (
             "  # no_proxy_extra: 追加内网域名 / IPv4 CIDR / 企业 host\n"
-            "  # 裸 IPv6 CIDR 会被跳过，避免 Python/httpx 误解析 NO_PROXY"
+            "  # 裸 IPv6 CIDR 会被跳过，避免 Python/httpx 误解析 NO_PROXY\n"
+            "  # proxy_env_extra: 额外导出为代理地址的变量名，例 [PI_PROXY_ANTHROPIC]\n"
+            "  # env --unset 一并清除；非法变量名会被跳过"
         ),
         "verify": "eval \"$(proxyctl env)\" && env | grep -i proxy",
         "next_commands": ["env", "env --unset"],

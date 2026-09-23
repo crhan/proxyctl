@@ -5,6 +5,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- **新增 `proxy_env_extra` 配置：`proxyctl env` 可以额外导出指定的代理变量。**
+  列出的变量名会被 `proxyctl env` 导出为引擎的 HTTP 代理地址
+  （`http://127.0.0.1:<proxy_port>`），`proxyctl env --unset` 一并清除。
+  用于不读 `HTTP(S)_PROXY`、只认自家变量的工具——例如 omp 的 Anthropic 模型请求
+  只读 `PI_PROXY_ANTHROPIC` / `PI_PROXY`，缺了就直连，受限地区返回
+  `403 Request not allowed`；配置 `proxy_env_extra: [PI_PROXY_ANTHROPIC]` 即可。
+  默认为空，`proxyctl env` 的现有输出不变；非法变量名会被跳过并在 stderr 提示。
+
 ## [0.5.13] — 2026-07-17
 
 ### Fixed
