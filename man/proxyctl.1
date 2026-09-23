@@ -184,8 +184,20 @@ rulePayload / host / IP 聚合目的地，输出 app_contexts / candidate_contex
 
 .SS 工具
 .TP
-.B proxyctl env [--unset]
-输出 / 清除 HTTP_PROXY / HTTPS_PROXY / NO_PROXY 环境变量（可 \fIeval\fR）。
+.B proxyctl env [--unset | --write | --install | --uninstall] [--shell-rc \fIPATH\fR] [--json]
+无参：输出 HTTP_PROXY / HTTPS_PROXY / NO_PROXY 环境变量 + provider 级
+\fBPI_PROXY_\fR\fIPROVIDER\fR（可 \fIeval\fR；无存活出口时输出 \fBunset\fR）。
+\fB--unset\fR 清除同一组变量。
+.PP
+\fB--write\fR 把 \fBPI_PROXY_*\fR 写成契约文件
+\fI~/.config/proxyctl/agent-env.sh\fR：引擎端口在听就指向引擎，否则指向
+\fIconfig.yaml\fR 中 \fBagent_env.fallback_daemon\fR 的 port，都没在听则删除文件。
+\fBstart\fR / \fBstop\fR / \fBrestart\fR / \fBfix\fR / \fBdaemon\fR / \fBengine\fR
+之后会自动刷新，无需手工调用。
+.PP
+\fB--install\fR 额外把 source 块（marker 包裹，幂等）写进 \fIshell_rc\fR
+（默认 \fI~/.zprofile\fR，可用 \fB--shell-rc\fR 覆盖）；\fB--uninstall\fR 摘掉该块
+并删除契约文件。三种写模式都支持 \fB--dry-run\fR。
 .TP
 .B proxyctl log [--tail \fIN\fR] [--no-follow] [--json]
 查看后端日志。默认 \fItail -f\fR；\fB--json\fR 为 NDJSON（首行 meta header + 数据行）。
@@ -268,10 +280,21 @@ DEPENDENCY_MISSING — 依赖二进制 / 脚本缺失
 .TP
 .B NO_COLOR
 遵循 https://no-color.org/。
+.TP
+.B PROXYCTL_AGENT_ENV_PATH
+覆盖 agent 代理变量契约文件路径（默认 \fI~/.config/proxyctl/agent-env.sh\fR）。
+.TP
+.B PROXYCTL_SHELL_RC
+覆盖 \fBproxyctl env --install\fR 注入的 shell rc（默认取配置里的
+\fIagent_env.shell_rc\fR，即 \fI~/.zprofile\fR）。
 .SH FILES
 .TP
 .I ~/.config/proxyctl/config.yaml
-proxyctl 自身配置（API token / 端口 / 企业 DNS / extra_daemons / no_proxy_extra / plugins_disabled）。
+proxyctl 自身配置（API token / 端口 / 企业 DNS / extra_daemons / no_proxy_extra / agent_env / plugins_disabled）。
+.TP
+.I ~/.config/proxyctl/agent-env.sh
+agent 代理变量契约文件（\fBPI_PROXY_<PROVIDER>\fR）；由 \fBproxyctl env --write\fR
+与生命周期命令生成，勿手改。
 .TP
 .I ~/.config/mihomo/config.yaml
 mihomo 引擎配置（rules / proxies / proxy-providers / dns / tun）。

@@ -76,6 +76,24 @@ extra_daemons: {}
 #   - .ts.net              # Tailscale MagicDNS
 
 # ─────────────────────────────────────────────────────────────
+# agent CLI 的 provider 级代理变量（v0.5.14+）
+# ─────────────────────────────────────────────────────────────
+# 通用 HTTP(S)_PROXY 覆盖不到全部 agent：omp 的 anthropic-messages transport
+# （cowork-fetch）只认 PI_PROXY_<PROVIDER>，缺它就直连 → 受限地区 403。
+# proxyctl 按生命周期把出口写成可 source 的契约文件（默认
+# ~/.config/proxyctl/agent-env.sh），start/stop/restart/fix/daemon 自动刷新：
+# 引擎端口在听 → 指向引擎；否则指向 fallback_daemon 的 port；都没有 → 删文件。
+#
+#   proxyctl env --write      # 立即生成/刷新
+#   proxyctl env --install    # 再往 shell rc 注入 source 块（幂等）
+#   proxyctl env --uninstall  # 收摊
+agent_env:
+  enabled: true
+  providers: [anthropic]        # → PI_PROXY_ANTHROPIC；可加 openai-codex 等
+  fallback_daemon: claude-proxy  # extra_daemons 里的名字；null 关闭兜底
+  shell_rc: ~/.zprofile          # --install 注入的目标
+
+# ─────────────────────────────────────────────────────────────
 # 其他配置
 # ─────────────────────────────────────────────────────────────
 # 日志级别：info (默认) | debug | warn | error

@@ -5,6 +5,35 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`proxyctl env --write` / `--install` / `--uninstall`：把 `PI_PROXY_*` 托管给 agent CLI。**
+  通用 `HTTP(S)_PROXY` 覆盖不到所有 agent：omp 的 anthropic-messages transport
+  只认 `PI_PROXY_<PROVIDER>`，没有这个变量就直连，受限地区直接 `403 Request
+  not allowed`。现在 proxyctl 负责把出口写成可 source 的契约文件
+  `~/.config/proxyctl/agent-env.sh`，并在 `start` / `stop` / `restart` / `fix` /
+  `daemon` / `engine` 之后自动刷新：引擎端口在听 → 指向引擎；否则指向
+  `agent_env.fallback_daemon` 声明的 port；两个都没在听 → 删掉文件（避免 agent
+  一直打到死口）。`--install` 幂等注入 shell rc 的 marker 块，`--uninstall`
+  一步收摊。
+- `proxyctl status` 新增 `AGENT ENV` 段；`status --json` 新增 `data.agent_env`
+  （契约文件路径、当前出口与来源、出口是否可达、`in_sync`、shell rc 是否已注入）。
+- `config.yaml` 新增 `agent_env:` 段：`enabled` / `providers` / `fallback_daemon`
+  / `shell_rc`。
+- doctor 新增 3 条建议：`agent_env.dead_endpoint`（warn，文件指向已停的出口）、
+  `agent_env.missing`（有存活出口但没生成文件）、`agent_env.not_sourced`
+  （文件在但 shell rc 没 source 它）；三条都带 `fix_command`、`auto_fixable=true`。
+
+### Changed
+
+- `proxyctl env`（无参）现在额外输出 `PI_PROXY_<PROVIDER>` 的 `export` 行；
+  当前没有存活出口时改输出 `unset`，避免 `eval "$(proxyctl env)"` 之后残留指向
+  死口的旧值。`proxyctl env --unset` 同时清除 `PI_PROXY_*`。
+- `proxyctl env` 支持 `--json`（`data.vars` + `data.agent_env`）。
+- `proxyctl --version --json` 的 `supported_features` 新增 `agent_env_contract`、
+  `status_agent_env`。
+- 相关 flag 已进 bash / zsh / fish 补全。
+
 ## [0.5.13] — 2026-07-17
 
 ### Fixed

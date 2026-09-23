@@ -234,6 +234,7 @@ def build_suggestions(*, sub: dict[str, Any] | None = None,
                       known_versions: dict[str, Any] | None = None,
                       engine_config_dir: str | None = None,
                       proxies_payload: dict[str, Any] | None = None,
+                      agent_env_state: dict[str, Any] | None = None,
                       since: str | None = None,
                       ignore_set: set[str] | None = None,
                       apply_user_ignore: bool = True,
@@ -253,6 +254,8 @@ def build_suggestions(*, sub: dict[str, Any] | None = None,
         path_version: PATH binary 的版本（来自 cli.get_engine_version）
         expected_config_dir: backend 期望的 config_dir
             （用于 autostart.config_dir_mismatch）
+        agent_env_state: proxyctl.agent_env.status() 返回；
+            None 表示跳过 agent_env.* 组
         persist_state: 是否写 state 文件（测试可关）
         _extra_raw: 测试/未来扩展注入额外 raw suggestions（不经过 subscription）
 
@@ -291,6 +294,10 @@ def build_suggestions(*, sub: dict[str, Any] | None = None,
     if proxies_payload is not None:
         from proxyctl import suggest_rules as _rules
         raw.extend(_rules.proxy_group_rules(proxies_payload))
+
+    if agent_env_state is not None:
+        from proxyctl import suggest_rules as _rules
+        raw.extend(_rules.agent_env_rules(agent_env_state))
 
     if _extra_raw:
         raw.extend(_extra_raw)

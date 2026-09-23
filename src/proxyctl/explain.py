@@ -210,19 +210,29 @@ def _t_extra_daemons(backend, config) -> TopicCard:
 @topic("env")
 def _t_env(backend, config) -> TopicCard:
     port = config.get("proxy_port", 7890)
+    from proxyctl import agent_env as _ae
+    contract = _ae.env_path()
     return {
         "topic": "env",
         "summary": (
-            "代理环境变量（HTTP_PROXY / HTTPS_PROXY / NO_PROXY 等）。"
-            f"`proxyctl env` 输出 export 行，可 eval 进当前 shell（端口 {port}）。"
+            "代理环境变量。两条线：(1) 通用 HTTP_PROXY / HTTPS_PROXY / NO_PROXY"
+            f"——`proxyctl env` 输出 export 行，可 eval 进当前 shell（端口 {port}）；"
+            "(2) provider 级 PI_PROXY_<PROVIDER>——由 proxyctl 写成契约文件 "
+            f"{contract}，start/stop/restart/fix/daemon 自动刷新。"
+            "部分 agent transport（omp 的 anthropic-messages / cowork-fetch）只认 "
+            "PI_PROXY_*，不读通用变量；缺它就是直连，受限地区直接 403。"
         ),
-        "file": _io_proxyctl_config_path() + "  [no_proxy_extra: 字段]",
+        "file": contract + "  [agent_env: 段；no_proxy_extra: 字段]",
         "edit": (
             "  # no_proxy_extra: 追加内网域名 / IPv4 CIDR / 企业 host\n"
-            "  # 裸 IPv6 CIDR 会被跳过，避免 Python/httpx 误解析 NO_PROXY"
+            "  # 裸 IPv6 CIDR 会被跳过，避免 Python/httpx 误解析 NO_PROXY\n"
+            "  # agent_env.providers: [anthropic]    → PI_PROXY_ANTHROPIC\n"
+            "  # agent_env.fallback_daemon: claude-proxy  → 引擎停时改指向 7891\n"
+            "  # 生成/注入：\n"
+            "  proxyctl env --write && proxyctl env --install"
         ),
         "verify": "eval \"$(proxyctl env)\" && env | grep -i proxy",
-        "next_commands": ["env", "env --unset"],
+        "next_commands": ["env", "env --write", "status", "doctor"],
     }
 
 
@@ -1204,10 +1214,23 @@ COMMANDS_META: list[dict] = [
      "needs_sudo": True, "interactive": False, "exit_codes": [0, 1],
      "examples": ["proxyctl dns-unlock", "proxyctl dns-unlock --dry-run"]},
     # tools / agent
-    {"name": "env", "group": "tool", "summary": "输出代理环境变量（可 eval）",
-     "args": [], "supports_json": False, "side_effects": [],
-     "needs_sudo": False, "interactive": False, "exit_codes": [0],
-     "examples": ["proxyctl env", "proxyctl env --unset"]},
+    {"name": "env", "group": "tool",
+     "summary": "代理环境变量：打印（可 eval）/ 托管 PI_PROXY_* 给 agent CLI",
+     "args": [{"name": "--unset", "required": False},
+              {"name": "--write", "required": False},
+              {"name": "--install", "required": False},
+              {"name": "--uninstall", "required": False},
+              {"name": "--shell-rc", "required": False}],
+     "supports_json": True, "side_effects": [],
+     "conditional_side_effects": {"write": ["config-write"],
+                                  "install": ["config-write"],
+                                  "uninstall": ["config-write"]},
+     "supports_dry_run": True,
+     "needs_sudo": False, "interactive": False, "exit_codes": [0, 2],
+     "examples": ["proxyctl env", "proxyctl env --unset",
+                  "proxyctl env --write",
+                  "proxyctl env --install",
+                  "proxyctl env --uninstall"]},
     {"name": "log", "group": "tool",
      "summary": "查看后端日志：默认 tail -f；支持 --tail N / --no-follow / --json",
      "args": [], "supports_json": True, "side_effects": [],
@@ -1793,6 +1816,14 @@ def _build_doctor_suggestions(backend, config, engine_ver, *,
     except Exception:
         proxies_payload = None
 
+    # agent 代理变量契约文件（PI_PROXY_*）— 纯本地读 + 端口探测
+    agent_env_state = None
+    try:
+        from proxyctl import agent_env as _agent_env
+        agent_env_state = _agent_env.status(config)
+    except Exception:
+        agent_env_state = None
+
     return _suggest.build_suggestions(
         sub=sub,
         autostart_inspect=autostart_inspect,
@@ -1803,6 +1834,7 @@ def _build_doctor_suggestions(backend, config, engine_ver, *,
         known_versions=known_versions,
         engine_config_dir=expected_cfg_dir,
         proxies_payload=proxies_payload,
+        agent_env_state=agent_env_state,
         since=since_filter,
         apply_user_ignore=True,
     )
@@ -2176,6 +2208,55 @@ _SUGGESTION_DOCS: dict[str, dict] = {
         ),
         "verify": "proxyctl check --json | jq '.data.stages.groups'",
         "next_commands": ["bench", "check", "status"],
+    },
+    # ── agent 代理变量 3 条（v0.5.14+）──────────────────────────────────
+    "agent_env.dead_endpoint": {
+        "summary": (
+            "agent 代理变量契约文件（~/.config/proxyctl/agent-env.sh）指向的出口"
+            "已经没在监听——通常是引擎停了、兜底 daemon 也停了，文件没跟上。"
+            "此时 agent CLI 的请求会打到死口（连接被拒），比直连更糟。"
+        ),
+        "file": "~/.config/proxyctl/agent-env.sh",
+        "edit": (
+            "  # 自动：按当前存活出口重写（没有存活出口则删文件）\n"
+            "  proxyctl env --write\n"
+            "  # 手动：新开的 shell 里清掉旧变量\n"
+            "  eval \"$(proxyctl env --unset)\""
+        ),
+        "verify": "proxyctl status --json | jq .data.agent_env",
+        "next_commands": ["status", "env", "doctor"],
+    },
+    "agent_env.missing": {
+        "summary": (
+            "引擎/兜底出口活着，但没有生成 agent 代理变量契约文件。"
+            "部分 agent CLI（omp 的 anthropic-messages transport）不读通用 "
+            "HTTPS_PROXY，只认 PI_PROXY_<PROVIDER>，缺变量就会直连并在受限地区"
+            "拿到 403。"
+        ),
+        "file": "~/.config/proxyctl/agent-env.sh",
+        "edit": (
+            "  # 写文件（生命周期命令 start/restart/fix 也会自动刷新）\n"
+            "  proxyctl env --write\n"
+            "  # 让新 shell 自动带上：注入 shell rc\n"
+            "  proxyctl env --install"
+        ),
+        "verify": "proxyctl status --json | jq .data.agent_env",
+        "next_commands": ["env", "status", "doctor"],
+    },
+    "agent_env.not_sourced": {
+        "summary": (
+            "契约文件已生成，但 shell rc 没 source 它——新开的终端 / agent 进程"
+            "不会带上 PI_PROXY_*，等于没托管。"
+        ),
+        "file": "~/.zprofile",
+        "edit": (
+            "  # 幂等注入 marker 块（可 --uninstall 摘掉）\n"
+            "  proxyctl env --install\n"
+            "  # 或手工加一行：\n"
+            "  # . ~/.config/proxyctl/agent-env.sh"
+        ),
+        "verify": "proxyctl status --json | jq .data.agent_env.shell_rc_installed",
+        "next_commands": ["env", "status"],
     },
 }
 

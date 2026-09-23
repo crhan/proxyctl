@@ -130,6 +130,15 @@ def _gather_ports(claude_proxy_label: str,
             "cp_pid": cp_pid, "cp_port": cp_port}
 
 
+def _gather_agent_env(config: dict) -> dict:
+    """采集 agent 代理变量托管状态（契约文件 + 出口存活 + shell rc 注入）。"""
+    try:
+        from proxyctl import agent_env as _ae
+        return _ae.status(config)
+    except Exception as e:  # pragma: no cover - 防御性
+        return {"error": str(e)}
+
+
 def _gather_tun(engine, daemon_up: bool) -> dict:
     """采集 TUN 专属数据（Linux 最小集不启用 TUN，返回空数据）。"""
     tun_iface = addr = mtu = ""
@@ -523,6 +532,7 @@ def cmd_status(engine, api: str, api_secret: str,
         f_proxy   = pool.submit(_gather_proxy_settings)
         f_dns     = pool.submit(_gather_dns, dns_lock_label)
         f_network = pool.submit(_gather_network, engine)
+        f_agent   = pool.submit(_gather_agent_env, config)
 
         # 插件 status_sections：每个 section 并发跑 gather
         ctx = {"engine": engine.name, "mode": mode, "config": config}
@@ -537,6 +547,7 @@ def cmd_status(engine, api: str, api_secret: str,
         d_proxy   = f_proxy.result()
         d_dns     = f_dns.result()
         d_network = f_network.result()
+        d_agent_env = f_agent.result()
         daemon_up = d_engine["daemon_up"]
 
         d_sections: dict = {}
@@ -565,6 +576,7 @@ def cmd_status(engine, api: str, api_secret: str,
             "network": d_network,
             "sections": _jsonify(d_sections),
             "env": env_proxy,
+            "agent_env": d_agent_env,
             "mode": mode,
             "backend": engine.name,
             "subscription": sub_data,
@@ -584,6 +596,7 @@ def cmd_status(engine, api: str, api_secret: str,
     _print_proxy_settings(d_proxy, daemon_up, mode)
     _print_dns(daemon_up, d_dns, mode)
     _print_network(d_network)
+    _print_agent_env(d_agent_env)
     # 插件 sections（VPN/Tailscale/TUIC relay 等本机特例都走这里）
     for section in sections:
         try:
@@ -600,6 +613,34 @@ def cmd_status(engine, api: str, api_secret: str,
     if env_proxy:
         print(f"\n{BOLD}ENV{NC}")
         print(f"  {' '.join(f'{k}={v}' for k, v in env_proxy.items())}")
+
+
+def _print_agent_env(st: dict) -> None:
+    """打印 agent 代理变量托管一段（PI_PROXY_*）。文件不存在不报错，只提示。"""
+    if st.get("error"):
+        return
+    print(f"\n{BOLD}AGENT ENV{NC}")
+    if not st.get("enabled"):
+        print(f"  {DIM}—{NC} 未启用（config.agent_env.enabled = false）")
+        return
+
+    vars_txt = " ".join(f"{k}={v}" for k, v in (st.get("vars") or {}).items())
+    if not st.get("present"):
+        print(f"  {YELLOW}—{NC} 契约文件未生成：{DIM}{st.get('path')}{NC}")
+        if st.get("expected_endpoint"):
+            print(f"     {DIM}引擎在线；运行 {CYAN}proxyctl env --write{DIM} 或重启一次即可{DIM}{NC}")
+        return
+
+    if st.get("stale"):
+        print(f"  {RED}✗{NC} {vars_txt}  {DIM}(出口不可达){NC}")
+    else:
+        print(f"  {GREEN}✓{NC} {vars_txt}  {DIM}({st.get('source')}){NC}")
+    if not st.get("in_sync") and st.get("expected_endpoint"):
+        print(f"     {YELLOW}期望指向 {st['expected_endpoint']}"
+              f"，运行 {CYAN}proxyctl env --write{YELLOW} 刷新{NC}")
+    if not st.get("shell_rc_installed"):
+        print(f"     {YELLOW}!{NC} {st.get('shell_rc')} 未注入 source 块"
+              f"（新 shell 不会生效）→ {CYAN}proxyctl env --install{NC}")
 
 
 def _print_subscription(sub: dict) -> None:

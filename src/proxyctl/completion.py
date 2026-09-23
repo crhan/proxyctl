@@ -155,7 +155,7 @@ _proxyctl_complete() {{
 
     # env 特有 flag
     if [ "$first" = "env" ]; then
-        COMPREPLY=( $(compgen -W "--unset" -- "${{cur}}") )
+        COMPREPLY=( $(compgen -W "--unset --write --install --uninstall --shell-rc --dry-run -n --json --help" -- "${{cur}}") )
         return 0
     fi
 
@@ -233,7 +233,7 @@ _proxyctl() {{
           fi
           ;;
         log)         _values 'flag' --tail --no-follow --json ;;
-        env)         _values 'flag' --unset ;;
+        env)         _values 'flag' --unset --write --install --uninstall --shell-rc --dry-run --json ;;
       esac
       ;;
   esac
@@ -340,6 +340,22 @@ def _gen_fish() -> str:
     lines.append(
         "complete -c proxyctl -n '__fish_seen_subcommand_from env' "
         "-l unset -d '清除代理环境变量'"
+    )
+    lines.append(
+        "complete -c proxyctl -n '__fish_seen_subcommand_from env' "
+        "-l write -d '写 PI_PROXY_* 契约文件（按当前出口）'"
+    )
+    lines.append(
+        "complete -c proxyctl -n '__fish_seen_subcommand_from env' "
+        "-l install -d '写文件 + 注入 shell rc（幂等）'"
+    )
+    lines.append(
+        "complete -c proxyctl -n '__fish_seen_subcommand_from env' "
+        "-l uninstall -d '摘掉 shell rc 块 + 删契约文件'"
+    )
+    lines.append(
+        "complete -c proxyctl -n '__fish_seen_subcommand_from env' "
+        "-l shell-rc -d '覆盖 shell rc 路径'"
     )
     return "\n".join(lines) + "\n"
 

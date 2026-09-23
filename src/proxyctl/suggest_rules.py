@@ -1,12 +1,15 @@
 """proxyctl.suggest_rules — 安全/引擎/数据/分组类规则（v0.5.0+）。
 
-容纳 controller / engine / data / proxy_group 四组规则的纯函数：
+容纳 controller / engine / data / proxy_group / agent_env 五组规则的纯函数：
   controller.empty_secret      — external-controller secret == ""
   controller.weak_secret       — secret 长度 < 16
   controller.public_bind       — external-controller bind 到 0.0.0.0 / 公网
   engine.outdated              — 当前版本 < known_versions.json 的 safe_min
   data.geo_stale               — geoip.dat / geosite.dat mtime > 30 天
   proxy_group.mostly_dead      — 单组 ≥ 70% 节点 delay==0（多组各自指纹）
+  agent_env.dead_endpoint      — PI_PROXY_* 契约文件指向的出口已停
+  agent_env.missing            — 有存活出口但契约文件没生成
+  agent_env.not_sourced        — 契约文件在但 shell rc 没 source 它
 
 每条规则都是纯函数：输入预解析过的字典，输出 Suggestion list。
 读 mihomo config / known_versions.json / geo 文件 mtime / /proxies API
@@ -457,3 +460,95 @@ def geo_rules(engine_config_dir: str | None,
         "doc": "suggestion:data.geo_stale",
         "since": "0.5.0",
     }]
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# agent_env.* — agent CLI 的 PI_PROXY_* 契约文件（v0.5.14+）
+# ────────────────────────────────────────────────────────────────────────────
+
+AGENT_ENV_WRITE_CMD = "proxyctl env --write"
+AGENT_ENV_INSTALL_CMD = "proxyctl env --install"
+
+
+def agent_env_rules(state: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """agent 代理变量契约文件规则。输入 = proxyctl.agent_env.status()。
+
+    三条：
+      agent_env.dead_endpoint — 文件指向的出口已不可达（引擎/兜底 daemon 都停了）
+      agent_env.missing       — 有存活出口但文件没生成（agent 走直连）
+      agent_env.not_sourced   — 文件在，但 shell rc 没注入 source 块（新 shell 不生效）
+
+    state 为 None / 未启用 / 采集失败时整组跳过（不制造噪音）。
+    """
+    if not state or state.get("error") or not state.get("enabled"):
+        return []
+
+    out: list[dict[str, Any]] = []
+    present = bool(state.get("present"))
+    expected = state.get("expected_endpoint")
+    path = state.get("path")
+    vars_map = state.get("vars") or {}
+
+    if present and not state.get("reachable"):
+        out.append({
+            "id": "agent_env.dead_endpoint",
+            "severity": "warn",
+            "actor": "agent",
+            "title": (f"agent 代理变量指向已停的出口：{state.get('endpoint')}"
+                      f"（{path}）"),
+            "evidence": {
+                "path": path,
+                "endpoint": state.get("endpoint"),
+                "source": state.get("source"),
+                "reachable": False,
+                "expected_endpoint": expected,
+                "vars": vars_map,
+            },
+            "inspect_command": "proxyctl status --json | jq .data.agent_env",
+            "fix_command": AGENT_ENV_WRITE_CMD,
+            "auto_fixable": True,
+            "doc": "suggestion:agent_env.dead_endpoint",
+            "since": "0.5.14",
+        })
+
+    if not present and expected:
+        out.append({
+            "id": "agent_env.missing",
+            "severity": "advisory",
+            "actor": "agent",
+            "title": (f"有存活出口（{expected}）但未生成 agent 代理变量："
+                      f"agent CLI（omp 等）会走直连"),
+            "evidence": {
+                "path": path,
+                "expected_endpoint": expected,
+                "expected_source": state.get("expected_source"),
+                "providers": state.get("providers") or [],
+            },
+            "inspect_command": "proxyctl status --json | jq .data.agent_env",
+            "fix_command": AGENT_ENV_WRITE_CMD,
+            "auto_fixable": True,
+            "doc": "suggestion:agent_env.missing",
+            "since": "0.5.14",
+        })
+
+    if present and not state.get("shell_rc_installed"):
+        out.append({
+            "id": "agent_env.not_sourced",
+            "severity": "advisory",
+            "actor": "agent",
+            "title": (f"{state.get('shell_rc')} 未 source {path}"
+                      f"：新开的 shell / agent 不会带上 PI_PROXY_*"),
+            "evidence": {
+                "path": path,
+                "shell_rc": state.get("shell_rc"),
+                "shell_rc_installed": False,
+                "vars": vars_map,
+            },
+            "inspect_command": "proxyctl status --json | jq .data.agent_env",
+            "fix_command": AGENT_ENV_INSTALL_CMD,
+            "auto_fixable": True,
+            "doc": "suggestion:agent_env.not_sourced",
+            "since": "0.5.14",
+        })
+
+    return out

@@ -18,6 +18,7 @@ import sys
 import time
 
 from proxyctl import _io
+from proxyctl import agent_env
 from proxyctl._io import maybe_disable_module_colors
 maybe_disable_module_colors(__name__)
 
@@ -55,6 +56,10 @@ DEFAULTS = {
     # 个人附加的 NO_PROXY 项（追加到默认 localhost/私网集合之后）
     # 例: ["corp.example.com", "intranet.local"] 或 "corp.example.com,intranet.local"
     "no_proxy_extra": [],
+    # agent CLI 的 provider 级代理变量托管（PI_PROXY_<PROVIDER>）。
+    # 通用 HTTP(S)_PROXY 之外，部分 agent transport（如 omp 的 anthropic-messages）
+    # 只认 PI_PROXY_*；proxyctl 按生命周期把出口写进 agent-env.sh。
+    "agent_env": dict(agent_env.DEFAULTS),
 }
 
 SCRIPTS_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -656,6 +661,7 @@ def cmd_start(backend: Backend, config: dict, registry=None):
     _apply_route_hooks(registry,
                        {"engine": backend.name, "config": config, "phase": "start"},
                        "activate")
+    _agent_env_sync(config)
 
 
 # ── 命令：stop ────────────────────────────────────────────────────────────────
@@ -673,6 +679,7 @@ def cmd_stop(backend: Backend, config: dict, registry=None):
 
     service_stop(backend)
     print(f"{backend.name} stopped")
+    _agent_env_sync(config)
 
 
 # ── 命令：restart ─────────────────────────────────────────────────────────────
@@ -704,6 +711,7 @@ def cmd_restart(backend: Backend, config: dict, *, clean: bool = False, registry
     _apply_route_hooks(registry,
                        {"engine": backend.name, "config": config, "phase": "restart"},
                        "activate")
+    _agent_env_sync(config)
 
 
 # ── 命令：fix ─────────────────────────────────────────────────────────────────
@@ -793,6 +801,8 @@ def cmd_fix(backend: Backend, config: dict, registry=None):
         else:
             print(f"{YELLOW}引擎已停止，无需修复。{NC}")
             print(f"  使用 {BOLD}proxyctl start{NC} 启动引擎")
+
+    _agent_env_sync(config)
 
 
 # ── 命令：recover ─────────────────────────────────────────────────────────────
@@ -1136,6 +1146,7 @@ def cmd_engine(backend: Backend, target: str, config: dict):
         print("系统代理 → 127.0.0.1:7890")
     print(f"{GREEN}引擎已切换到 {new_backend.name}{NC}")
     print(f"{CYAN}提示: 把 engine: {target} 写到 ~/.config/proxyctl/config.yaml 保持持久{NC}")
+    _agent_env_sync(config)
 
 
 def cmd_daemon(name: str, subcmd: str, config: dict):
@@ -1224,6 +1235,7 @@ def cmd_daemon(name: str, subcmd: str, config: dict):
             print(f"{GREEN}✓{NC} {name} started (127.0.0.1:{port})")
         else:
             print(f"{GREEN}✓{NC} {name} started")
+        _agent_env_sync(config)
 
     elif subcmd == "stop":
         if launchctl_running(full_label, sudo=True):
@@ -1232,11 +1244,13 @@ def cmd_daemon(name: str, subcmd: str, config: dict):
             print(f"{name} stopped")
         else:
             print(f"{name} 未在运行")
+        _agent_env_sync(config)
 
     elif subcmd == "restart":
         argvs = _daemon_subprocess_argvs("restart", plist_src, plist_dst, full_label)
         run(argvs[0], sudo=True)  # launchctl kickstart -k
         print(f"{name} restarted")
+        _agent_env_sync(config)
 
     elif subcmd == "log":
         if not log_path:
@@ -1352,24 +1366,46 @@ def _normalize_no_proxy_extra(extra) -> list[str]:
     return out
 
 
-def cmd_env(config: dict, unset: bool = False):
-    """输出设置/清除代理环境变量的 shell 语句。
+def _env_flag_value(args: list, name: str) -> str | None:
+    """取 `--flag value` / `--flag=value` 的值；未给出返回 None。"""
+    for i, a in enumerate(args or []):
+        if a == name and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith(name + "="):
+            return a.split("=", 1)[1]
+    return None
 
-    用法：
-        eval $(proxyctl env)         # 设置代理
-        eval $(proxyctl env --unset) # 清除代理
 
-    Args:
-        config: 全局配置字典
-        unset: True 则输出 unset 语句
+def _config_with_shell_rc(config: dict, shell_rc: str) -> dict:
+    """把 --shell-rc 覆盖合进 config.agent_env（不改原 dict）。"""
+    merged = dict(config.get("agent_env") or {})
+    merged["shell_rc"] = shell_rc
+    out = dict(config)
+    out["agent_env"] = merged
+    return out
+
+
+def _env_mode(args: list) -> tuple[str, str | None]:
+    """解析 `proxyctl env` 的工作模式 → (mode, shell_rc)。
+
+    mode ∈ print | unset | write | install | uninstall。
+    优先级：uninstall > install > write > unset(off) > print。
+    plan（_plan_env）与实际执行（cmd_env）共用这一处判定。
     """
-    if unset:
-        for var in ("http_proxy", "https_proxy", "all_proxy",
-                     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
-                     "no_proxy", "NO_PROXY"):
-            print(f"unset {var};")
-        return
+    argv = list(args or [])
+    shell_rc = _env_flag_value(argv, "--shell-rc")
+    for flag, mode in (("--uninstall", "uninstall"),
+                       ("--install", "install"),
+                       ("--write", "write")):
+        if flag in argv:
+            return mode, shell_rc
+    if "--unset" in argv or "off" in argv:
+        return "unset", None
+    return "print", None
 
+
+def _env_generic_vars(config: dict) -> dict[str, str]:
+    """通用代理环境变量（http_proxy / https_proxy / all_proxy / no_proxy 家族）。"""
     port = int(config.get("proxy_port", DEFAULTS["proxy_port"]))  # mixed-port
     proxy_http = f"http://127.0.0.1:{port}"
     proxy_socks = f"socks5://127.0.0.1:{port}"
@@ -1379,14 +1415,137 @@ def cmd_env(config: dict, unset: bool = False):
     if extra:
         no_proxy = no_proxy + "," + ",".join(extra)
 
-    for var in ("http_proxy", "HTTP_PROXY"):
-        print(f"export {var}={proxy_http};")
-    for var in ("https_proxy", "HTTPS_PROXY"):
-        print(f"export {var}={proxy_http};")
+    out: dict[str, str] = {}
+    for var in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"):
+        out[var] = proxy_http
     for var in ("all_proxy", "ALL_PROXY"):
-        print(f"export {var}={proxy_socks};")
+        out[var] = proxy_socks
     for var in ("no_proxy", "NO_PROXY"):
-        print(f"export {var}={no_proxy};")
+        out[var] = no_proxy
+    return out
+
+
+def _env_agent_vars(config: dict) -> tuple[dict[str, str], str | None]:
+    """provider 级变量（PI_PROXY_*）→ (vars, endpoint)。
+
+    出口按当前存活情况解析（引擎 → 兜底 daemon）。无出口 / 未启用时返回空 dict，
+    调用方据此输出 unset——否则 eval 之后会残留指向死口的旧值。
+    """
+    cfg = agent_env.resolve(config)
+    if not cfg["enabled"] or not cfg["providers"]:
+        return {}, None
+    endpoint, source = agent_env.target(config, cfg)
+    if not endpoint:
+        return {}, None
+    return {name: endpoint for name in agent_env.var_names(cfg)}, endpoint
+
+
+def _print_agent_env_sync(st: dict, *, verbose: bool = False) -> None:
+    """生命周期命令 / env --write 的契约文件一行摘要。"""
+    path = st.get("path", "")
+    action = st.get("action")
+    if action in ("written", "unchanged"):
+        pairs = " ".join(f"{k}={v}" for k, v in (st.get("vars") or {}).items())
+        if action == "written":
+            print(f"  {GREEN}✓{NC} agent env → {pairs}  {DIM}({path}){NC}")
+        elif verbose:
+            print(f"  {DIM}agent env 已是最新 → {pairs} ({path}){NC}")
+    elif action == "removed":
+        print(f"  {YELLOW}—{NC} agent env 已清除（无存活出口）：{DIM}{path}{NC}")
+    elif verbose:
+        print(f"  {DIM}agent env 未启用 / 无 provider，无需写入{NC}")
+
+
+def _agent_env_sync(config: dict) -> None:
+    """生命周期命令刷新契约文件：失败只 warning，绝不中断主流程。"""
+    try:
+        st = agent_env.sync(config)
+    except Exception as e:  # pragma: no cover - 防御性
+        print(f"{YELLOW}!{NC} agent env 刷新失败：{e}", file=sys.stderr)
+        return
+    _print_agent_env_sync(st)
+
+
+def cmd_env(config: dict, unset: bool = False, *, mode: str | None = None,
+            shell_rc: str | None = None) -> None:
+    """proxyctl env [...] — 代理环境变量的打印 / 清除 / 托管。
+
+    用法：
+        eval "$(proxyctl env)"          # 当前 shell 设置（通用变量 + PI_PROXY_*）
+        eval "$(proxyctl env --unset)"  # 当前 shell 清除
+        proxyctl env --write            # 写 ~/.config/proxyctl/agent-env.sh
+                                        # （start/stop/restart/fix/daemon 也会自动刷新）
+        proxyctl env --install          # --write + 往 shell rc 注入 source 块（幂等）
+        proxyctl env --uninstall        # 摘掉 source 块 + 删契约文件
+
+    Args:
+        config: 全局配置字典
+        unset: 兼容旧签名；等价于 mode="unset"
+        mode: print | unset | write | install | uninstall（None 时由 unset 推导）
+        shell_rc: 覆盖 config.agent_env.shell_rc（--install/--uninstall 用）
+    """
+    mode = mode or ("unset" if unset else "print")
+    as_json = GLOBAL_FLAGS.get("json", False)
+    if shell_rc:
+        config = _config_with_shell_rc(config, shell_rc)
+    cfg = agent_env.resolve(config)
+
+    if mode in ("write", "install"):
+        st = agent_env.sync(config)
+        shell = (agent_env.install_shell(cfg) if mode == "install" else None)
+        if as_json:
+            _io.emit_json(_io.envelope("env", data={
+                "agent_env": agent_env.status(config),
+                "result": st,
+                "shell": shell,
+            }))
+            return
+        _print_agent_env_sync(st, verbose=True)
+        if shell is not None:
+            print(f"  {GREEN}✓{NC} shell rc {shell['action']}: "
+                  f"{shell['rc']}")
+            if shell["action"] in ("created", "updated"):
+                print(f"  {DIM}新开的 shell 生效；当前 shell 直接 "
+                      f'eval "$(proxyctl env)"{NC}')
+        return
+
+    if mode == "uninstall":
+        shell = agent_env.uninstall_shell(cfg)
+        removed = agent_env.clear()
+        if as_json:
+            _io.emit_json(_io.envelope("env", data={
+                "agent_env": agent_env.status(config),
+                "shell": shell,
+                "file_removed": removed,
+            }))
+            return
+        print(f"  {GREEN}✓{NC} shell rc {shell['action']}: {shell['rc']}")
+        print(f"  {GREEN}✓{NC} 契约文件{'已删除' if removed else '本就不存在'}："
+              f"{agent_env.env_path()}")
+        return
+
+    if mode == "unset":
+        for var in list(_env_generic_vars(config)) + agent_env.var_names(cfg):
+            print(f"unset {var};")
+        return
+
+    agent_vars, _endpoint = _env_agent_vars(config)
+    if as_json:
+        _io.emit_json(_io.envelope("env", data={
+            "vars": {**_env_generic_vars(config), **agent_vars},
+            "agent_env": agent_env.status(config),
+        }))
+        return
+
+    for var, value in _env_generic_vars(config).items():
+        print(f"export {var}={value};")
+    if agent_vars:
+        for var, value in agent_vars.items():
+            print(f"export {var}={value};")
+    else:
+        # 无存活出口：显式 unset，避免 eval 后残留死口
+        for var in agent_env.var_names(cfg):
+            print(f"unset {var};")
 
 
 # ── 命令：log ─────────────────────────────────────────────────────────────────
@@ -1705,6 +1864,8 @@ def cmd_version_print() -> None:
                 "proxy_group_dead_check":          True,   # 0.5.0: proxy_group.mostly_dead 规则
                 "traffic_snapshot":                True,   # 0.5.6+: active /connections traffic grouping
                 "traffic_history":                 True,   # 0.5.6+: sample/watch/report recorded deltas
+                "agent_env_contract":              True,   # 0.5.14+: PI_PROXY_* 契约文件 + env --write/--install
+                "status_agent_env":                True,   # 0.5.14+: status envelope.data.agent_env
             },
         }
         _io.emit_json(_io.envelope("version", data=data))
@@ -2109,6 +2270,48 @@ def _plan_audit_apply(days: int, backend, config: dict) -> list[dict]:
          "reversible": True,
          "side_effects": ["network-io"]},
     ]
+
+
+def _plan_env(mode: str, path: str, rc: str) -> list[dict]:
+    """env --write / --install / --uninstall 的 plan。
+
+    契约文件路径与 shell rc 由 cli/agent_env 的同一套解析给出，避免 plan 与执行漂移。
+    """
+    write_step = {
+        "action": "fs_write_atomic",
+        "target": path,
+        "summary": f"按当前出口刷新（或清除）{path}（tmp + rename，内容不变则跳过）",
+        "reversible": True,
+        "side_effects": ["config-write"],
+    }
+    rc_write_step = {
+        "action": "fs_write_atomic",
+        "target": rc,
+        "summary": f"在 {rc} 注入/替换 source 块（marker 幂等）",
+        "reversible": True,
+        "side_effects": ["config-write"],
+    }
+    rc_remove_step = {
+        "action": "fs_write_atomic",
+        "target": rc,
+        "summary": f"从 {rc} 摘掉 source 块（marker 幂等）",
+        "reversible": True,
+        "side_effects": ["config-write"],
+    }
+    remove_step = {
+        "action": "fs_remove",
+        "target": path,
+        "summary": f"删除契约文件 {path}",
+        "reversible": False,
+        "side_effects": ["config-write"],
+    }
+    if mode == "write":
+        return [write_step]
+    if mode == "install":
+        return [write_step, rc_write_step]
+    if mode == "uninstall":
+        return [rc_remove_step, remove_step]
+    return []
 
 
 def _plan_config_set(path: str, key: str, value_repr: str) -> list[dict]:
@@ -2798,8 +3001,17 @@ def _h_dns_lock(ctx):
                     ctx["config"], ctx["backend"], reload=reload)
 
 def _h_env(ctx):
-    unset = "--unset" in ctx["args"] or "off" in ctx["args"]
-    cmd_env(ctx["config"], unset=unset)
+    mode, shell_rc = _env_mode(ctx["args"])
+    if mode in ("write", "install", "uninstall"):
+        cfg = agent_env.resolve(
+            _config_with_shell_rc(ctx["config"], shell_rc) if shell_rc
+            else ctx["config"])
+        _maybe_dry_run(
+            "env",
+            lambda: _plan_env(mode, agent_env.env_path(),
+                              agent_env.shell_rc_path(cfg)))
+    cmd_env(ctx["config"], unset=(mode == "unset"), mode=mode,
+            shell_rc=shell_rc)
 
 def _h_engine(ctx):
     target = ctx["args"][0] if ctx["args"] else ""

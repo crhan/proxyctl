@@ -175,3 +175,27 @@ def test_fish_completion_includes_log_tail_no_follow(capsys):
             "-l tail") in out
     assert ("complete -c proxyctl -n '__fish_seen_subcommand_from log' "
             "-l no-follow") in out
+
+
+# ── 0.5.14：env 的 PI_PROXY_* 托管 flag ────────────────────────────────────
+def test_bash_completion_includes_env_contract_flags(capsys):
+    completion.cmd_completion(["bash"])
+    out = capsys.readouterr().out
+    for flag in ("--write", "--install", "--uninstall", "--shell-rc"):
+        assert flag in out, f"bash 补全缺 env 的 {flag}"
+
+
+def test_zsh_completion_handles_env_contract_flags(capsys):
+    completion.cmd_completion(["zsh"])
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines() if l.strip().startswith("env)"))
+    for flag in ("--write", "--install", "--uninstall", "--shell-rc"):
+        assert flag in line, f"zsh 补全缺 env 的 {flag}"
+
+
+def test_fish_completion_includes_env_contract_flags(capsys):
+    completion.cmd_completion(["fish"])
+    out = capsys.readouterr().out
+    for flag in ("write", "install", "uninstall", "shell-rc"):
+        assert ("complete -c proxyctl -n '__fish_seen_subcommand_from env' "
+                f"-l {flag}") in out, f"fish 补全缺 env 的 -l {flag}"
