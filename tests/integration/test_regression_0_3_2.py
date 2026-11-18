@@ -200,7 +200,10 @@ def test_dry_run_plan_target_no_placeholder_for_resolved_backend(monkeypatch):
 def test_cli_version_matches_pyproject():
     """v0.3.1 修复：cli.VERSION 不再硬编码，从 importlib.metadata 取。
     回归：cli.VERSION 必须与 pyproject 一致。"""
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10 (pytest installs tomli)
+        import tomli as tomllib
     from pathlib import Path
     pyproject = Path(__file__).resolve().parent.parent.parent / "pyproject.toml"
     py_ver = tomllib.load(open(pyproject, "rb"))["project"]["version"]
