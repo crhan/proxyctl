@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.5.15] — 2026-11-18
+
 ### Fixed
 
 - Linux 上 Mihomo 关闭 TUN 且通过非 53 端口提供独立 DNS 时，
