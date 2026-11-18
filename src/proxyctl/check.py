@@ -40,9 +40,9 @@ def _visible_len(s: str) -> int:
     return len(_ANSI_RE.sub("", s))
 
 
-def _port_listening(port: int) -> bool:
+def _port_listening(port: int, host: str = "127.0.0.1") -> bool:
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+        with socket.create_connection((host, port), timeout=0.5):
             return True
     except OSError:
         return False
@@ -987,12 +987,14 @@ def cmd_check(engine, api: str, api_secret: str,
     from urllib.parse import urlparse
     proxy_port = int(config.get("proxy_port", 7890))
     api_port = urlparse(api).port or 9090
-    dns_hijack = mode in ("tun", "mixed")
-    check_ports = [(53, "dns"), (proxy_port, "proxy"), (api_port, "api")] if dns_hijack \
-                  else [(proxy_port, "proxy"), (api_port, "api")]
+    check_ports = [(proxy_port, "proxy", "127.0.0.1"), (api_port, "api", "127.0.0.1")]
+    if mode in ("tun", "mixed"):
+        from proxyctl.core.dns import independent_dns_listener
+        host, port = independent_dns_listener(mode, engine) or ("127.0.0.1", 53)
+        check_ports.insert(0, (port, "dns", host))
     ok_ports, fail_ports = [], []
-    for port, desc in check_ports:
-        if _port_listening(port):
+    for port, desc, host in check_ports:
+        if _port_listening(port, host):
             ok_ports.append(f"{desc}:{port}")
         else:
             fail_ports.append(f"{desc}:{port}")

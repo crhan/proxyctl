@@ -382,3 +382,33 @@ def test_collect_fail_hints_no_dead_groups_no_hint():
     coll["stages"]["dead_groups"] = []
     hints = check._collect_fail_hints(coll, dns_bad=False, failed=True)
     assert not any("mostly dead" in h for h in hints)
+
+
+@pytest.mark.parametrize("available", [True, False])
+def test_check_linux_dedicated_dns_endpoint(tmp_path, monkeypatch, capsys, available):
+    import json
+    import subprocess
+    import sys
+    from types import SimpleNamespace
+    from proxyctl import explain, suggest_rules
+
+    path = tmp_path / "config.yaml"
+    path.write_text("dns:\n  enable: true\n  listen: 192.0.2.1:1053\n  enhanced-mode: fake-ip\n")
+    engine = SimpleNamespace(name="mihomo", unit="mihomo.service", config_file=str(path))
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(check, "IS_MACOS", False)
+    monkeypatch.setattr(explain, "GLOBAL_FLAGS_REF", lambda: {"json": True})
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kw:
+                        subprocess.CompletedProcess(argv, 0, "1" if argv[0] == "systemctl" else ""))
+    monkeypatch.setattr(check, "_proxy_groups_section", lambda *args, **kw: None)
+    monkeypatch.setattr(suggest_rules, "fetch_proxies", lambda *args, **kw: None)
+    def listen(port, host):
+        if port in (7890, 9090):
+            return host == "127.0.0.1"
+        assert (host, port) == ("192.0.2.1", 1053)
+        return available
+    monkeypatch.setattr(check, "_port_listening", listen)
+    with pytest.raises(SystemExit):
+        check.cmd_check(engine, "http://localhost:9090", "", {}, "mixed")
+    ports = json.loads(capsys.readouterr().out)["data"]["stages"]["basic"]["ports"]
+    assert "dns:1053" in ports["ok" if available else "fail"]

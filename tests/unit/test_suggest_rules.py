@@ -330,17 +330,20 @@ def test_proxy_group_rules_non_dispatch_type_skipped():
     assert suggest_rules.proxy_group_rules(payload) == []
 
 
-def test_proxy_group_rules_empty_history_counts_as_dead():
-    payload = {"proxies": {
-        "GROUP1": _mk_group("GROUP1", ["n1", "n2", "n3", "n4"]),
-        "n1": {"type": "Shadowsocks", "history": []},  # 无历史 = 死
-        "n2": {"type": "Shadowsocks", "history": []},
-        "n3": {"type": "Shadowsocks", "history": []},
-        "n4": _mk_node(180),
-    }}
-    out = suggest_rules.proxy_group_rules(payload)
-    assert len(out) == 1
-    assert out[0]["evidence"]["dead_count"] == 3
+def test_unmeasured_group_is_not_dead():
+    nodes = {f"node{i}": {"type": "Shadowsocks", "history": []} for i in range(28)}
+    group = _mk_group("GLOBAL", list(nodes))
+    assert suggest_rules.proxy_group_rules({"proxies": {"GLOBAL": group, **nodes}}) == []
+
+
+def test_only_explicit_failed_samples_count():
+    nodes = {f"n{i}": _mk_node(0) for i in range(7)}
+    nodes.update({"missing": {"type": "Shadowsocks"}, "healthy": _mk_node(42),
+                  "malformed": {"type": "Shadowsocks", "history": [{}]}})
+    group = _mk_group("GLOBAL", list(nodes))
+    warning, = suggest_rules.proxy_group_rules({"proxies": {"GLOBAL": group, **nodes}})
+    assert warning["evidence"]["dead_count"] == 7
+    assert warning["evidence"]["dead_pct_at_check"] == 70.0
 
 
 def test_proxy_group_rules_multiple_groups_separate_suggestions():

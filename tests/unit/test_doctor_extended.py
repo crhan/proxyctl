@@ -162,7 +162,8 @@ def test_linux_mixed_dns_preserves_system_dns_check(tmp_path, monkeypatch, port,
         f"tun:\n  enable: {tun_enabled}\ndns:\n  enable: true\n  listen: 127.0.0.1:{port}\n"
     )
     monkeypatch.setattr(explain.sys, "platform", "linux")
-    assert not explain._uses_independent_host_dns("mixed", MihomoBackend({"config_dir": str(tmp_path)}))
+    from proxyctl.core.dns import independent_dns_listener
+    assert not independent_dns_listener("mixed", MihomoBackend({"config_dir": str(tmp_path)}))
 
 
 @pytest.mark.parametrize("returncode,output,expected", [(0, b"192.0.2.1 STREAM", True),
