@@ -1631,7 +1631,8 @@ def cmd_doctor(args: list, backend, config) -> None:
     else:
         engine_up = bool(service_running(backend))
         port_listen = _tcp_open("127.0.0.1", port)
-        dns_ok = _dns_check_ok(mode_str)
+        probe_host_dns = _uses_independent_host_dns(mode_str, backend)
+        dns_ok = _host_dns_resolves() if probe_host_dns else _dns_check_ok(mode_str)
         system_proxy_ok = _system_proxy_points_to_loopback(port)
         connectivity_ok = (_quick_connectivity(api_base, port)
                            if engine_up else False)
@@ -1712,6 +1713,8 @@ def cmd_doctor(args: list, backend, config) -> None:
         print(f"  {icon(port_listen)}  port_listen      (127.0.0.1:{port})")
         dns_desc = ("proxy 模式无需 DNS 劫持" if mode_str == "proxy"
                     else "系统 DNS 含 127.0.0.1")
+        if probe_host_dns:
+            dns_desc = "主机系统解析器可解析 example.com"
         print(f"  {icon(dns_ok)}  dns_ok           ({dns_desc})")
         print(f"  {icon(system_proxy_ok)}  system_proxy_ok  (macOS HTTP/HTTPS proxy)")
         print(f"  {icon(connectivity_ok)}  connectivity_ok  (https://www.google.com via proxy)")
@@ -1831,6 +1834,32 @@ def _dns_points_to_loopback() -> bool:
             text = f.read()
         return "127.0.0.1" in text or "::1" in text
     except OSError:
+        return False
+
+
+def _uses_independent_host_dns(mode, backend):
+    if sys.platform != "linux" or mode != "mixed" or backend.name != "mihomo":
+        return False
+    import yaml
+    try:
+        with open(backend.config_file) as config_file:
+            config = yaml.safe_load(config_file)
+        tun = config.get("tun", {})
+        dns = config.get("dns", {})
+        listen = dns.get("listen", "")
+        port = int(listen.rsplit(":", 1)[1])
+        return (tun.get("enable", False) is False and dns.get("enable") is True
+                and 0 < port <= 65535 and port != 53)
+    except (AttributeError, IndexError, OSError, TypeError, ValueError, yaml.YAMLError):
+        return False
+
+
+def _host_dns_resolves():
+    try:
+        result = subprocess.run(["getent", "ahosts", "example.com"],
+                                capture_output=True, timeout=4)
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
         return False
 
 
