@@ -26,7 +26,10 @@ import pytest
 
 
 def _pyproject_version() -> str:
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10 (pytest installs tomli)
+        import tomli as tomllib
     pyproject = Path(__file__).resolve().parent.parent.parent / "pyproject.toml"
     return tomllib.load(open(pyproject, "rb"))["project"]["version"]
 

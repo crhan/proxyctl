@@ -385,11 +385,11 @@ def proxy_group_rules(proxies_payload: dict[str, Any] | None) -> list[dict[str, 
             if not isinstance(node, dict):
                 continue
             history = node.get("history") or []
-            if not history:
-                dead += 1
+            if not isinstance(history, list) or not history:
                 continue
             last = history[-1] if isinstance(history[-1], dict) else {}
-            if last.get("delay", 0) == 0:
+            delay = last.get("delay")
+            if type(delay) in (int, float) and delay == 0:
                 dead += 1
         dead_pct = (dead / len(leaves)) * 100.0
         if dead_pct >= DEAD_PCT_THRESHOLD:
