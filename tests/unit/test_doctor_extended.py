@@ -136,3 +136,44 @@ def test_doctor_lock_path_strings_end_with_lock_name(backend, config,
     for name, path in data["lock_path"].items():
         assert path.endswith(f".lock.{name}"), \
             f"lock_path[{name!r}] = {path!r} 不符合命名"
+
+
+@pytest.mark.parametrize("resolved", [True, False])
+def test_linux_mixed_dns_uses_host_resolver(tmp_path, config, capsys, monkeypatch, resolved):
+    (tmp_path / "mihomo").mkdir()
+    (tmp_path / "mihomo" / "config.yaml").write_text(
+        "dns:\n  enable: true\n  listen: 192.0.2.1:1053\n  enhanced-mode: fake-ip\n"
+    )
+    backend = MihomoBackend({"config_dir": str(tmp_path)})
+    _patch_doctor_probes(monkeypatch, mode="mixed")
+    monkeypatch.setattr(explain.sys, "platform", "linux")
+    monkeypatch.setattr(explain, "_host_dns_resolves", lambda: resolved)
+    monkeypatch.setattr(explain, "_dns_points_to_loopback", lambda: pytest.fail("wrong probe"))
+    explain.set_global_flags({"json": True})
+    with pytest.raises(SystemExit):
+        explain.cmd_doctor(["--no-suggest"], backend, config)
+    assert json.loads(capsys.readouterr().out)["data"]["dns_ok"] is resolved
+
+
+@pytest.mark.parametrize("port,tun_enabled", [(53, "false"), (1053, "true")])
+def test_linux_mixed_dns_preserves_system_dns_check(tmp_path, monkeypatch, port, tun_enabled):
+    (tmp_path / "mihomo").mkdir()
+    (tmp_path / "mihomo" / "config.yaml").write_text(
+        f"tun:\n  enable: {tun_enabled}\ndns:\n  enable: true\n  listen: 127.0.0.1:{port}\n"
+    )
+    monkeypatch.setattr(explain.sys, "platform", "linux")
+    assert not explain._uses_independent_host_dns("mixed", MihomoBackend({"config_dir": str(tmp_path)}))
+
+
+@pytest.mark.parametrize("returncode,output,expected", [(0, b"192.0.2.1 STREAM", True),
+                                                      (0, b"", False), (2, b"", False)])
+def test_host_resolver_result(monkeypatch, returncode, output, expected):
+    import subprocess
+
+    def lookup(argv, *, capture_output, timeout):
+        assert argv == ["getent", "ahosts", "example.com"]
+        assert capture_output and timeout > 0
+        return subprocess.CompletedProcess(argv, returncode, output)
+
+    monkeypatch.setattr(explain.subprocess, "run", lookup)
+    assert explain._host_dns_resolves() is expected

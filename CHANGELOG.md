@@ -5,6 +5,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Linux 上 Mihomo 关闭 TUN 且通过非 53 端口提供独立 DNS 时，
+  `proxyctl doctor` 在 mixed 模式下实际测试主机解析，避免把正常的系统 DNS 误报为异常。
+
 ## [0.5.14] — 2026-09-23
 
 ### Added
